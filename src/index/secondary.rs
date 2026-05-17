@@ -166,7 +166,10 @@ mod tests {
             ..IndexFile::empty()
         };
         let s = Secondary::build(&idx);
-        assert!(!s.by_name.contains_key("bisq"), "pkgbase must not leak into by_name");
+        assert!(
+            !s.by_name.contains_key("bisq"),
+            "pkgbase must not leak into by_name"
+        );
         assert_eq!(s.by_pkgbase.get("bisq").copied(), Some(0));
         assert_eq!(s.by_name.get("bisq-desktop").copied(), Some(0));
     }

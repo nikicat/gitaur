@@ -114,11 +114,7 @@ pub fn resolve(
                     .map(|d| secondary::strip_version_constraint(d).to_string())
                     .filter(|s| !s.is_empty())
                     .collect();
-                let all: Vec<String> = runtime
-                    .iter()
-                    .chain(build_time.iter())
-                    .cloned()
-                    .collect();
+                let all: Vec<String> = runtime.iter().chain(build_time.iter()).cloned().collect();
                 all_edges.insert(pkgbase.clone(), all.clone());
                 // make_edges entry is finalised once we know which deps
                 // resolved to AUR pkgbases (need pkgname → pkgbase map).
@@ -395,24 +391,14 @@ mod tests {
     fn user_named_repo_target_is_direct_even_when_also_dep() {
         // foo is a repo pkg and also a makedep of an AUR pkg a. User asked
         // for foo explicitly → direct_repo (not transitive_repo).
-        let plan = run(
-            &["foo", "a"],
-            vec![entry("a", &[], &["foo"])],
-            &["foo"],
-        )
-        .unwrap();
+        let plan = run(&["foo", "a"], vec![entry("a", &[], &["foo"])], &["foo"]).unwrap();
         assert_eq!(plan.direct_repo, vec!["foo".to_string()]);
         assert!(plan.transitive_repo.is_empty());
     }
 
     #[test]
     fn unsolicited_repo_dep_is_transitive() {
-        let plan = run(
-            &["a"],
-            vec![entry("a", &[], &["foo"])],
-            &["foo"],
-        )
-        .unwrap();
+        let plan = run(&["a"], vec![entry("a", &[], &["foo"])], &["foo"]).unwrap();
         assert!(plan.direct_repo.is_empty());
         assert_eq!(plan.transitive_repo, vec!["foo".to_string()]);
     }
@@ -423,10 +409,7 @@ mod tests {
     fn cycle_in_makedepends_errors() {
         let err = run(
             &["a"],
-            vec![
-                entry("a", &[], &["b"]),
-                entry("b", &[], &["a"]),
-            ],
+            vec![entry("a", &[], &["b"]), entry("b", &[], &["a"])],
             &[],
         )
         .unwrap_err();

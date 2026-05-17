@@ -29,7 +29,13 @@ fn bootstrap_clone_lands_refs_under_refs_heads() {
         git(&["commit", "-q", "-m", branch], &src);
     }
     git(
-        &["clone", "-q", "--bare", src.to_str().unwrap(), bare.to_str().unwrap()],
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            src.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
         root.path(),
     );
 

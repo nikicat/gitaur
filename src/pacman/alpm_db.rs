@@ -16,10 +16,9 @@ use tracing::{debug, instrument};
 /// state, not alpm state. We parse the config and let `alpm-utils` register
 /// every `[repo]` section.
 pub fn open() -> Result<Alpm> {
-    let conf = pacmanconf::Config::new()
-        .map_err(|e| Error::other(format!("read pacman.conf: {e}")))?;
-    alpm_utils::alpm_with_conf(&conf)
-        .map_err(|e| Error::other(format!("open alpm with conf: {e}")))
+    let conf =
+        pacmanconf::Config::new().map_err(|e| Error::other(format!("read pacman.conf: {e}")))?;
+    alpm_utils::alpm_with_conf(&conf).map_err(|e| Error::other(format!("open alpm with conf: {e}")))
 }
 
 /// Snapshot of the local + sync pacman DBs as immutable hash structures.

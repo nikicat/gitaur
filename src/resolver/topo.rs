@@ -169,11 +169,9 @@ mod tests {
 
     #[test]
     fn strata_empty_input() {
-        let out = strata::<std::collections::hash_map::RandomState>(
-            &HashMap::new(),
-            &BTreeSet::new(),
-        )
-        .unwrap();
+        let out =
+            strata::<std::collections::hash_map::RandomState>(&HashMap::new(), &BTreeSet::new())
+                .unwrap();
         assert!(out.is_empty());
     }
 
