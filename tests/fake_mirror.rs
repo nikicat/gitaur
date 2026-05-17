@@ -99,6 +99,40 @@ fn full_build_and_lookup() {
     );
 }
 
+/// Real-world case: pkgbase `bisq`, pkgname `bisq-desktop`. `-S bisq` must
+/// resolve via the `by_pkgbase` fallback even though no pkgname matches.
+#[test]
+fn full_build_lookup_by_pkgbase_when_no_pkgname_matches() {
+    let dir = TempDir::new().unwrap();
+    let bare = build_fake_mirror(
+        dir.path(),
+        &[(
+            "bisq",
+            "pkgbase = bisq\npkgver = 1\npkgrel = 1\npkgname = bisq-desktop\n",
+        )],
+    );
+
+    let cfg = default_config();
+    let mirror = MirrorRepo::open(&bare).unwrap();
+    let idx = full_build(&cfg, &mirror).unwrap();
+
+    let secondary = Secondary::build(&idx);
+    assert!(
+        !secondary.by_name.contains_key("bisq"),
+        "pkgbase must not be in by_name",
+    );
+    assert_eq!(
+        secondary.lookup(&idx, "bisq").unwrap().pkgbase,
+        "bisq",
+        "pkgbase lookup falls through to by_pkgbase",
+    );
+    assert_eq!(
+        secondary.lookup(&idx, "bisq-desktop").unwrap().pkgbase,
+        "bisq",
+        "pkgname lookup still works",
+    );
+}
+
 #[test]
 fn save_load_roundtrip() {
     let dir = TempDir::new().unwrap();

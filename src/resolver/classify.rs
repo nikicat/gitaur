@@ -6,10 +6,12 @@ use crate::pacman::alpm_db::PacmanIndex;
 /// Where a given dep name lives.
 ///
 /// Resolution order (pacman wins when both have the pkg):
-///   1. local pacman DB    → Installed
-///   2. sync pacman repos  → Repo
-///   3. AUR index          → Aur(idx)
-///   4. neither            → Missing
+///   1. local pacman DB                   → Installed
+///   2. sync pacman repos                 → Repo
+///   3. AUR index by pkgname              → Aur(idx)
+///   4. AUR index by `provides`           → Aur(idx)
+///   5. AUR index by pkgbase (yay-style)  → Aur(idx)
+///   6. neither                           → Missing
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     /// Already in the local pacman DB; nothing to do.
@@ -25,7 +27,9 @@ pub enum Source {
 /// Classify `name` (already stripped of any version constraint).
 ///
 /// Pacman precedence: a name resolvable from pacman is never routed through
-/// AUR even if AUR has its own copy — matches yay/paru convention.
+/// AUR even if AUR has its own copy — matches yay/paru convention. Inside the
+/// AUR, pkgname beats provides beats pkgbase; the pkgbase fallback lets users
+/// type `-S bisq` for an entry whose pkgname is `bisq-desktop`.
 pub fn classify(by: Option<&Secondary>, pac: &PacmanIndex, name: &str) -> Source {
     if pac.is_installed(name) {
         return Source::Installed;
@@ -43,6 +47,9 @@ pub fn classify(by: Option<&Secondary>, pac: &PacmanIndex, name: &str) -> Source
         if let Some(&i) = providers.first() {
             return Source::Aur(i as usize);
         }
+    }
+    if let Some(&i) = by.by_pkgbase.get(name) {
+        return Source::Aur(i as usize);
     }
     Source::Missing
 }
