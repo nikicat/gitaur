@@ -7,7 +7,10 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::mirror::MirrorRepo;
 use crate::ui::GixProgress;
-use gix::bstr::{BString, ByteSlice};
+use gix::bstr::ByteSlice;
+use gix::refs::TargetRef;
+use gix::remote::fetch::refs::update::{Mode, Outcome as UpdateOutcome};
+use gix::remote::fetch::{refmap::Mapping, Status};
 use gix::remote::{ref_map::Options as RefMapOptions, Direction};
 use gix::ObjectId;
 use std::sync::atomic::AtomicBool;
@@ -75,57 +78,64 @@ pub fn incremental_fetch(_cfg: &Config, mirror: &MirrorRepo) -> Result<Vec<RefUp
 
     debug!(
         mappings = outcome.ref_map.mappings.len(),
-        "computing ref deltas"
+        "extracting ref deltas from fetch outcome"
     );
-
-    let t_filter = Instant::now();
-    let candidates: Vec<(String, Option<ObjectId>, BString)> = outcome
-        .ref_map
-        .mappings
-        .iter()
-        .filter_map(|m| {
-            let refname = m.remote.as_name().map(|n| n.to_str_lossy().into_owned())?;
-            if !refname.starts_with("refs/heads/") {
-                return None;
-            }
-            let new_oid = m.remote.as_id().map(std::borrow::ToOwned::to_owned);
-            let local = m.local.as_ref()?.clone();
-            Some((refname, new_oid, local))
-        })
-        .collect();
-    debug!(
-        candidates = candidates.len(),
-        elapsed_ms = u64::try_from(t_filter.elapsed().as_millis()).unwrap_or(u64::MAX),
-        "filtered branch refs"
-    );
-
-    debug!(
-        candidates = candidates.len(),
-        "resolving local tips (one repo lookup per candidate, disk-bound)"
-    );
-    let t_resolve = Instant::now();
-    let mut updates = Vec::new();
-    for (refname, new_oid, local) in candidates {
-        let old_oid = mirror
-            .repo
-            .find_reference(local.as_bstr())
-            .ok()
-            .and_then(|r| r.target().try_id().map(std::borrow::ToOwned::to_owned));
-        if old_oid != new_oid {
-            debug!(refname = %refname, ?old_oid, ?new_oid, "ref delta");
-            updates.push(RefUpdate {
-                refname,
-                old_oid,
-                new_oid,
-            });
+    let t_extract = Instant::now();
+    let update_refs = match &outcome.status {
+        Status::Change { update_refs, .. } | Status::NoPackReceived { update_refs, .. } => {
+            update_refs
         }
-    }
+    };
+    let updates = extract_branch_updates(&outcome.ref_map.mappings, update_refs);
     debug!(
         updates = updates.len(),
-        elapsed_ms = u64::try_from(t_resolve.elapsed().as_millis()).unwrap_or(u64::MAX),
-        "resolved local tips"
+        elapsed_ms = u64::try_from(t_extract.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "extracted ref deltas"
     );
 
     info!(count = updates.len(), "fetch complete");
     Ok(updates)
+}
+
+/// Walk gix's own update report (no local ref lookups).
+///
+/// `update_refs.updates[i]` corresponds 1:1 with `mappings[i]`. We keep only
+/// `refs/heads/*` mappings where the mode is an actual change.
+fn extract_branch_updates(mappings: &[Mapping], update_refs: &UpdateOutcome) -> Vec<RefUpdate> {
+    update_refs
+        .updates
+        .iter()
+        .zip(mappings.iter())
+        .filter_map(|(update, mapping)| {
+            match update.mode {
+                Mode::New | Mode::FastForward | Mode::Forced => {}
+                _ => return None,
+            }
+            let refname = mapping.remote.as_name()?.to_str_lossy().into_owned();
+            if !refname.starts_with("refs/heads/") {
+                return None;
+            }
+            let edit = update_refs.edits.get(update.edit_index?)?;
+            let new_oid = match edit.change.new_value() {
+                Some(TargetRef::Object(oid)) => Some(oid.to_owned()),
+                _ => None,
+            };
+            // For Mode::New, `previous_value()` is set to the new value as a
+            // sentinel — there's no real prior value. Don't surface it.
+            let old_oid = if matches!(update.mode, Mode::New) {
+                None
+            } else {
+                match edit.change.previous_value() {
+                    Some(TargetRef::Object(oid)) => Some(oid.to_owned()),
+                    _ => None,
+                }
+            };
+            debug!(refname = %refname, ?old_oid, ?new_oid, mode = ?update.mode, "ref delta");
+            Some(RefUpdate {
+                refname,
+                old_oid,
+                new_oid,
+            })
+        })
+        .collect()
 }
