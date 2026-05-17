@@ -12,7 +12,7 @@ env:
 
 jobs:
   ci:
-    name: fmt + clippy + build + test
+    name: fmt + taplo + clippy + build + test
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
@@ -20,7 +20,7 @@ jobs:
       - name: Install system dependencies
         run: |
           pacman -Syu --noconfirm --needed \
-            base-devel git pkgconf pacman rustup
+            base-devel git pkgconf pacman rustup taplo-cli
           rustup default stable
           rustup component add rustfmt clippy
 
@@ -38,6 +38,12 @@ jobs:
 
       - name: rustfmt
         run: cargo fmt --all -- --check
+
+      - name: taplo fmt
+        run: taplo fmt --check
+
+      - name: taplo lint
+        run: taplo lint
 
       - name: clippy
         run: cargo clippy --all-targets --all-features -- -D warnings

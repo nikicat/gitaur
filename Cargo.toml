@@ -14,7 +14,10 @@ name = "gitaur"
 path = "src/main.rs"
 
 [dependencies]
-gix = { version = "0.83", features = ["blocking-http-transport-reqwest-rust-tls", "worktree-mutation"] }
+gix = { version = "0.83", features = [
+  "blocking-http-transport-reqwest-rust-tls",
+  "worktree-mutation",
+] }
 clap = { version = "4", features = ["derive"] }
 rayon = "1.10"
 alpm = "4"
@@ -51,7 +54,7 @@ unsafe_code = "deny"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 # Catch the specific issues feedback has flagged before.
-absolute_paths = "warn"             # forces `use` over `crate::a::b::c` chains
+absolute_paths = "warn"          # forces `use` over `crate::a::b::c` chains
 needless_pass_by_value = "warn"
 redundant_clone = "warn"
 explicit_iter_loop = "warn"
