@@ -1,0 +1,17 @@
+pkgname=test-make-diamond-b
+pkgver=1.0
+pkgrel=1
+arch=('any')
+license=('MIT')
+makedepends=('test-make-diamond-a')
+
+build() {
+    test-make-diamond-a | grep -q diamond-a
+}
+
+package() {
+    install -Dm755 /dev/stdin "$pkgdir/usr/bin/$pkgname" <<'EOF'
+#!/bin/sh
+echo "diamond-b"
+EOF
+}

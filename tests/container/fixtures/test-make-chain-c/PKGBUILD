@@ -1,0 +1,14 @@
+# Bottom of a 3-deep makedep chain (c ← b ← a). Stratum 0.
+pkgname=test-make-chain-c
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: bottom of 3-deep makedep chain'
+arch=('any')
+license=('MIT')
+
+package() {
+    install -Dm755 /dev/stdin "$pkgdir/usr/bin/$pkgname" <<'EOF'
+#!/bin/sh
+echo "test-make-chain-c marker"
+EOF
+}

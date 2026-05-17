@@ -1,0 +1,51 @@
+# Extended-tier test suite — rare combinations, edge cases, regression bait.
+# Each entry is a planned test file. Add the .sh, follow the smoke-tier
+# pattern (source lib.sh; bootstrap; reset_state; gitaur …; assert_*).
+#
+# PKGBUILD-driven cases:
+#   - epoch_dominates_version.sh         (test-epoch vs older installed)
+#   - provides_virtual_resolves.sh       (`-S myvirt` → test-provides-virt)
+#   - install_hook_runs.sh               (post_install scriptlet)
+#   - vcs_pkg_skipped_without_devel.sh   (test-vcs-git ignored by -Syu)
+#   - vcs_pkg_picked_up_with_devel.sh    (--devel forces rebuild)
+#   - cycle_in_aur_deps_errors.sh        (test-cycle-a ↔ test-cycle-b)
+#   - split_pkg_with_intra_dep.sh        (transitive within split)
+#   - split_pkg_partial_install.sh       (`-S test-split-core` alone)
+#
+# Resolver / planner:
+#   - dep_constraint_versioned.sh        (`depends=('foo>=2')`)
+#   - dep_constraint_excluded.sh         (`depends=('foo<2')`)
+#   - duplicate_targets_dedup.sh
+#   - target_with_version_constraint.sh  (`gitaur -S foo>=1`)
+#   - asdeps_overrides_direct.sh         (`-S --asdeps` even for direct)
+#
+# State / idempotency:
+#   - rebuild_cached_skips.sh            (state.db hit, no makepkg)
+#   - rebuild_cached_files_missing.sh    (state.db hit but .pkg.tar.zst gone)
+#   - declined_install_keeps_artifacts.sh
+#   - sc_clears_worktrees.sh             (-Sc)
+#   - scc_clears_state_db.sh             (-Scc)
+#
+# Refresh:
+#   - sy_incremental_fetch.sh            (delta only)
+#   - syy_force_reclone.sh
+#   - mirror_unreachable.sh              (move /srv/mock-aur away mid-test)
+#
+# UX / flags:
+#   - noconfirm_skips_prompts.sh
+#   - color_never_strips_ansi.sh
+#   - color_always_keeps_ansi.sh
+#   - help_for_unknown_op.sh
+#
+# Pacman pass-through:
+#   - rns_removes_with_deps.sh
+#   - syu_calls_pacman_first.sh
+#   - u_install_local_file.sh
+#
+# Concurrency:
+#   - parallel_invocations_serialized.sh (state lock)
+#
+# Failure modes:
+#   - makepkg_fails_stops_pipeline.sh    (PKGBUILD with `exit 1` in build())
+#   - missing_dep_errors_with_hint.sh
+#   - corrupt_index_recoverable.sh       (truncate index.bin, expect -Sy fix)

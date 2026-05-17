@@ -1,0 +1,18 @@
+# Real makedepends — should be installed before build and stay --asdeps after.
+# Tests: makedepends propagation, asdeps semantics, the build-only contract.
+pkgname=test-with-makedep
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: build needs a makedep'
+arch=('any')
+license=('MIT')
+makedepends=('repo-helper-lib')
+
+build() {
+    # Touch the makedep so its presence is required during build.
+    test -f /usr/share/repo-helper-lib/marker
+}
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

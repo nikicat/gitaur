@@ -735,6 +735,7 @@ dependencies = [
  "indicatif",
  "jiff",
  "memmap2",
+ "pacmanconf",
  "rayon",
  "regex",
  "rkyv",

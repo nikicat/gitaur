@@ -1,0 +1,17 @@
+# checkdepends count as build-time too. test-make-chain-c is exercised in
+# check() which makepkg runs by default. Must be in an earlier stratum.
+pkgname=test-checkdep
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: checkdepends on AUR pkg'
+arch=('any')
+license=('MIT')
+checkdepends=('test-make-chain-c')
+
+check() {
+    test-make-chain-c | grep -q marker
+}
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

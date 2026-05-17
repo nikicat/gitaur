@@ -12,7 +12,11 @@ pub fn default_config() -> Config {
         refresh_max_age_secs: 3600,
         color: "auto".into(),
         makepkg_path: "makepkg".into(),
-        makepkg_args: vec!["-s".into(), "--noconfirm".into(), "--needed".into()],
+        // `-d` skips makepkg's own dep checks: gitaur pre-installs makedeps
+        // stratum-by-stratum, and `makepkg -s` would otherwise try to fetch
+        // AUR-only deps via `pacman -S` and fail. Runtime `depends` are
+        // satisfied later by the final `pacman -U` resolving intra-stratum.
+        makepkg_args: vec!["-d".into(), "--noconfirm".into(), "--needed".into()],
         privilege_escalator: "sudo".into(),
         devel: false,
         review_default: "prompt".into(),

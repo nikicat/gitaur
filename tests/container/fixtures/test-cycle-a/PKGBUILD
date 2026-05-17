@@ -1,0 +1,12 @@
+# A ↔ B AUR cycle. resolver::topo::sort should detect and error.
+pkgname=test-cycle-a
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: cycle A'
+arch=('any')
+license=('MIT')
+depends=('test-cycle-b')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

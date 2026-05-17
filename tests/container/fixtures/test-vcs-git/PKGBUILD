@@ -1,0 +1,19 @@
+# `-git` suffix → gitaur treats as VCS. Tests:
+#   * is_vcs_pkg() detection
+#   * --devel flag inclusion in -Syu
+#   * exclusion from default -Syu when --devel absent
+# No actual git fetch — `pkgver()` returns a fixed string.
+pkgname=test-vcs-git
+pkgver=r1.deadbeef
+pkgrel=1
+pkgdesc='gitaur test fixture: VCS pkg'
+arch=('any')
+license=('MIT')
+
+pkgver() {
+    echo "r1.deadbeef"
+}
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

@@ -79,7 +79,7 @@ pub fn cmd_install(cfg: &Config, targets: &[String], noconfirm: bool, asdeps: bo
     // gets pacman's own "Proceed with installation?" prompt verbatim. Direct
     // targets stay explicit; transitive repo deps (none here, since AUR is
     // empty) would be marked --asdeps via a follow-up `pacman -D`.
-    if plan.aur_order.is_empty() {
+    if plan.aur_strata.is_empty() {
         if plan.direct_repo.is_empty() && plan.transitive_repo.is_empty() {
             ui::info("nothing to do");
             return Ok(0);
@@ -109,14 +109,21 @@ pub fn cmd_install(cfg: &Config, targets: &[String], noconfirm: bool, asdeps: bo
     if !plan.transitive_repo.is_empty() {
         ui::pkg_list("Repo dependencies", &plan.transitive_repo);
     }
-    ui::pkg_list("AUR build order", &plan.aur_order);
+    ui::pkg_list("AUR build order", &plan.aur_order());
 
     if !ui::confirm("Proceed with build?", noconfirm)? {
         return Err(Error::UserAbort);
     }
 
-    // Phase 1 — repo deps. Two batches so direct targets stay explicit and
-    // transitive deps get --asdeps. Sudo cache typically bridges the gap.
+    install_repo_phase(cfg, &plan, noconfirm)?;
+    run_aur_pipeline(cfg, idx, &plan, noconfirm, asdeps)?;
+    Ok(0)
+}
+
+/// Install the user's repo targets up front: direct ones as explicit, deps
+/// as `--asdeps`. Two `pacman -S` calls so the install-reason flag is per-
+/// batch; sudo cache bridges them. No-op when both buckets are empty.
+fn install_repo_phase(cfg: &Config, plan: &Plan, noconfirm: bool) -> Result<()> {
     if !plan.direct_repo.is_empty() {
         ui::info("installing repo packages");
         let mut args = vec!["-S".to_string(), "--needed".into()];
@@ -135,22 +142,69 @@ pub fn cmd_install(cfg: &Config, targets: &[String], noconfirm: bool, asdeps: bo
         args.extend(plan.transitive_repo.iter().cloned());
         invoke::exec_pacman(cfg, &args)?;
     }
+    Ok(())
+}
 
-    // Phase 2 — unprivileged build loop. No sudo, no keepalive.
+/// Stratified AUR build+install loop.
+///
+/// For each stratum (set of AUR pkgbases whose build-time deps are all in
+/// earlier strata): build every pkgbase, then `pacman -U` the resulting
+/// `.pkg.tar.zst`'s so the next stratum's `makepkg` finds them in localdb.
+/// Sudo cache (typically 5-15 min) bridges per-stratum sudo prompts. Plain
+/// runtime `depends` are resolved by the final stratum's `pacman -U`
+/// resolving against the same batch. After all strata, transitive AUR pkgs
+/// that ended up Explicit during their stratum's `-U` are flipped to
+/// `--asdeps` via a single cheap `pacman -D` call.
+fn run_aur_pipeline(
+    cfg: &Config,
+    idx: &IndexFile,
+    plan: &Plan,
+    noconfirm: bool,
+    asdeps: bool,
+) -> Result<()> {
     let mirror = MirrorRepo::open(&paths::aur_repo_path())?;
     let mut db = StateDb::open(&paths::state_db_path())?;
-    let mut built: Vec<BuiltPkg> = Vec::with_capacity(plan.aur_order.len());
-    for pkgbase in &plan.aur_order {
-        let outputs = build_one(cfg, &mirror, idx, &mut db, pkgbase, noconfirm)?;
-        built.push(BuiltPkg {
-            pkgbase: pkgbase.clone(),
-            files: outputs,
-        });
+    let direct_names: HashSet<&str> = plan
+        .direct_targets
+        .iter()
+        .map(std::string::String::as_str)
+        .collect();
+    let mut transitive_marks: Vec<String> = Vec::new();
+
+    for (stratum_idx, stratum) in plan.aur_strata.iter().enumerate() {
+        if plan.aur_strata.len() > 1 {
+            ui::info(&format!(
+                "build stratum {}/{}: {}",
+                stratum_idx + 1,
+                plan.aur_strata.len(),
+                stratum.join(" "),
+            ));
+        }
+        let mut stratum_built: Vec<BuiltPkg> = Vec::with_capacity(stratum.len());
+        for pkgbase in stratum {
+            let outputs = build_one(cfg, &mirror, idx, &mut db, pkgbase, noconfirm)?;
+            stratum_built.push(BuiltPkg {
+                pkgbase: pkgbase.clone(),
+                files: outputs,
+            });
+        }
+        install_stratum(
+            cfg,
+            idx,
+            &stratum_built,
+            &direct_names,
+            asdeps,
+            noconfirm,
+            &mut transitive_marks,
+        )?;
     }
 
-    // Phase 3 — batched pacman -U at the very end (single sudo prompt; user may decline).
-    install_all(cfg, idx, &plan, &built, noconfirm, asdeps)?;
-    Ok(0)
+    if !asdeps && !transitive_marks.is_empty() {
+        let mut args = vec!["-D".to_string(), "--asdeps".into()];
+        args.extend(transitive_marks);
+        invoke::exec_pacman(cfg, &args)?;
+    }
+    Ok(())
 }
 
 #[instrument(skip(cfg, mirror, idx, db))]
@@ -203,95 +257,58 @@ fn build_one(
     Ok(outputs)
 }
 
-#[instrument(skip(cfg, idx, plan, built))]
-fn install_all(
+/// Install every `.pkg.tar.zst` produced by one stratum's builds in a single
+/// `pacman -U` transaction so intra-stratum runtime deps (split packages,
+/// AUR pkg + sibling AUR dep) resolve against each other. Pkgnames that
+/// weren't on the user's command line are appended to `transitive_marks` so
+/// the caller can flip them to `--asdeps` at the very end.
+#[instrument(skip(cfg, idx, built, direct, transitive_marks))]
+fn install_stratum(
     cfg: &Config,
     idx: &IndexFile,
-    plan: &Plan,
     built: &[BuiltPkg],
-    noconfirm: bool,
+    direct: &HashSet<&str>,
     asdeps_override: bool,
+    noconfirm: bool,
+    transitive_marks: &mut Vec<String>,
 ) -> Result<()> {
     if built.is_empty() {
         return Ok(());
     }
     let total: usize = built.iter().map(|b| b.files.len()).sum();
     ui::step(&format!("installing {total} built package(s) with pacman"));
-    if !ui::confirm("Install built packages now?", noconfirm)? {
-        ui::note("install declined; rerun `gitaur -S …` to replay this step");
-        return Err(Error::UserAbort);
-    }
 
-    let direct: HashSet<&str> = plan
-        .direct_targets
-        .iter()
-        .map(std::string::String::as_str)
-        .collect();
-    let mut direct_files: Vec<PathBuf> = Vec::new();
-    let mut transitive_files: Vec<PathBuf> = Vec::new();
-
+    let mut files: Vec<PathBuf> = Vec::new();
     for b in built {
-        let entry = idx
+        // Look up the index entry to know which pkgnames belong to this
+        // pkgbase (split packages have multiple names sharing one pkgbase).
+        let _entry = idx
             .entries
             .iter()
             .find(|e| e.pkgbase == b.pkgbase)
             .ok_or_else(|| Error::Build(format!("{}: missing from index", b.pkgbase)))?;
-        partition_pkgs(
-            entry,
-            &b.files,
-            &direct,
-            asdeps_override,
-            &mut direct_files,
-            &mut transitive_files,
-        );
+        for f in &b.files {
+            files.push(f.clone());
+            let pkgname = install::extract_pkgname(f).unwrap_or_default();
+            let is_direct = !asdeps_override && direct.contains(pkgname.as_str());
+            if !is_direct {
+                transitive_marks.push(pkgname);
+            }
+        }
     }
 
-    if !direct_files.is_empty() {
-        let mut args = vec!["-U".to_string(), "--needed".into()];
-        if noconfirm {
-            args.push("--noconfirm".into());
-        }
-        for p in &direct_files {
-            args.push(p.to_string_lossy().into_owned());
-        }
-        invoke::exec_pacman(cfg, &args)?;
+    let mut args = vec!["-U".to_string(), "--needed".into()];
+    if noconfirm {
+        args.push("--noconfirm".into());
     }
-    if !transitive_files.is_empty() {
-        let mut args = vec!["-U".to_string(), "--needed".into(), "--asdeps".into()];
-        if noconfirm {
-            args.push("--noconfirm".into());
-        }
-        for p in &transitive_files {
-            args.push(p.to_string_lossy().into_owned());
-        }
-        invoke::exec_pacman(cfg, &args)?;
+    if asdeps_override {
+        args.push("--asdeps".into());
     }
+    for p in &files {
+        args.push(p.to_string_lossy().into_owned());
+    }
+    invoke::exec_pacman(cfg, &args)?;
     Ok(())
-}
-
-/// Partition `files` into (direct, transitive) using the entry's pkgnames + plan targets.
-fn partition_pkgs(
-    entry: &IndexEntry,
-    files: &[PathBuf],
-    direct: &HashSet<&str>,
-    asdeps_override: bool,
-    direct_out: &mut Vec<PathBuf>,
-    transitive_out: &mut Vec<PathBuf>,
-) {
-    for f in files {
-        let pkgname = install::extract_pkgname(f).unwrap_or_default();
-        let is_direct = !asdeps_override
-            && (direct.contains(pkgname.as_str())
-                || entry
-                    .pkgnames
-                    .iter()
-                    .any(|n| n == &pkgname && direct.contains(n.as_str())));
-        if is_direct {
-            direct_out.push(f.clone());
-        } else {
-            transitive_out.push(f.clone());
-        }
-    }
 }
 
 /// Entry point for the AUR half of `-Syu`.

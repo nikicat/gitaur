@@ -1,0 +1,22 @@
+# Split PKGBUILD producing TWO pkgs from one pkgbase. Exercises:
+#   * IndexEntry.pkgnames len > 1
+#   * by_name secondary lookup pointing two names at one entry
+#   * partition_pkgs() direct-vs-transitive logic per pkgname
+pkgbase=test-split
+pkgname=(test-split-core test-split-extras)
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: split pkg'
+arch=('any')
+license=('MIT')
+
+package_test-split-core() {
+    pkgdesc='core part of the split'
+    install -Dm644 /dev/null "$pkgdir/usr/share/test-split-core/marker"
+}
+
+package_test-split-extras() {
+    pkgdesc='extras part of the split'
+    depends=('test-split-core')
+    install -Dm644 /dev/null "$pkgdir/usr/share/test-split-extras/marker"
+}

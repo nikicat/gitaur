@@ -31,6 +31,14 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
 
 /// Handle the `-S` family (`-S`, `-Sy`, `-Syu`, `-Ss`, `-Si`, `-Sc`).
 fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8> {
+    // `--noconfirm` / `--asdeps` / `--devel` may appear before *or* after the
+    // operation (`gitaur --noconfirm -S foo` vs `gitaur -S --noconfirm foo`).
+    // clap's `trailing_var_arg` captures everything after `-S`, so flags that
+    // followed the op are inside `argv` and never reach `cli.*`. Merge here.
+    let noconfirm = cli.noconfirm || f.has_long("noconfirm");
+    let asdeps = cli.asdeps || f.has_long("asdeps");
+    let devel = cli.devel || f.has_long("devel");
+
     if f.has('h') || f.has_long("help") {
         // Same auto-generated help as `gitaur --help` — clap already lists
         // every gitaur-owned flag (with its doc comment) plus the operations
@@ -64,16 +72,15 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
 
     if upgrade {
         let mut pac_args = vec!["-Syu".to_string()];
-        if cli.noconfirm {
+        if noconfirm {
             pac_args.push("--noconfirm".into());
         }
         invoke::exec_pacman(cfg, &pac_args)?;
-        let devel = cfg.devel || cli.devel;
-        build::cmd_sysupgrade(cfg, devel, cli.noconfirm)?;
+        build::cmd_sysupgrade(cfg, cfg.devel || devel, noconfirm)?;
     }
 
     if !f.positional.is_empty() {
-        build::cmd_install(cfg, &f.positional, cli.noconfirm, cli.asdeps)?;
+        build::cmd_install(cfg, &f.positional, noconfirm, asdeps)?;
     } else if !upgrade && !refresh {
         return Err(Error::other("no targets specified"));
     }

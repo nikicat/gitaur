@@ -1,0 +1,15 @@
+# Bottom of the diamond (a). b and c both makedepend on a; d makedepends b+c.
+# Expected strata: [a], [b, c], [d].
+pkgname=test-make-diamond-a
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: diamond bottom'
+arch=('any')
+license=('MIT')
+
+package() {
+    install -Dm755 /dev/stdin "$pkgdir/usr/bin/$pkgname" <<'EOF'
+#!/bin/sh
+echo "diamond-a"
+EOF
+}

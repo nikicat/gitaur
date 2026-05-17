@@ -1,0 +1,22 @@
+# Mixed: depends on test-trivial (runtime, AUR), makedepends on
+# test-make-chain-c (build-time, AUR). Expected behavior:
+#   * test-make-chain-c lands in stratum BEFORE this pkg
+#   * test-trivial may land in the SAME stratum (runtime dep, no make edge)
+#   * pacman -U resolves the intra-batch runtime dep
+pkgname=test-mixed-dep-make
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: mixed makedep+depend on AUR pkgs'
+arch=('any')
+license=('MIT')
+depends=('test-trivial')
+makedepends=('test-make-chain-c')
+
+build() {
+    # makedep must be installed at build time
+    test-make-chain-c | grep -q marker
+}
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

@@ -1,0 +1,16 @@
+# Top of 3-deep makedep chain. Building a requires b installed (real check).
+pkgname=test-make-chain-a
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: top of 3-deep makedep chain'
+arch=('any')
+license=('MIT')
+makedepends=('test-make-chain-b')
+
+build() {
+    test-make-chain-b | grep -q 'test-make-chain-b marker'
+}
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

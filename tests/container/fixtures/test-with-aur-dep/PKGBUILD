@@ -1,0 +1,15 @@
+# A depends on B, both AUR. Exercises:
+#   * topo sort over multiple AUR pkgbases
+#   * build order: dep first, then dependent
+#   * --asdeps on the transitive AUR pkg post-install
+pkgname=test-with-aur-dep
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: AUR pkg with AUR dep'
+arch=('any')
+license=('MIT')
+depends=('test-trivial')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

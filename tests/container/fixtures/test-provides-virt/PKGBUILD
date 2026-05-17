@@ -1,0 +1,15 @@
+# Provides a virtual name with an explicit version. Tests:
+#   * by_provides secondary lookup
+#   * strip_version_constraint() on the provider side
+#   * classify Source::Aur via provides fallback
+pkgname=test-provides-virt
+pkgver=2.5
+pkgrel=1
+pkgdesc='gitaur test fixture: provides virtual myvirt'
+arch=('any')
+license=('MIT')
+provides=('myvirt=2.5')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

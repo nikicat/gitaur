@@ -1,0 +1,20 @@
+# Middle of 3-deep makedep chain. Building b requires c installed (real
+# check: build() invokes c's binary so c MUST be in localdb at build time).
+pkgname=test-make-chain-b
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: middle of 3-deep makedep chain'
+arch=('any')
+license=('MIT')
+makedepends=('test-make-chain-c')
+
+build() {
+    test-make-chain-c | grep -q 'test-make-chain-c marker'
+}
+
+package() {
+    install -Dm755 /dev/stdin "$pkgdir/usr/bin/$pkgname" <<'EOF'
+#!/bin/sh
+echo "test-make-chain-b marker"
+EOF
+}

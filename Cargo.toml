@@ -27,6 +27,7 @@ clap = { version = "4", features = ["derive"] }
 rayon = "1.10"
 alpm = "4"
 alpm-utils = "4"
+pacmanconf = "3"
 rkyv = { version = "0.8", features = ["bytecheck"] }
 memmap2 = "0.9"
 rusqlite = { version = "0.32", features = ["bundled"] }

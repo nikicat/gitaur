@@ -5,15 +5,21 @@
 //! owned hash structures, making subsequent lookups pure data — Sync, cheap,
 //! and parallelisable.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use alpm::Alpm;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, instrument};
 
-/// Open the system alpm DB read-only.
+/// Open the system alpm DB with sync repos registered from `pacman.conf`.
+///
+/// `Alpm::new` alone gives an empty `syncdbs()` — sync repos are pacman.conf
+/// state, not alpm state. We parse the config and let `alpm-utils` register
+/// every `[repo]` section.
 pub fn open() -> Result<Alpm> {
-    let handle = Alpm::new("/", "/var/lib/pacman")?;
-    Ok(handle)
+    let conf = pacmanconf::Config::new()
+        .map_err(|e| Error::other(format!("read pacman.conf: {e}")))?;
+    alpm_utils::alpm_with_conf(&conf)
+        .map_err(|e| Error::other(format!("open alpm with conf: {e}")))
 }
 
 /// Snapshot of the local + sync pacman DBs as immutable hash structures.

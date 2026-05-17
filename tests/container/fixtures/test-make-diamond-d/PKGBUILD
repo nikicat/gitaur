@@ -1,0 +1,15 @@
+pkgname=test-make-diamond-d
+pkgver=1.0
+pkgrel=1
+arch=('any')
+license=('MIT')
+makedepends=('test-make-diamond-b' 'test-make-diamond-c')
+
+build() {
+    test-make-diamond-b | grep -q diamond-b
+    test-make-diamond-c | grep -q diamond-c
+}
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

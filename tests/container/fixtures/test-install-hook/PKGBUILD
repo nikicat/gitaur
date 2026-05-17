@@ -1,0 +1,14 @@
+# `.install` scriptlet. Tests:
+#   * review::review() surfaces .install in addition to PKGBUILD
+#   * pacman -U honors the hook
+pkgname=test-install-hook
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: has .install hook'
+arch=('any')
+license=('MIT')
+install=test-install-hook.install
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

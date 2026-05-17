@@ -1,0 +1,21 @@
+# Split pkgbase exposing helper-lib + helper-tool. test-split-as-makedep-client
+# below makedepends on helper-lib (one of the split pkgnames). Resolver must
+# map helper-lib → pkgbase test-split-as-makedep-helper for the strata edge.
+pkgbase=test-split-as-makedep-helper
+pkgname=(test-split-as-makedep-helper-lib test-split-as-makedep-helper-tool)
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: split pkg providing helper-lib + helper-tool'
+arch=('any')
+license=('MIT')
+
+package_test-split-as-makedep-helper-lib() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}
+
+package_test-split-as-makedep-helper-tool() {
+    install -Dm755 /dev/stdin "$pkgdir/usr/bin/$pkgname" <<'EOF'
+#!/bin/sh
+echo "helper-tool"
+EOF
+}

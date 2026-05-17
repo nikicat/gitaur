@@ -1,0 +1,13 @@
+# Epoch dominates version comparison. Tests vercmp::is_outdated correctness
+# when the installed pkg has no epoch and the AUR pkg has one.
+pkgname=test-epoch
+pkgver=0.1
+pkgrel=1
+epoch=2
+pkgdesc='gitaur test fixture: epoch > installed-non-epoch'
+arch=('any')
+license=('MIT')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

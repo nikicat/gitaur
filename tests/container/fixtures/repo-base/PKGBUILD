@@ -1,0 +1,13 @@
+# "Official repo" fixture — built once at container setup, registered into
+# the local sync DB so it classifies as Source::Repo. Used as a baseline
+# repo target in the pacman-fast-path tests.
+pkgname=repo-base
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: lives in the local sync repo'
+arch=('any')
+license=('MIT')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

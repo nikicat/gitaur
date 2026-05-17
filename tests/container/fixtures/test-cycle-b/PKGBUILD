@@ -1,0 +1,11 @@
+pkgname=test-cycle-b
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: cycle B'
+arch=('any')
+license=('MIT')
+depends=('test-cycle-a')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

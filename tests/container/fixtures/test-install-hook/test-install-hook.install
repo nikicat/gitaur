@@ -1,0 +1,11 @@
+post_install() {
+    touch /var/lib/test-install-hook-ran || true
+}
+
+post_upgrade() {
+    post_install
+}
+
+pre_remove() {
+    rm -f /var/lib/test-install-hook-ran || true
+}

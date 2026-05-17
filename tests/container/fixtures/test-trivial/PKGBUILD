@@ -1,0 +1,12 @@
+# Minimal PKGBUILD — `arch=any`, no source, no deps. Builds in ~0.2s.
+# Use case: pacman-fast-path skip; nothing-to-do; `-Si` formatting; `-Ss` regex.
+pkgname=test-trivial
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: trivial pkg'
+arch=('any')
+license=('MIT')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

@@ -1,0 +1,18 @@
+# makedepends on the local-sync-repo helper (NOT an AUR pkg). The strata
+# graph has no edge here — repo deps are installed via `pacman -S` in the
+# pre-build phase, not via the build chain.
+pkgname=test-make-via-repo
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: makedep is in the sync repo, not AUR'
+arch=('any')
+license=('MIT')
+makedepends=('repo-helper-lib')
+
+build() {
+    test -f /usr/share/repo-helper-lib/marker
+}
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}
