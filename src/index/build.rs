@@ -8,10 +8,29 @@ use crate::mirror::MirrorRepo;
 use crate::ui;
 use gix::ObjectId;
 use rayon::prelude::*;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 use tracing::{debug, info, instrument, warn};
+
+/// Regression guardrail for [`full_build`].
+///
+/// `gix::Repository` is `Send` but **not** `Sync` (interior `RefCell`s for
+/// object caches), so rayon workers can't share a single `&Repository`. The
+/// correct pattern is `par_iter().map_init(|| mirror.repo.clone(), ...)`: one
+/// cheap structural clone per worker thread (shared `Arc`'d object DB + refs),
+/// reused across every branch that worker pulls. Re-`gix::open`-ing the bare
+/// repo on every branch instead reparses config, rescans refs, and re-discovers
+/// alternates *N* times — for a 150k-branch mirror that dominates wall time
+/// (observed: ~2.2ms/branch ⇒ 5+ minutes).
+///
+/// Any worker-side `gix::open` call must bump this counter so the integration
+/// test in `tests/build_worker_shares_repo.rs` catches the regression. Pure
+/// instrumentation — exposed via `#[doc(hidden)] pub` so tests in `tests/` can
+/// reach it (the lib is built without `--test` for integration tests, so
+/// `#[cfg(test)]` would be invisible). Not part of the public API.
+#[doc(hidden)]
+pub static WORKER_REPO_OPENS: AtomicU64 = AtomicU64::new(0);
 
 /// Build a fresh index by scanning every `refs/heads/*` branch on the mirror.
 #[instrument(skip(cfg, mirror))]
@@ -29,33 +48,36 @@ pub fn full_build(cfg: &Config, mirror: &MirrorRepo) -> Result<IndexFile> {
     let processed = AtomicU64::new(0);
     let skipped = AtomicU64::new(0);
 
-    // gix::Repository is Send+Sync, so we can borrow it across rayon workers
-    // directly. Each worker reuses the same handle.
-    let repo_path: PathBuf = mirror.path.clone();
+    // gix::Repository is Send but NOT Sync (interior RefCell caches), so rayon
+    // workers can't share `&mirror.repo`. Each worker gets its own cheap clone
+    // (shares the underlying Arc'd object DB + refs; only the per-thread
+    // RefCell caches are fresh). `map_init` calls the init closure lazily once
+    // per worker thread, so the Mutex is contended only `cfg.index_threads`
+    // times total (not per branch) — overhead is sub-millisecond. Don't
+    // replace this with a per-iter `gix::open(&path)`: it reparses config +
+    // scans refs per branch and dominates wall time (see WORKER_REPO_OPENS).
+    let repo_source = Mutex::new(mirror.repo.clone());
     let entries: Vec<IndexEntry> = pool.install(|| {
         refs.par_iter()
-            .filter_map(|(branch, oid)| {
-                let repo = match gix::open(&repo_path) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        warn!(branch, error = %e, "reopen failed");
-                        return None;
+            .map_init(
+                || repo_source.lock().expect("repo_source poisoned").clone(),
+                |repo, (branch, oid)| {
+                    let r = parse_branch(repo, branch, *oid);
+                    pb.inc(1);
+                    match r {
+                        Ok(entry) => {
+                            processed.fetch_add(1, Ordering::Relaxed);
+                            Some(entry)
+                        }
+                        Err(e) => {
+                            skipped.fetch_add(1, Ordering::Relaxed);
+                            debug!(branch, error = %e, "branch skipped");
+                            None
+                        }
                     }
-                };
-                let r = parse_branch(&repo, branch, *oid);
-                pb.inc(1);
-                match r {
-                    Ok(entry) => {
-                        processed.fetch_add(1, Ordering::Relaxed);
-                        Some(entry)
-                    }
-                    Err(e) => {
-                        skipped.fetch_add(1, Ordering::Relaxed);
-                        debug!(branch, error = %e, "branch skipped");
-                        None
-                    }
-                }
-            })
+                },
+            )
+            .flatten()
             .collect()
     });
 

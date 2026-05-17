@@ -139,6 +139,28 @@ do via rayon — can't share `&Alpm`. So `PacmanIndex::build(&Alpm)`
 snapshots the local + sync DBs into owned `HashMap`/`HashSet` once;
 classification then becomes pure data, parallelisable, and cheap.
 
+### Why per-worker `gix::Repository` clones in `full_build`?
+
+`gix::Repository` is `Send` but **not** `Sync` — it carries interior
+`RefCell`s for object / pack / zlib caches. So the rayon workers in
+`index::build::full_build` can't share a single `&mirror.repo`. The
+pattern is `par_iter().map_init(|| repo.clone(), op)`: each worker
+thread takes one cheap structural clone (shares the underlying `Arc`'d
+object DB + refs; only the per-thread caches are fresh) and reuses it
+across every branch it pulls. A `Mutex` wraps the seed clone so the
+`map_init` init closure (which must be `Sync`) can pull a fresh handle
+without capturing `&Repository`. Lock contention is bounded by
+`cfg.index_threads` because init runs once per worker thread, not per
+branch.
+
+What you must **not** do: `gix::open(&path)` inside the worker closure.
+Reopening reparses config + rescans refs + rediscovers alternates per
+branch and dominates wall time (observed: ~2.2 ms/branch ⇒ 5+ minutes
+on the 150 k-branch AUR mirror). The regression test in
+`tests/build_worker_shares_repo.rs` asserts the
+`WORKER_REPO_OPENS` counter in `index::build` stays at zero; bump it
+from any future worker-side `gix::open` so the test catches the regression.
+
 ### Why `makepkg -d` (skip dep checks) instead of `-s`?
 
 `makepkg -s` tries to install missing deps via `pacman -S`, which can
@@ -215,6 +237,9 @@ to plumb it through both.
 
 - **`alpm` mutability**: do NOT hold `&Alpm` across rayon workers; build
   a `PacmanIndex` first.
+- **`gix::Repository` is `Send` but not `Sync`**: parallel workers must
+  hold their own clone (see `full_build` and its `WORKER_REPO_OPENS`
+  regression seam). Never `gix::open` inside a per-branch worker closure.
 - **`gix` refs under `refs/remotes/origin/*`**: only the bootstrap clone
   is affected (see custom refspec in `clone.rs`). Subsequent fetches
   write to `refs/heads/*` because that's what the bare config records.
