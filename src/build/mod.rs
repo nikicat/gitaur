@@ -8,9 +8,11 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::index::secondary::Secondary;
 use crate::index::{self, IndexEntry, IndexFile};
 use crate::mirror::{self, MirrorRepo};
-use crate::pacman::{alpm_db, invoke, vercmp};
+use crate::pacman::alpm_db::{self, PacmanIndex};
+use crate::pacman::{invoke, vercmp};
 use crate::paths;
 use crate::resolver::{self, Plan};
 use crate::ui;
@@ -33,33 +35,104 @@ struct BuiltPkg {
 }
 
 /// Entry point for `gitaur -S <targets>`.
+///
+/// Loads the pacman snapshot and (optionally) the AUR index in parallel, then
+/// classifies every target. Pure-repo plans hand off straight to `pacman -S`
+/// so the user sees pacman's native UI; only mixed/AUR plans run the full
+/// build pipeline.
 #[instrument(skip(cfg))]
 pub fn cmd_install(cfg: &Config, targets: &[String], noconfirm: bool, asdeps: bool) -> Result<u8> {
     let idx_path = paths::index_path();
-    if !idx_path.exists() {
-        ui::warn("no index; run `gitaur -Sy` first");
-        return Ok(1);
-    }
-    let idx = index::load(&idx_path)?;
-    let by = index::secondary::Secondary::build(&idx);
-    let alpm = alpm_db::open()?;
 
-    let plan = resolver::resolve(cfg, &idx, &by, &alpm, targets)?;
-    ui::pkg_list("Repo dependencies", &plan.repo_deps);
+    // Pacman snapshot + AUR index loaded concurrently. PacmanIndex iterates
+    // every sync DB and the localdb (tens of ms on a typical system); the
+    // AUR mmap + rkyv deserialize is similar. rayon::join hides one behind
+    // the other.
+    let (pac_res, idx_res) = rayon::join(
+        || -> Result<PacmanIndex> {
+            let alpm = alpm_db::open()?;
+            Ok(PacmanIndex::build(&alpm))
+        },
+        || -> Result<Option<(IndexFile, Secondary)>> {
+            if !idx_path.exists() {
+                return Ok(None);
+            }
+            let idx = index::load(&idx_path)?;
+            let by = Secondary::build(&idx);
+            Ok(Some((idx, by)))
+        },
+    );
+    let pac = pac_res?;
+    let aur_loaded = idx_res?;
+
+    let empty_idx;
+    let (idx, by): (&IndexFile, Option<&Secondary>) = if let Some((i, s)) = aur_loaded.as_ref() {
+        (i, Some(s))
+    } else {
+        empty_idx = IndexFile::empty();
+        (&empty_idx, None)
+    };
+
+    let plan = resolver::resolve(cfg, idx, by, &pac, targets)?;
+
+    // Pure-repo fast path: nothing to build, delegate to pacman so the user
+    // gets pacman's own "Proceed with installation?" prompt verbatim. Direct
+    // targets stay explicit; transitive repo deps (none here, since AUR is
+    // empty) would be marked --asdeps via a follow-up `pacman -D`.
+    if plan.aur_order.is_empty() {
+        if plan.direct_repo.is_empty() && plan.transitive_repo.is_empty() {
+            ui::info("nothing to do");
+            return Ok(0);
+        }
+        let mut args = vec!["-S".to_string(), "--needed".into()];
+        if noconfirm {
+            args.push("--noconfirm".into());
+        }
+        if asdeps {
+            args.push("--asdeps".into());
+        }
+        args.extend(plan.direct_repo.iter().cloned());
+        args.extend(plan.transitive_repo.iter().cloned());
+        return invoke::exec_pacman(cfg, &args);
+    }
+
+    // AUR path needs a loaded index — by construction `aur_order` is empty
+    // when `by == None`, so this unwrap is unreachable.
+    let idx = aur_loaded
+        .as_ref()
+        .map(|(i, _)| i)
+        .ok_or_else(|| Error::other("internal: AUR plan without index"))?;
+
+    if !plan.direct_repo.is_empty() {
+        ui::pkg_list("Repo packages (explicit)", &plan.direct_repo);
+    }
+    if !plan.transitive_repo.is_empty() {
+        ui::pkg_list("Repo dependencies", &plan.transitive_repo);
+    }
     ui::pkg_list("AUR build order", &plan.aur_order);
 
     if !ui::confirm("Proceed with build?", noconfirm)? {
         return Err(Error::UserAbort);
     }
 
-    // Phase 1 — batched pacman install of repo deps (single sudo prompt).
-    if !plan.repo_deps.is_empty() {
+    // Phase 1 — repo deps. Two batches so direct targets stay explicit and
+    // transitive deps get --asdeps. Sudo cache typically bridges the gap.
+    if !plan.direct_repo.is_empty() {
+        ui::info("installing repo packages");
+        let mut args = vec!["-S".to_string(), "--needed".into()];
+        if noconfirm {
+            args.push("--noconfirm".into());
+        }
+        args.extend(plan.direct_repo.iter().cloned());
+        invoke::exec_pacman(cfg, &args)?;
+    }
+    if !plan.transitive_repo.is_empty() {
         ui::info("installing repo dependencies");
         let mut args = vec!["-S".to_string(), "--needed".into(), "--asdeps".into()];
         if noconfirm {
             args.push("--noconfirm".into());
         }
-        args.extend(plan.repo_deps.iter().cloned());
+        args.extend(plan.transitive_repo.iter().cloned());
         invoke::exec_pacman(cfg, &args)?;
     }
 
@@ -68,7 +141,7 @@ pub fn cmd_install(cfg: &Config, targets: &[String], noconfirm: bool, asdeps: bo
     let mut db = StateDb::open(&paths::state_db_path())?;
     let mut built: Vec<BuiltPkg> = Vec::with_capacity(plan.aur_order.len());
     for pkgbase in &plan.aur_order {
-        let outputs = build_one(cfg, &mirror, &idx, &mut db, pkgbase, noconfirm)?;
+        let outputs = build_one(cfg, &mirror, idx, &mut db, pkgbase, noconfirm)?;
         built.push(BuiltPkg {
             pkgbase: pkgbase.clone(),
             files: outputs,
@@ -76,7 +149,7 @@ pub fn cmd_install(cfg: &Config, targets: &[String], noconfirm: bool, asdeps: bo
     }
 
     // Phase 3 — batched pacman -U at the very end (single sudo prompt; user may decline).
-    install_all(cfg, &idx, &plan, &built, noconfirm, asdeps)?;
+    install_all(cfg, idx, &plan, &built, noconfirm, asdeps)?;
     Ok(0)
 }
 
@@ -224,9 +297,10 @@ fn partition_pkgs(
 /// Entry point for the AUR half of `-Syu`.
 pub fn cmd_sysupgrade(cfg: &Config, devel: bool, noconfirm: bool) -> Result<u8> {
     let idx = index::load(&paths::index_path())?;
-    let by = index::secondary::Secondary::build(&idx);
+    let by = Secondary::build(&idx);
     let alpm = alpm_db::open()?;
-    let foreign = alpm_db::foreign_pkgs(&alpm);
+    let pac = PacmanIndex::build(&alpm);
+    let foreign = pac.foreign();
 
     let mut queue: Vec<String> = Vec::new();
     for (name, installed_ver) in foreign {

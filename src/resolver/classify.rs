@@ -1,11 +1,15 @@
 //! Classify a single dep reference into Installed / Repo / AUR / Missing.
 
 use crate::index::secondary::Secondary;
-use crate::index::IndexFile;
-use crate::pacman::alpm_db;
-use alpm::Alpm;
+use crate::pacman::alpm_db::PacmanIndex;
 
 /// Where a given dep name lives.
+///
+/// Resolution order (pacman wins when both have the pkg):
+///   1. local pacman DB    → Installed
+///   2. sync pacman repos  → Repo
+///   3. AUR index          → Aur(idx)
+///   4. neither            → Missing
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     /// Already in the local pacman DB; nothing to do.
@@ -19,13 +23,19 @@ pub enum Source {
 }
 
 /// Classify `name` (already stripped of any version constraint).
-pub fn classify(_idx: &IndexFile, by: &Secondary, alpm: &Alpm, name: &str) -> Source {
-    if alpm_db::installed_version(alpm, name).is_some() {
+///
+/// Pacman precedence: a name resolvable from pacman is never routed through
+/// AUR even if AUR has its own copy — matches yay/paru convention.
+pub fn classify(by: Option<&Secondary>, pac: &PacmanIndex, name: &str) -> Source {
+    if pac.is_installed(name) {
         return Source::Installed;
     }
-    if alpm_db::syncdb_provides(alpm, name) {
+    if pac.in_sync(name) {
         return Source::Repo;
     }
+    let Some(by) = by else {
+        return Source::Missing;
+    };
     if let Some(&i) = by.by_name.get(name) {
         return Source::Aur(i as usize);
     }
@@ -35,4 +45,81 @@ pub fn classify(_idx: &IndexFile, by: &Secondary, alpm: &Alpm, name: &str) -> So
         }
     }
     Source::Missing
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::schema::{IndexEntry, IndexFile};
+
+    fn mk_aur(pkgbase: &str, names: &[&str], provides: &[&str]) -> IndexEntry {
+        IndexEntry {
+            pkgbase: pkgbase.into(),
+            pkgnames: names.iter().map(|s| (*s).into()).collect(),
+            provides: provides.iter().map(|s| (*s).into()).collect(),
+            pkgver: "1".into(),
+            pkgrel: "1".into(),
+            ..Default::default()
+        }
+    }
+
+    fn fixture() -> (IndexFile, Secondary, PacmanIndex) {
+        let idx = IndexFile {
+            entries: vec![
+                mk_aur("cower", &["cower"], &[]),
+                mk_aur("paru-bin", &["paru-bin"], &["paru"]),
+                // Same name in pacman: pacman wins despite this AUR entry.
+                mk_aur("firefox-nightly", &["firefox-nightly"], &["firefox"]),
+            ],
+            ..IndexFile::empty()
+        };
+        let by = Secondary::build(&idx);
+        let mut pac = PacmanIndex::default();
+        pac.installed.insert("vim".into(), "9.0-1".into());
+        pac.sync_names.insert("firefox".into());
+        pac.sync_provides.insert("java-runtime".into());
+        (idx, by, pac)
+    }
+
+    #[test]
+    fn installed_wins_everything() {
+        let (_idx, by, pac) = fixture();
+        assert_eq!(classify(Some(&by), &pac, "vim"), Source::Installed);
+    }
+
+    #[test]
+    fn pacman_wins_over_aur() {
+        // `firefox` is both in the sync repos *and* provided by `firefox-nightly`
+        // in the AUR fixture — pacman must take precedence.
+        let (_idx, by, pac) = fixture();
+        assert_eq!(classify(Some(&by), &pac, "firefox"), Source::Repo);
+    }
+
+    #[test]
+    fn aur_when_pacman_misses() {
+        let (_idx, by, pac) = fixture();
+        assert!(matches!(classify(Some(&by), &pac, "cower"), Source::Aur(_)));
+    }
+
+    #[test]
+    fn aur_provides_fallback() {
+        let (_idx, by, pac) = fixture();
+        assert!(matches!(classify(Some(&by), &pac, "paru"), Source::Aur(_)));
+    }
+
+    #[test]
+    fn missing_without_aur_index() {
+        // No AUR index loaded (pure pacman environment).
+        let (_idx, _by, pac) = fixture();
+        assert_eq!(classify(None, &pac, "cower"), Source::Missing);
+        // …but pacman-resolvable names still classify correctly.
+        assert_eq!(classify(None, &pac, "firefox"), Source::Repo);
+        assert_eq!(classify(None, &pac, "vim"), Source::Installed);
+    }
+
+    #[test]
+    fn unknown_is_missing() {
+        let (_idx, by, pac) = fixture();
+        assert_eq!(classify(Some(&by), &pac, "nonexistent"), Source::Missing);
+    }
 }

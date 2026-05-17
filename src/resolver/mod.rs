@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::index::secondary::{self, Secondary};
 use crate::index::IndexFile;
-use alpm::Alpm;
+use crate::pacman::alpm_db::PacmanIndex;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use tracing::{debug, info, instrument};
 
@@ -16,42 +16,62 @@ pub use classify::{classify, Source};
 /// Resolved install plan partitioned by source.
 #[derive(Debug, Default, Clone)]
 pub struct Plan {
-    /// Repo pkgnames to install via one batched pacman `-S` call.
-    pub repo_deps: Vec<String>,
+    /// Direct targets the user named that resolve to a sync repo. Installed
+    /// without `--asdeps` so pacman records them as explicit.
+    pub direct_repo: Vec<String>,
+    /// Transitive repo pkgnames pulled in via AUR builds; installed with `--asdeps`.
+    pub transitive_repo: Vec<String>,
     /// AUR pkgbases in build order.
     pub aur_order: Vec<String>,
     /// User-requested top-level targets (pkgnames, not pkgbases).
     pub direct_targets: HashSet<String>,
 }
 
-/// Resolve `targets` against the index + alpm DBs into a [`Plan`].
-#[instrument(skip(_cfg, idx, by, alpm), fields(targets = targets.len()))]
+/// Resolve `targets` against the index + pacman DBs into a [`Plan`].
+///
+/// `by` is `None` when no AUR index is loaded (typical fresh installs where
+/// the user hasn't run `-Sy` yet); classification then degenerates to
+/// pacman-only and any unknown name short-circuits to [`Source::Missing`].
+#[instrument(skip(_cfg, idx, by, pac), fields(targets = targets.len()))]
 pub fn resolve(
     _cfg: &Config,
     idx: &IndexFile,
-    by: &Secondary,
-    alpm: &Alpm,
+    by: Option<&Secondary>,
+    pac: &PacmanIndex,
     targets: &[String],
 ) -> Result<Plan> {
     let mut plan = Plan::default();
     let mut visited_aur: BTreeSet<String> = BTreeSet::new();
     let mut missing: Vec<String> = Vec::new();
     let mut edges: HashMap<String, Vec<String>> = HashMap::new();
-    let mut queue: Vec<String> = targets.to_vec();
 
+    let direct_set: HashSet<String> = targets
+        .iter()
+        .map(|t| secondary::strip_version_constraint(t).to_string())
+        .collect();
     for t in targets {
         plan.direct_targets.insert(t.clone());
     }
 
-    while let Some(target) = queue.pop() {
+    // BFS: each queued entry carries `is_direct` so a top-level repo target
+    // lands in `direct_repo` (explicit), while a repo dep pulled by an AUR
+    // build lands in `transitive_repo` (--asdeps).
+    let mut queue: Vec<(String, bool)> = targets.iter().map(|t| (t.clone(), true)).collect();
+    while let Some((target, is_direct)) = queue.pop() {
         let bare = secondary::strip_version_constraint(&target).to_string();
-        match classify(idx, by, alpm, &bare) {
+        match classify(by, pac, &bare) {
             Source::Installed => {
                 debug!(target = %bare, "already installed");
             }
             Source::Repo => {
-                if !plan.repo_deps.iter().any(|s| s == &bare) {
-                    plan.repo_deps.push(bare);
+                let direct = is_direct || direct_set.contains(&bare);
+                let bucket = if direct {
+                    &mut plan.direct_repo
+                } else {
+                    &mut plan.transitive_repo
+                };
+                if !bucket.iter().any(|s| s == &bare) {
+                    bucket.push(bare);
                 }
             }
             Source::Aur(entry_idx) => {
@@ -69,7 +89,7 @@ pub fn resolve(
                     .filter(|s| !s.is_empty())
                     .collect();
                 edges.insert(pkgbase.clone(), deps.clone());
-                queue.extend(deps);
+                queue.extend(deps.into_iter().map(|d| (d, false)));
             }
             Source::Missing => missing.push(bare),
         }
@@ -83,7 +103,8 @@ pub fn resolve(
 
     plan.aur_order = topo::sort(&edges, &visited_aur)?;
     info!(
-        repo = plan.repo_deps.len(),
+        direct_repo = plan.direct_repo.len(),
+        transitive_repo = plan.transitive_repo.len(),
         aur = plan.aur_order.len(),
         "plan resolved",
     );
