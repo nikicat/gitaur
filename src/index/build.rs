@@ -77,7 +77,7 @@ pub fn full_build(cfg: &Config, mirror: &MirrorRepo) -> Result<IndexFile> {
     info!(
         entries = idx.entries.len(),
         skipped = skipped.load(Ordering::Relaxed),
-        elapsed_ms = started.elapsed().as_millis() as u64,
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         "index build complete"
     );
     Ok(idx)

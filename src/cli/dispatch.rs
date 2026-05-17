@@ -17,7 +17,7 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
     let f = flags::parse(argv);
 
     if argv.is_empty() {
-        return mirror::cmd_refresh(cfg, false).map(|_| 0);
+        return mirror::cmd_refresh(cfg, false).map(|()| 0);
     }
 
     match f.op {
@@ -36,7 +36,7 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
         // every gitaur-owned flag (with its doc comment) plus the operations
         // section from `after_help`. No reason to maintain a separate copy.
         use clap::CommandFactory;
-        let _ = crate::cli::Cli::command().print_help();
+        let _ = Cli::command().print_help();
         println!();
         return Ok(0);
     }

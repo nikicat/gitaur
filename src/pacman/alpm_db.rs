@@ -13,7 +13,11 @@ pub fn open() -> Result<Alpm> {
 /// Installed version of `name`, or `None` if not installed.
 #[instrument(skip(alpm))]
 pub fn installed_version(alpm: &Alpm, name: &str) -> Option<String> {
-    let v = alpm.localdb().pkg(name).ok().map(|p| p.version().to_string());
+    let v = alpm
+        .localdb()
+        .pkg(name)
+        .ok()
+        .map(|p| p.version().to_string());
     debug!(name, found = v.is_some(), "localdb lookup");
     v
 }

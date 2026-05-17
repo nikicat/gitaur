@@ -1,8 +1,8 @@
 //! Persistent user configuration loaded from `~/.config/gitaur/config.toml`.
 
 use crate::error::Result;
-use crate::ui::ColorMode;
 use crate::paths;
+use crate::ui::ColorMode;
 use serde::Deserialize;
 use std::path::PathBuf;
 

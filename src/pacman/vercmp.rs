@@ -4,11 +4,7 @@ use std::cmp::Ordering;
 
 /// Compare two pacman-style version strings (`epoch:pkgver-pkgrel`).
 pub fn vercmp(a: &str, b: &str) -> Ordering {
-    match alpm::vercmp(a, b) {
-        Ordering::Less => Ordering::Less,
-        Ordering::Equal => Ordering::Equal,
-        Ordering::Greater => Ordering::Greater,
-    }
+    alpm::vercmp(a, b)
 }
 
 /// True if `installed` is strictly older than `available`.

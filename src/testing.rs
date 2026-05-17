@@ -41,6 +41,10 @@ pub fn git_stdout(args: &[&str], cwd: &Path) -> String {
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .output()
         .expect("git available");
-    assert!(out.status.success(), "git {args:?} failed in {}", cwd.display());
+    assert!(
+        out.status.success(),
+        "git {args:?} failed in {}",
+        cwd.display()
+    );
     String::from_utf8(out.stdout).expect("git stdout utf8")
 }

@@ -10,10 +10,12 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::index::{self, IndexEntry, IndexFile};
 use crate::mirror::{self, MirrorRepo};
+use crate::pacman::{alpm_db, invoke, vercmp};
 use crate::paths;
 use crate::resolver::{self, Plan};
 use crate::ui;
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use tracing::{debug, info, instrument, warn};
 
@@ -40,7 +42,7 @@ pub fn cmd_install(cfg: &Config, targets: &[String], noconfirm: bool, asdeps: bo
     }
     let idx = index::load(&idx_path)?;
     let by = index::secondary::Secondary::build(&idx);
-    let alpm = crate::pacman::alpm_db::open()?;
+    let alpm = alpm_db::open()?;
 
     let plan = resolver::resolve(cfg, &idx, &by, &alpm, targets)?;
     ui::pkg_list("Repo dependencies", &plan.repo_deps);
@@ -58,7 +60,7 @@ pub fn cmd_install(cfg: &Config, targets: &[String], noconfirm: bool, asdeps: bo
             args.push("--noconfirm".into());
         }
         args.extend(plan.repo_deps.iter().cloned());
-        crate::pacman::invoke::exec_pacman(cfg, &args)?;
+        invoke::exec_pacman(cfg, &args)?;
     }
 
     // Phase 2 — unprivileged build loop. No sudo, no keepalive.
@@ -101,7 +103,12 @@ fn build_one(
         let existing = install::find_produced(&wt.path)?;
         if prev.last_built_commit_oid == head_hex && !existing.is_empty() {
             ui::note(&format!("{pkgbase}: already built at {}", &head_hex[..8]));
-            debug!(pkgbase, head_hex, files = existing.len(), "reusing cached build");
+            debug!(
+                pkgbase,
+                head_hex,
+                files = existing.len(),
+                "reusing cached build"
+            );
             return Ok(existing);
         }
     }
@@ -112,7 +119,9 @@ fn build_one(
 
     let outputs = install::find_produced(&wt.path)?;
     if outputs.is_empty() {
-        return Err(Error::Build(format!("{pkgbase}: makepkg produced no packages")));
+        return Err(Error::Build(format!(
+            "{pkgbase}: makepkg produced no packages"
+        )));
     }
 
     let version = version_string(entry);
@@ -140,7 +149,11 @@ fn install_all(
         return Err(Error::UserAbort);
     }
 
-    let direct: HashSet<&str> = plan.direct_targets.iter().map(|s| s.as_str()).collect();
+    let direct: HashSet<&str> = plan
+        .direct_targets
+        .iter()
+        .map(std::string::String::as_str)
+        .collect();
     let mut direct_files: Vec<PathBuf> = Vec::new();
     let mut transitive_files: Vec<PathBuf> = Vec::new();
 
@@ -150,7 +163,14 @@ fn install_all(
             .iter()
             .find(|e| e.pkgbase == b.pkgbase)
             .ok_or_else(|| Error::Build(format!("{}: missing from index", b.pkgbase)))?;
-        partition_pkgs(entry, &b.files, &direct, asdeps_override, &mut direct_files, &mut transitive_files);
+        partition_pkgs(
+            entry,
+            &b.files,
+            &direct,
+            asdeps_override,
+            &mut direct_files,
+            &mut transitive_files,
+        );
     }
 
     if !direct_files.is_empty() {
@@ -161,7 +181,7 @@ fn install_all(
         for p in &direct_files {
             args.push(p.to_string_lossy().into_owned());
         }
-        crate::pacman::invoke::exec_pacman(cfg, &args)?;
+        invoke::exec_pacman(cfg, &args)?;
     }
     if !transitive_files.is_empty() {
         let mut args = vec!["-U".to_string(), "--needed".into(), "--asdeps".into()];
@@ -171,7 +191,7 @@ fn install_all(
         for p in &transitive_files {
             args.push(p.to_string_lossy().into_owned());
         }
-        crate::pacman::invoke::exec_pacman(cfg, &args)?;
+        invoke::exec_pacman(cfg, &args)?;
     }
     Ok(())
 }
@@ -205,8 +225,8 @@ fn partition_pkgs(
 pub fn cmd_sysupgrade(cfg: &Config, devel: bool, noconfirm: bool) -> Result<u8> {
     let idx = index::load(&paths::index_path())?;
     let by = index::secondary::Secondary::build(&idx);
-    let alpm = crate::pacman::alpm_db::open()?;
-    let foreign = crate::pacman::alpm_db::foreign_pkgs(&alpm);
+    let alpm = alpm_db::open()?;
+    let foreign = alpm_db::foreign_pkgs(&alpm);
 
     let mut queue: Vec<String> = Vec::new();
     for (name, installed_ver) in foreign {
@@ -221,7 +241,7 @@ pub fn cmd_sysupgrade(cfg: &Config, devel: bool, noconfirm: bool) -> Result<u8> 
         let need = if devel && is_vcs_pkg(&entry.pkgbase) {
             true
         } else {
-            crate::pacman::vercmp::is_outdated(&installed_ver, &aur_ver)
+            vercmp::is_outdated(&installed_ver, &aur_ver)
         };
         if need {
             queue.push(name);
@@ -238,7 +258,7 @@ pub fn cmd_sysupgrade(cfg: &Config, devel: bool, noconfirm: bool) -> Result<u8> 
 /// Entry point for `-Sc` / `-Scc`.
 #[instrument(skip(cfg, argv))]
 pub fn cmd_clean(cfg: &Config, deep: bool, argv: &[String]) -> Result<u8> {
-    crate::pacman::invoke::exec_pacman(cfg, argv)?;
+    invoke::exec_pacman(cfg, argv)?;
 
     let pkgs_root = paths::state_dir().join("pkgs");
     if pkgs_root.exists() {
@@ -278,7 +298,7 @@ fn version_string(e: &IndexEntry) -> String {
 fn hex(b: &[u8; 20]) -> String {
     let mut s = String::with_capacity(40);
     for x in b {
-        s.push_str(&format!("{:02x}", x));
+        let _ = write!(s, "{x:02x}");
     }
     s
 }

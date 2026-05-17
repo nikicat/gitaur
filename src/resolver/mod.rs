@@ -1,8 +1,8 @@
 //! Recursive dependency resolution: targets → ordered Plan.
 
 use crate::config::Config;
-use crate::error::Result;
-use crate::index::secondary::Secondary;
+use crate::error::{Error, Result};
+use crate::index::secondary::{self, Secondary};
 use crate::index::IndexFile;
 use alpm::Alpm;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -44,7 +44,7 @@ pub fn resolve(
     }
 
     while let Some(target) = queue.pop() {
-        let bare = crate::index::secondary::strip_version_constraint(&target).to_string();
+        let bare = secondary::strip_version_constraint(&target).to_string();
         match classify(idx, by, alpm, &bare) {
             Source::Installed => {
                 debug!(target = %bare, "already installed");
@@ -65,7 +65,7 @@ pub fn resolve(
                     .iter()
                     .chain(entry.makedepends.iter())
                     .chain(entry.checkdepends.iter())
-                    .map(|d| crate::index::secondary::strip_version_constraint(d).to_string())
+                    .map(|d| secondary::strip_version_constraint(d).to_string())
                     .filter(|s| !s.is_empty())
                     .collect();
                 edges.insert(pkgbase.clone(), deps.clone());
@@ -78,7 +78,7 @@ pub fn resolve(
     if !missing.is_empty() {
         missing.sort();
         missing.dedup();
-        return Err(crate::error::Error::UnknownTargets(missing.join(", ")));
+        return Err(Error::UnknownTargets(missing.join(", ")));
     }
 
     plan.aur_order = topo::sort(&edges, &visited_aur)?;

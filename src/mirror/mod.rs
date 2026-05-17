@@ -28,7 +28,8 @@ pub struct MirrorRepo {
 impl MirrorRepo {
     /// Open the existing bare clone at `path` without any network access.
     pub fn open(path: &Path) -> Result<Self> {
-        let repo = gix::open(path).map_err(|e| Error::Gix(format!("open {}: {e}", path.display())))?;
+        let repo =
+            gix::open(path).map_err(|e| Error::Gix(format!("open {}: {e}", path.display())))?;
         Ok(Self {
             path: path.to_path_buf(),
             repo,
@@ -74,12 +75,12 @@ pub fn cmd_refresh(cfg: &Config, force_reclone: bool) -> Result<()> {
         return Ok(());
     }
 
-    if !paths::index_path().exists() {
-        let idx = index::build::full_build(cfg, &mirror)?;
-        index::save(&idx, &paths::index_path())?;
-    } else {
+    if paths::index_path().exists() {
         let mut idx = index::load(&paths::index_path())?;
         index::update::incremental_update(&mirror, &updates, &mut idx)?;
+        index::save(&idx, &paths::index_path())?;
+    } else {
+        let idx = index::build::full_build(cfg, &mirror)?;
         index::save(&idx, &paths::index_path())?;
     }
     ui::note(&format!("{} ref(s) updated", updates.len()));

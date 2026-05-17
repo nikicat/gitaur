@@ -4,6 +4,13 @@
 //! Uses system `git` to build the fixture repos (gix 0.83 doesn't expose
 //! high-level init+commit plumbing). The code under test is gix-driven.
 
+use gitaur::config::defaults::default_config;
+use gitaur::index::build::full_build;
+use gitaur::index::secondary::Secondary;
+use gitaur::index::update::incremental_update;
+use gitaur::index::{load, save};
+use gitaur::mirror::fetch::RefUpdate;
+use gitaur::mirror::MirrorRepo;
 use gitaur::testing::{git, git_stdout};
 use std::path::Path;
 use tempfile::TempDir;
@@ -22,7 +29,13 @@ fn build_fake_mirror(root: &Path, branches: &[(&str, &str)]) -> std::path::PathB
         git(&["commit", "-q", "-m", &format!("c{i}")], &src);
     }
     git(
-        &["clone", "-q", "--bare", src.to_str().unwrap(), bare.to_str().unwrap()],
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            src.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
         root,
     );
     bare
@@ -72,12 +85,12 @@ fn full_build_and_lookup() {
         ],
     );
 
-    let cfg = gitaur::config::defaults::default_config();
-    let mirror = gitaur::mirror::MirrorRepo::open(&bare).unwrap();
-    let idx = gitaur::index::build::full_build(&cfg, &mirror).unwrap();
+    let cfg = default_config();
+    let mirror = MirrorRepo::open(&bare).unwrap();
+    let idx = full_build(&cfg, &mirror).unwrap();
     assert_eq!(idx.entries.len(), 3);
 
-    let secondary = gitaur::index::secondary::Secondary::build(&idx);
+    let secondary = Secondary::build(&idx);
     assert!(secondary.lookup(&idx, "cower").is_some());
     assert_eq!(
         secondary.lookup(&idx, "paru").unwrap().pkgbase,
@@ -97,13 +110,13 @@ fn save_load_roundtrip() {
         )],
     );
 
-    let cfg = gitaur::config::defaults::default_config();
-    let mirror = gitaur::mirror::MirrorRepo::open(&bare).unwrap();
-    let idx = gitaur::index::build::full_build(&cfg, &mirror).unwrap();
+    let cfg = default_config();
+    let mirror = MirrorRepo::open(&bare).unwrap();
+    let idx = full_build(&cfg, &mirror).unwrap();
 
     let path = dir.path().join("index.bin");
-    gitaur::index::save(&idx, &path).unwrap();
-    let loaded = gitaur::index::load(&path).unwrap();
+    save(&idx, &path).unwrap();
+    let loaded = load(&path).unwrap();
     assert_eq!(loaded.entries.len(), idx.entries.len());
     assert_eq!(loaded.entries[0].pkgbase, idx.entries[0].pkgbase);
 }
@@ -125,9 +138,9 @@ fn incremental_update_upserts_and_deletes() {
         ],
     );
 
-    let cfg = gitaur::config::defaults::default_config();
-    let mirror = gitaur::mirror::MirrorRepo::open(&bare).unwrap();
-    let mut idx = gitaur::index::build::full_build(&cfg, &mirror).unwrap();
+    let cfg = default_config();
+    let mirror = MirrorRepo::open(&bare).unwrap();
+    let mut idx = full_build(&cfg, &mirror).unwrap();
     assert_eq!(idx.entries.len(), 2);
 
     let new_tip = update_branch(
@@ -135,21 +148,21 @@ fn incremental_update_upserts_and_deletes() {
         "cower",
         "pkgbase = cower\npkgver = 18\npkgrel = 1\npkgname = cower\n",
     );
-    let mirror = gitaur::mirror::MirrorRepo::open(&bare).unwrap();
-    let update = gitaur::mirror::fetch::RefUpdate {
+    let mirror = MirrorRepo::open(&bare).unwrap();
+    let update = RefUpdate {
         refname: "refs/heads/cower".into(),
         old_oid: None,
         new_oid: Some(new_tip),
     };
-    gitaur::index::update::incremental_update(&mirror, &[update], &mut idx).unwrap();
+    incremental_update(&mirror, &[update], &mut idx).unwrap();
     let cower = idx.entries.iter().find(|e| e.pkgbase == "cower").unwrap();
     assert_eq!(cower.pkgver, "18");
 
-    let del = gitaur::mirror::fetch::RefUpdate {
+    let del = RefUpdate {
         refname: "refs/heads/yay".into(),
         old_oid: None,
         new_oid: None,
     };
-    gitaur::index::update::incremental_update(&mirror, &[del], &mut idx).unwrap();
+    incremental_update(&mirror, &[del], &mut idx).unwrap();
     assert!(idx.entries.iter().all(|e| e.pkgbase != "yay"));
 }

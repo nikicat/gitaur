@@ -3,7 +3,7 @@
 //! The actual `pacman -U` invocation is driven from `build::mod.rs` so that
 //! all sudo work can be batched into a single prompt at the end of the run.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use glob::glob;
 use std::path::{Path, PathBuf};
 
@@ -12,12 +12,11 @@ pub fn find_produced(worktree: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for pat in ["*.pkg.tar.zst", "*.pkg.tar.xz"] {
         let glob_pat = worktree.join(pat);
-        for e in glob(&glob_pat.to_string_lossy())
-            .map_err(|e| crate::error::Error::other(e.to_string()))?
+        for p in glob(&glob_pat.to_string_lossy())
+            .map_err(|e| Error::other(e.to_string()))?
+            .flatten()
         {
-            if let Ok(p) = e {
-                out.push(p);
-            }
+            out.push(p);
         }
     }
     Ok(out)

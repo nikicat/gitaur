@@ -104,7 +104,7 @@ fn first_op_letter(argv: &[String]) -> Option<char> {
         if rest.starts_with('-') {
             return None; // long flag
         }
-        rest.chars().next().filter(|c| c.is_ascii_uppercase())
+        rest.chars().next().filter(char::is_ascii_uppercase)
     })
 }
 

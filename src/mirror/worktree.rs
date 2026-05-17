@@ -21,7 +21,7 @@
 use crate::error::{Error, Result};
 use crate::mirror::MirrorRepo;
 use gix::bstr::BStr;
-use gix::object::tree::EntryKind;
+use gix::object::tree::{EntryKind, EntryMode};
 use gix::ObjectId;
 use std::path::{Path, PathBuf};
 use tracing::{debug, instrument};
@@ -116,9 +116,7 @@ fn write_admin_files(admin: &Path, worktree_dir: &Path, head_oid: ObjectId) -> R
 
 /// Write the `.git` pointer file inside the worktree.
 fn write_gitlink(worktree_dir: &Path, admin: &Path) -> Result<()> {
-    let abs_admin = admin
-        .canonicalize()
-        .unwrap_or_else(|_| admin.to_path_buf());
+    let abs_admin = admin.canonicalize().unwrap_or_else(|_| admin.to_path_buf());
     std::fs::write(
         worktree_dir.join(".git"),
         format!("gitdir: {}\n", abs_admin.display()),
@@ -143,7 +141,7 @@ fn write_entry(
     mirror: &MirrorRepo,
     name: &BStr,
     oid: &gix::oid,
-    mode: gix::object::tree::EntryMode,
+    mode: EntryMode,
     parent: &Path,
 ) -> Result<()> {
     let name_str = std::str::from_utf8(name.as_ref())
@@ -213,7 +211,13 @@ mod tests {
         git(&["add", "-A"], &src);
         git(&["commit", "-q", "-m", "init"], &src);
         git(
-            &["clone", "-q", "--bare", src.to_str().unwrap(), bare.to_str().unwrap()],
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                src.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
             dir,
         );
         let repo = gix::open(&bare).unwrap();
@@ -250,25 +254,33 @@ mod tests {
 
         // Native git sees this worktree from the bare side too.
         let out = Command::new("git")
-            .args(["-C", bare.to_str().unwrap(), "worktree", "list", "--porcelain"])
+            .args([
+                "-C",
+                bare.to_str().unwrap(),
+                "worktree",
+                "list",
+                "--porcelain",
+            ])
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(stdout.contains(&format!("worktree {}", dest.display())), "got:\n{stdout}");
+        assert!(
+            stdout.contains(&format!("worktree {}", dest.display())),
+            "got:\n{stdout}"
+        );
 
         // OID round-trip.
         let head_in_admin = std::fs::read_to_string(bare.join("worktrees/main/HEAD")).unwrap();
-        assert!(head_in_admin.trim_end().starts_with(&wt.head_oid.to_string()));
+        assert!(head_in_admin
+            .trim_end()
+            .starts_with(&wt.head_oid.to_string()));
     }
 
     #[test]
     fn reset_replaces_contents() {
         let td = TempDir::new().unwrap();
         let (bare, repo) = make_bare(td.path());
-        let mirror = MirrorRepo {
-            path: bare,
-            repo,
-        };
+        let mirror = MirrorRepo { path: bare, repo };
         let dest = td.path().join("pkgs/foo");
         add_or_reset(&mirror, "main", &dest).unwrap();
         std::fs::write(dest.join("scratch"), "junk").unwrap();

@@ -1,6 +1,7 @@
 //! Crate-wide error type.
 
 use thiserror::Error;
+use toml::de::Error as TomlDeError;
 
 /// Crate result alias.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -21,13 +22,13 @@ pub enum Error {
     #[error("alpm: {0}")]
     Alpm(#[from] alpm::Error),
 
-    /// SQLite error from state.db access.
+    /// `SQLite` error from state.db access.
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
 
     /// TOML parse failure from config.
     #[error("toml: {0}")]
-    Toml(#[from] toml::de::Error),
+    Toml(#[from] TomlDeError),
 
     /// Regex compile failure (used by -Ss).
     #[error("regex: {0}")]

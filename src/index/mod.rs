@@ -7,6 +7,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::paths;
 use crate::ui;
+use rkyv::rancor::Error as RkyvError;
 use std::path::Path;
 use tracing::{debug, info, instrument};
 
@@ -26,8 +27,8 @@ pub fn load(path: &Path) -> Result<IndexFile> {
         return Ok(IndexFile::empty());
     }
     let bytes = std::fs::read(path)?;
-    let idx: IndexFile = rkyv::from_bytes::<IndexFile, rkyv::rancor::Error>(&bytes)
-        .map_err(|e| Error::Rkyv(e.to_string()))?;
+    let idx: IndexFile =
+        rkyv::from_bytes::<IndexFile, RkyvError>(&bytes).map_err(|e| Error::Rkyv(e.to_string()))?;
     info!(entries = idx.entries.len(), "index loaded");
     Ok(idx)
 }
@@ -35,8 +36,7 @@ pub fn load(path: &Path) -> Result<IndexFile> {
 /// Atomically write the index to `path` via `index.bin.tmp` + rename.
 #[instrument(skip(idx), fields(entries = idx.entries.len()))]
 pub fn save(idx: &IndexFile, path: &Path) -> Result<()> {
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(idx)
-        .map_err(|e| Error::Rkyv(e.to_string()))?;
+    let bytes = rkyv::to_bytes::<RkyvError>(idx).map_err(|e| Error::Rkyv(e.to_string()))?;
     let tmp = path.with_extension("bin.tmp");
     std::fs::write(&tmp, &bytes)?;
     std::fs::rename(&tmp, path)?;
@@ -63,7 +63,7 @@ pub fn cmd_search(_cfg: &Config, terms: &[String]) -> Result<u8> {
         let head = format!(
             "aur/{} {}",
             entry.pkgbase,
-            version_string(&entry.epoch, &entry.pkgver, &entry.pkgrel)
+            version_string(entry.epoch.as_ref(), &entry.pkgver, &entry.pkgrel)
         );
         ui::info(&head);
         if let Some(desc) = &entry.pkgdesc {
@@ -100,7 +100,7 @@ fn print_info(e: &IndexEntry) {
     }
     println!(
         "Version         : {}",
-        version_string(&e.epoch, &e.pkgver, &e.pkgrel)
+        version_string(e.epoch.as_ref(), &e.pkgver, &e.pkgrel)
     );
     if let Some(d) = &e.pkgdesc {
         println!("Description     : {d}");
@@ -117,7 +117,7 @@ fn print_info(e: &IndexEntry) {
     println!();
 }
 
-fn version_string(epoch: &Option<String>, ver: &str, rel: &str) -> String {
+fn version_string(epoch: Option<&String>, ver: &str, rel: &str) -> String {
     match epoch {
         Some(e) if !e.is_empty() => format!("{e}:{ver}-{rel}"),
         _ => format!("{ver}-{rel}"),

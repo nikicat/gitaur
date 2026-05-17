@@ -56,7 +56,9 @@ pub fn parse(text: &str) -> Result<IndexEntry> {
             "pkgdesc" if in_pkgbase => e.pkgdesc = Some(v.into()),
 
             "arch" => e.arch.push(v.into()),
-            list_key if ARRAY_KEYS.contains(&list_key) => list_field_mut(&mut e, list_key).push(v.into()),
+            list_key if ARRAY_KEYS.contains(&list_key) => {
+                list_field_mut(&mut e, list_key).push(v.into());
+            }
 
             _ => trace!(key = k, "ignored .SRCINFO key"),
         }
@@ -121,7 +123,7 @@ fn dedup(v: &mut Vec<String>) {
 mod tests {
     use super::*;
 
-    const COWER: &str = r#"
+    const COWER: &str = r"
 pkgbase = cower
 	pkgdesc = A simple AUR agent with a pretentious name
 	pkgver = 17
@@ -137,9 +139,9 @@ pkgbase = cower
 	conflicts = cower-git
 
 pkgname = cower
-"#;
+";
 
-    const SPLIT: &str = r#"
+    const SPLIT: &str = r"
 pkgbase = mingw-w64-gcc
 	pkgver = 13.2.0
 	pkgrel = 1
@@ -153,7 +155,7 @@ pkgname = mingw-w64-gcc-libs
 	pkgdesc = Runtime libs
 
 pkgname = mingw-w64-gcc-fortran
-"#;
+";
 
     #[test]
     fn parses_simple() {

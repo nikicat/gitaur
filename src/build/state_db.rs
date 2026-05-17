@@ -29,14 +29,14 @@ impl StateDb {
         }
         let conn = Connection::open(path)?;
         conn.execute_batch(
-            r#"
+            r"
             CREATE TABLE IF NOT EXISTS builds (
                 pkgbase TEXT PRIMARY KEY,
                 last_built_commit_oid TEXT NOT NULL,
                 last_built_version TEXT NOT NULL,
                 built_at INTEGER NOT NULL
             );
-            "#,
+            ",
         )?;
         Ok(Self { conn })
     }
@@ -64,7 +64,7 @@ impl StateDb {
     pub fn record_build(&mut self, pkgbase: &str, oid_hex: &str, version: &str) -> Result<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
+            .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
             .unwrap_or(0);
         self.conn.execute(
             "INSERT INTO builds(pkgbase, last_built_commit_oid, last_built_version, built_at)
@@ -81,14 +81,13 @@ impl StateDb {
 
     /// Remove rows whose pkgbase is not in `keep`. Used by `-Sc` cleanup.
     pub fn prune(&mut self, keep: &[String]) -> Result<usize> {
-        let placeholders = std::iter::repeat("?")
-            .take(keep.len())
+        let placeholders = std::iter::repeat_n("?", keep.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = if keep.is_empty() {
             "DELETE FROM builds".to_string()
         } else {
-            format!("DELETE FROM builds WHERE pkgbase NOT IN ({})", placeholders)
+            format!("DELETE FROM builds WHERE pkgbase NOT IN ({placeholders})")
         };
         let n = self
             .conn

@@ -3,7 +3,7 @@
 //! Diff uses the bare mirror repo's object DB (not a `.git` inside the
 //! worktree) — the build directory is just materialized files.
 
-use crate::build::state_db::StateDb;
+use crate::build::state_db::{BuildRecord, StateDb};
 use crate::error::{Error, Result};
 use crate::mirror::worktree::Worktree;
 use crate::mirror::MirrorRepo;
@@ -25,7 +25,11 @@ pub fn review(
 ) -> Result<()> {
     let prior = db.get(pkgbase)?;
     if noconfirm {
-        info!(pkgbase, prior = prior.is_some(), "auto-proceeding (noconfirm)");
+        info!(
+            pkgbase,
+            prior = prior.is_some(),
+            "auto-proceeding (noconfirm)"
+        );
         return Ok(());
     }
 
@@ -51,7 +55,7 @@ fn show(
     mirror: &MirrorRepo,
     pkgbase: &str,
     wt: &Worktree,
-    prior: Option<&crate::build::state_db::BuildRecord>,
+    prior: Option<&BuildRecord>,
 ) -> Result<()> {
     match prior {
         None => {
@@ -153,6 +157,7 @@ mod similar_minimal {
         Remove(String),
     }
 
+    #[allow(clippy::many_single_char_names)] // standard LCS variable naming
     pub fn diff(a: &str, b: &str) -> Vec<Op> {
         let a: Vec<&str> = a.lines().collect();
         let b: Vec<&str> = b.lines().collect();

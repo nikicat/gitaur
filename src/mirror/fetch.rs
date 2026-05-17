@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use crate::mirror::MirrorRepo;
 use crate::ui::GixProgress;
 use gix::bstr::ByteSlice;
-use gix::remote::Direction;
+use gix::remote::{ref_map::Options as RefMapOptions, Direction};
 use gix::ObjectId;
 use std::sync::atomic::AtomicBool;
 use tracing::{debug, info, instrument};
@@ -42,7 +42,7 @@ pub fn incremental_fetch(_cfg: &Config, mirror: &MirrorRepo) -> Result<Vec<RefUp
             .map_err(|e| Error::Gix(format!("connect: {e}")))?;
 
         let prepared = connection
-            .prepare_fetch(&mut progress, Default::default())
+            .prepare_fetch(&mut progress, RefMapOptions::default())
             .map_err(|e| Error::Gix(format!("prepare_fetch: {e}")))?;
 
         prepared
@@ -62,12 +62,12 @@ pub fn incremental_fetch(_cfg: &Config, mirror: &MirrorRepo) -> Result<Vec<RefUp
         if !refname.starts_with("refs/heads/") {
             continue;
         }
-        let new_oid = mapping.remote.as_id().map(|id| id.to_owned());
+        let new_oid = mapping.remote.as_id().map(std::borrow::ToOwned::to_owned);
         let old_oid = mapping
             .local
             .as_ref()
             .and_then(|local| mirror.repo.find_reference(local.as_bstr()).ok())
-            .and_then(|r| r.target().try_id().map(|id| id.to_owned()));
+            .and_then(|r| r.target().try_id().map(std::borrow::ToOwned::to_owned));
         if old_oid != new_oid {
             debug!(refname = %refname, ?old_oid, ?new_oid, "ref delta");
             updates.push(RefUpdate {

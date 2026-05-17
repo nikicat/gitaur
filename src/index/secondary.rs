@@ -21,7 +21,7 @@ impl Secondary {
         let mut by_name = HashMap::with_capacity(idx.entries.len() * 2);
         let mut by_provides: HashMap<String, SmallVec<[u32; 2]>> = HashMap::new();
         for (i, e) in idx.entries.iter().enumerate() {
-            let i = i as u32;
+            let i = u32::try_from(i).expect("AUR index entries exceed u32::MAX");
             for name in &e.pkgnames {
                 by_name.insert(name.clone(), i);
             }
@@ -35,7 +35,10 @@ impl Secondary {
             by_provides = by_provides.len(),
             "secondary indexes built"
         );
-        Self { by_name, by_provides }
+        Self {
+            by_name,
+            by_provides,
+        }
     }
 
     /// Resolve a pkgname-or-provides reference to its primary entry.
@@ -59,7 +62,7 @@ impl Secondary {
 
 fn entry_matches(e: &IndexEntry, r: &regex::Regex) -> bool {
     e.pkgnames.iter().any(|n| r.is_match(n))
-        || e.pkgdesc.as_deref().map(|d| r.is_match(d)).unwrap_or(false)
+        || e.pkgdesc.as_deref().is_some_and(|d| r.is_match(d))
         || e.provides.iter().any(|p| r.is_match(p))
 }
 

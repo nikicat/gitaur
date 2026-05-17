@@ -40,16 +40,7 @@ fn needs_sudo(argv: &[String]) -> bool {
     argv.iter().any(|a| {
         matches!(
             a.as_str(),
-            "-S" | "-Sy"
-                | "-Syu"
-                | "-Syyu"
-                | "-R"
-                | "-Rs"
-                | "-Rns"
-                | "-U"
-                | "-Sc"
-                | "-Scc"
-                | "-D"
+            "-S" | "-Sy" | "-Syu" | "-Syyu" | "-R" | "-Rs" | "-Rns" | "-U" | "-Sc" | "-Scc" | "-D"
         )
     })
 }

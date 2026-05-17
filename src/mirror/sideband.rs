@@ -8,11 +8,10 @@
 /// `\r` *and* `\n` so we capture the current progress state.
 pub fn last_line(data: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(data).ok()?;
-    s.split(|c| c == '\r' || c == '\n')
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .last()
-        .map(|s| s.to_string())
+    s.split(['\r', '\n'])
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .map(std::string::ToString::to_string)
 }
 
 #[cfg(test)]

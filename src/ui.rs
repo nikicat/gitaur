@@ -8,6 +8,7 @@
 //! Progress-bar conventions in this module:
 //! - `{prefix}` carries the **fixed** row label (`objects`, `received`, …).
 //! - `{msg}` / `{wide_msg}` carry **streaming** content (e.g. sideband lines).
+//!
 //! Splitting the two lets callers `set_message` without clobbering the label.
 
 use console::{style, Term};
@@ -23,27 +24,22 @@ const SPIN_TICKS: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ";
 pub const TICK_PERIOD: Duration = Duration::from_millis(80);
 
 /// Enable a steady tick at the canonical cadence. Always call this **after**
-/// `MultiProgress::add(pb)` so the tick thread targets the MultiProgress
+/// `MultiProgress::add(pb)` so the tick thread targets the `MultiProgress`
 /// draw target — calling it before `add` produces phantom duplicate rows.
 pub fn tick(pb: &ProgressBar) {
     pb.enable_steady_tick(TICK_PERIOD);
 }
 
 /// User preference for terminal color output.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ColorMode {
     /// Detect TTY/`NO_COLOR`/etc. at print time.
+    #[default]
     Auto,
     /// Force ANSI escapes on, even when stderr isn't a TTY.
     Always,
     /// Suppress all color escapes.
     Never,
-}
-
-impl Default for ColorMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 static COLOR: OnceLock<ColorMode> = OnceLock::new();
@@ -66,7 +62,7 @@ pub fn info(msg: &str) {
     if color_on() {
         eprintln!("{} {}", style("::").bold().blue(), style(msg).bold());
     } else {
-        eprintln!(":: {}", msg);
+        eprintln!(":: {msg}");
     }
 }
 
@@ -75,7 +71,7 @@ pub fn step(msg: &str) {
     if color_on() {
         eprintln!("{} {}", style("==>").bold().green(), style(msg).bold());
     } else {
-        eprintln!("==> {}", msg);
+        eprintln!("==> {msg}");
     }
 }
 
@@ -84,7 +80,7 @@ pub fn warn(msg: &str) {
     if color_on() {
         eprintln!("{} {}", style("warning:").yellow().bold(), msg);
     } else {
-        eprintln!("warning: {}", msg);
+        eprintln!("warning: {msg}");
     }
 }
 
@@ -93,7 +89,7 @@ pub fn error(msg: &str) {
     if color_on() {
         eprintln!("{} {}", style("error:").red().bold(), msg);
     } else {
-        eprintln!("error: {}", msg);
+        eprintln!("error: {msg}");
     }
 }
 
@@ -102,7 +98,7 @@ pub fn note(msg: &str) {
     if color_on() {
         eprintln!("{} {}", style("->").cyan(), msg);
     } else {
-        eprintln!("-> {}", msg);
+        eprintln!("-> {msg}");
     }
 }
 
@@ -116,7 +112,7 @@ pub fn pkg_list(label: &str, items: &[String]) {
     if color_on() {
         eprintln!("\n{}\n    {}\n", style(header).bold(), body);
     } else {
-        eprintln!("\n{}\n    {}\n", header, body);
+        eprintln!("\n{header}\n    {body}\n");
     }
 }
 
@@ -129,7 +125,7 @@ pub fn confirm(prompt: &str, noconfirm: bool) -> std::io::Result<bool> {
         .with_prompt(prompt)
         .default(true)
         .interact()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        .map_err(std::io::Error::other)
 }
 
 /// Bounded-byte progress bar (used when a total is known up-front).
@@ -234,11 +230,9 @@ pub fn bar_sideband(label: &str) -> ProgressBar {
     let pb = ProgressBar::new_spinner();
     pb.set_draw_target(ProgressDrawTarget::hidden());
     pb.set_style(
-        ProgressStyle::with_template(
-            "{prefix:>14.cyan.bold} {spinner} [{elapsed:>4}] {wide_msg}",
-        )
-        .unwrap()
-        .tick_chars(SPIN_TICKS),
+        ProgressStyle::with_template("{prefix:>14.cyan.bold} {spinner} [{elapsed:>4}] {wide_msg}")
+            .unwrap()
+            .tick_chars(SPIN_TICKS),
     );
     pb.set_prefix(label.to_string());
     pb
@@ -281,7 +275,7 @@ pub struct GixProgress {
     own_max: Option<u64>,
     /// This node's own leaf bar (lazy). `None` until the node actually
     /// reports step progress (`set` or `inc_by`); cleared from the
-    /// MultiProgress on `Drop`. Nodes that only get `set_name`'d (root,
+    /// `MultiProgress` on `Drop`. Nodes that only get `set_name`'d (root,
     /// intermediate ancestors) never spawn a leaf.
     leaf: Mutex<Option<ProgressBar>>,
 }
@@ -495,8 +489,7 @@ impl GixCount for GixProgress {
     fn step(&self) -> Step {
         self.lock_leaf()
             .as_ref()
-            .map(|pb| pb.position() as Step)
-            .unwrap_or(0)
+            .map_or(0, |pb| Step::try_from(pb.position()).unwrap_or(Step::MAX))
     }
 
     fn inc_by(&self, step: Step) {
@@ -546,7 +539,7 @@ impl GixProgressTrait for GixProgress {
     fn max(&self) -> Option<Step> {
         self.lock_leaf()
             .as_ref()
-            .and_then(|pb| pb.length().map(|x| x as Step))
+            .and_then(|pb| pb.length().map(|x| Step::try_from(x).unwrap_or(Step::MAX)))
     }
 
     fn set_max(&mut self, max: Option<Step>) -> Option<Step> {
@@ -567,7 +560,7 @@ impl GixProgressTrait for GixProgress {
     fn set_name(&mut self, name: String) {
         tracing::debug!(target: "gix_progress", new_name = %name, "set_name");
         self.set_summary(summary_with_hint(&name));
-        self.own_name = name.clone();
+        self.own_name.clone_from(&name);
         if let Some(pb) = self.lock_leaf().as_ref() {
             pb.set_prefix(leaf_label(&name).to_string());
         }
