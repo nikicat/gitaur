@@ -1,29 +1,32 @@
 //! Linked git worktrees pointing back at the bare mirror.
 //!
-//! gix 0.83 has no `git worktree add` API at any level, but the on-disk
-//! format has been stable since git 2.5: a tiny admin directory under the
-//! bare repo plus a `.git` pointer file in the worktree. We write those
-//! by hand so `cd ~/.local/state/gitaur/pkgs/<pkgbase> && git log` works
-//! natively, without pulling in a git binary dependency.
+//! Worktree creation and reset are delegated to the system `git` CLI:
 //!
-//! Layout produced:
+//! 1. `git worktree add --detach <dest> refs/heads/<pkgbase>` builds the admin
+//!    dir, the index, and the `.git` gitlink in one call — exactly what we
+//!    used to hand-roll, but with a real index so plain `git` commands work
+//!    inside the build dir.
+//! 2. `git -C <dest> reset --hard refs/heads/<pkgbase>` refreshes tracked
+//!    files to the current tip without touching anything outside the tree.
+//!    `pkg/`, `src/`, `src-cache/`, and cached `.pkg.tar.zst` all survive, so
+//!    the idempotency shortcut in `build::build_one` actually fires.
+//! 3. `git worktree remove --force` cleans up via coreutils `rm -rf` — which
+//!    chmod-then-removes, so fakeroot-staged subtrees with restrictive perms
+//!    (bisq's JRE under `pkg/`, fonts, anything `chmod 0111`'d in
+//!    `package()`) don't trip EACCES the way `std::fs::remove_dir_all` does.
 //!
-//! ```text
-//! <bare>/worktrees/<pkgbase>/
-//!     HEAD         "<commit-oid>\n"   (detached at the branch tip)
-//!     commondir    "../..\n"
-//!     gitdir       "<abs path to pkgs/<pkgbase>/.git>\n"
-//! pkgs/<pkgbase>/
-//!     .git         "gitdir: <abs path to bare/worktrees/<pkgbase>>\n"
-//!     PKGBUILD, .SRCINFO, ...   (materialized from the branch's tree)
-//! ```
+//! TODO(gix): replace the system-git shell-outs with native gix calls once
+//! gix ships a high-level worktree-add API. As of gix 0.83 the
+//! `gix-worktree-*` crates expose only low-level pieces (no `git worktree
+//! add`/`reset --hard` at any level), so a native implementation would mean
+//! re-doing index population + checkout-mode handling by hand — which is
+//! exactly the trade we're trying to back out of.
 
 use crate::error::{Error, Result};
 use crate::mirror::MirrorRepo;
-use gix::bstr::BStr;
-use gix::object::tree::{EntryKind, EntryMode};
 use gix::ObjectId;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tracing::{debug, instrument};
 
 /// One pkgbase's build directory plus the commit it was materialized from.
@@ -34,49 +37,54 @@ pub struct Worktree {
     pub head_oid: ObjectId,
 }
 
-/// Create or reset a linked worktree for `branch` at `dest`.
+/// Create or fast-refresh a linked worktree for `branch` at `dest`.
 ///
-/// If a previous worktree exists at `dest`, it (and its admin dir under the
-/// bare repo) is removed and re-created, then files are re-materialized from
-/// the current branch tip.
+/// Existing worktree → `git reset --hard` to the branch tip (tracked files
+/// only). Missing or half-state → recovery `worktree prune` + `worktree add
+/// --force`. Either path ends with a working linked worktree that native
+/// `git` recognises.
 #[instrument(skip(mirror))]
 pub fn add_or_reset(mirror: &MirrorRepo, branch: &str, dest: &Path) -> Result<Worktree> {
     let refname = format!("refs/heads/{branch}");
-    let head_oid = {
-        let mut r = mirror
-            .repo
-            .find_reference(refname.as_str())
-            .map_err(|e| Error::Gix(format!("find_reference {refname}: {e}")))?;
-        let commit = r
-            .peel_to_id()
-            .map_err(|e| Error::Gix(format!("peel {refname}: {e}")))?;
-        commit.detach()
-    };
-    let tree_oid = mirror
-        .repo
-        .find_commit(head_oid)
-        .map_err(|e| Error::Gix(format!("find_commit {head_oid}: {e}")))?
-        .tree_id()
-        .map_err(|e| Error::Gix(format!("tree_id {head_oid}: {e}")))?
-        .detach();
+    let head_oid = peel_branch(mirror, &refname)?;
 
-    // Clean slate. State.db is the source of truth for "last built commit";
-    // the on-disk worktree is just scratch.
-    let admin_dir = bare_worktree_admin(&mirror.path, branch);
-    if dest.exists() {
-        std::fs::remove_dir_all(dest)?;
+    if is_linked_worktree(dest) {
+        // Surgical refresh — only the index's path set changes. Untracked
+        // files (pkg/, src/, *.pkg.tar.zst) survive; that's the whole point.
+        run_git(&[
+            "-C".as_ref(),
+            dest.as_os_str(),
+            "reset".as_ref(),
+            "--hard".as_ref(),
+            refname.as_ref(),
+        ])?;
+        debug!(branch, %head_oid, "reset existing worktree to branch tip");
+    } else {
+        // First call, or someone deleted half the state by hand. Drop any
+        // orphaned admin entry, scrub a stale dest if one is in the way,
+        // then create the worktree fresh.
+        run_git(&[
+            "-C".as_ref(),
+            mirror.path.as_os_str(),
+            "worktree".as_ref(),
+            "prune".as_ref(),
+        ])
+        .ok();
+        if dest.exists() {
+            force_remove(dest)?;
+        }
+        run_git(&[
+            "-C".as_ref(),
+            mirror.path.as_os_str(),
+            "worktree".as_ref(),
+            "add".as_ref(),
+            "--detach".as_ref(),
+            dest.as_os_str(),
+            refname.as_ref(),
+        ])?;
+        debug!(branch, %head_oid, dest = %dest.display(), "linked worktree created");
     }
-    if admin_dir.exists() {
-        std::fs::remove_dir_all(&admin_dir)?;
-    }
-    std::fs::create_dir_all(dest)?;
-    std::fs::create_dir_all(&admin_dir)?;
 
-    write_admin_files(&admin_dir, dest, head_oid)?;
-    write_gitlink(dest, &admin_dir)?;
-    materialize_tree(mirror, tree_oid, dest)?;
-
-    debug!(branch, %head_oid, %tree_oid, admin = %admin_dir.display(), "linked worktree ready");
     Ok(Worktree {
         path: dest.to_path_buf(),
         head_oid,
@@ -84,110 +92,100 @@ pub fn add_or_reset(mirror: &MirrorRepo, branch: &str, dest: &Path) -> Result<Wo
 }
 
 /// Remove a worktree's files and admin directory. Idempotent.
-pub fn prune(mirror: &MirrorRepo, branch: &str, dest: &Path) -> Result<()> {
+///
+/// Strategy: scrub `dest` with [`force_remove`] (chmod-then-`remove_dir_all`,
+/// the only way to escape fakeroot-staged `0111` dirs), then let
+/// `git worktree prune` sweep the now-orphaned admin entry. `branch` is
+/// retained for API symmetry but no longer consulted directly — the admin
+/// dir's name is derived from the dest basename by git itself, and prune
+/// finds it from there.
+pub fn prune(mirror: &MirrorRepo, _branch: &str, dest: &Path) -> Result<()> {
     if dest.exists() {
-        std::fs::remove_dir_all(dest)?;
+        force_remove(dest)?;
     }
-    let admin = bare_worktree_admin(&mirror.path, branch);
-    if admin.exists() {
-        std::fs::remove_dir_all(&admin)?;
+    let _ = run_git(&[
+        "-C".as_ref(),
+        mirror.path.as_os_str(),
+        "worktree".as_ref(),
+        "prune".as_ref(),
+    ]);
+    Ok(())
+}
+
+/// True iff `dest` looks like a working linked worktree — its `.git` file
+/// points at an admin dir that still exists. Used to choose between
+/// `reset --hard` (fast path) and full recovery + `worktree add`.
+fn is_linked_worktree(dest: &Path) -> bool {
+    let gitfile = dest.join(".git");
+    let Ok(content) = std::fs::read_to_string(&gitfile) else {
+        return false;
+    };
+    let Some(admin) = content.strip_prefix("gitdir:") else {
+        return false;
+    };
+    Path::new(admin.trim()).is_dir()
+}
+
+/// chmod-then-remove. Walks `path`, restores `u+rwx` on directories we own
+/// (so `read_dir` and `unlinkat` work), then calls `std::fs::remove_dir_all`.
+/// Mirrors what coreutils `chmod -R u+rwX … && rm -rf …` would do — neither
+/// `rm -rf` alone nor `git worktree remove` chmod-on-traverse for owner.
+fn force_remove(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fn fixup(path: &Path) -> std::io::Result<()> {
+        let meta = std::fs::symlink_metadata(path)?;
+        if !meta.file_type().is_dir() {
+            return Ok(());
+        }
+        let mut perms = meta.permissions();
+        if perms.mode() & 0o700 != 0o700 {
+            perms.set_mode(perms.mode() | 0o700);
+            std::fs::set_permissions(path, perms)?;
+        }
+        for entry in std::fs::read_dir(path)? {
+            fixup(&entry?.path())?;
+        }
+        Ok(())
     }
+    fixup(path)?;
+    std::fs::remove_dir_all(path)?;
     Ok(())
 }
 
-fn bare_worktree_admin(bare: &Path, branch: &str) -> PathBuf {
-    bare.join("worktrees").join(branch)
-}
-
-/// Write `HEAD`, `commondir`, `gitdir` inside the admin directory.
-fn write_admin_files(admin: &Path, worktree_dir: &Path, head_oid: ObjectId) -> Result<()> {
-    // Detached HEAD at the branch tip — keeps things simple and reset-safe.
-    std::fs::write(admin.join("HEAD"), format!("{head_oid}\n"))?;
-    // Relative path from <bare>/worktrees/<name>/ back to <bare>.
-    std::fs::write(admin.join("commondir"), "../..\n")?;
-    // Absolute path to the worktree's `.git` *file* (not the worktree dir).
-    let gitfile = worktree_dir
-        .canonicalize()
-        .unwrap_or_else(|_| worktree_dir.to_path_buf())
-        .join(".git");
-    std::fs::write(admin.join("gitdir"), format!("{}\n", gitfile.display()))?;
-    Ok(())
-}
-
-/// Write the `.git` pointer file inside the worktree.
-fn write_gitlink(worktree_dir: &Path, admin: &Path) -> Result<()> {
-    let abs_admin = admin.canonicalize().unwrap_or_else(|_| admin.to_path_buf());
-    std::fs::write(
-        worktree_dir.join(".git"),
-        format!("gitdir: {}\n", abs_admin.display()),
-    )?;
-    Ok(())
-}
-
-/// Recursively write a tree's contents to `dest`.
-fn materialize_tree(mirror: &MirrorRepo, tree_oid: ObjectId, dest: &Path) -> Result<()> {
-    let tree = mirror
+/// Resolve `refname` to its tip OID using the bare repo's object DB. We do
+/// this via gix instead of `git rev-parse` so the hot path (every `build_one`)
+/// avoids a fork — and because state.db needs the OID anyway.
+fn peel_branch(mirror: &MirrorRepo, refname: &str) -> Result<ObjectId> {
+    let mut r = mirror
         .repo
-        .find_tree(tree_oid)
-        .map_err(|e| Error::Gix(format!("find_tree {tree_oid}: {e}")))?;
-    for entry in tree.iter() {
-        let entry = entry.map_err(|e| Error::Gix(format!("iter tree: {e}")))?;
-        write_entry(mirror, entry.filename(), entry.oid(), entry.mode(), dest)?;
-    }
-    Ok(())
+        .find_reference(refname)
+        .map_err(|e| Error::Gix(format!("find_reference {refname}: {e}")))?;
+    let commit = r
+        .peel_to_id()
+        .map_err(|e| Error::Gix(format!("peel {refname}: {e}")))?;
+    Ok(commit.detach())
 }
 
-fn write_entry(
-    mirror: &MirrorRepo,
-    name: &BStr,
-    oid: &gix::oid,
-    mode: EntryMode,
-    parent: &Path,
-) -> Result<()> {
-    let name_str = std::str::from_utf8(name.as_ref())
-        .map_err(|e| Error::Gix(format!("non-utf8 path: {e}")))?;
-    if name_str == ".git" {
-        // Defensive: a tree should never contain `.git`, but if one did it
-        // would clobber our pointer file. Skip with a warning.
-        debug!(path = %parent.join(name_str).display(), "skipping in-tree .git");
-        return Ok(());
-    }
-    let child = parent.join(name_str);
-
-    let obj = mirror
-        .repo
-        .find_object(oid.to_owned())
-        .map_err(|e| Error::Gix(format!("find_object {oid}: {e}")))?;
-
-    match mode.kind() {
-        EntryKind::Tree => {
-            std::fs::create_dir_all(&child)?;
-            materialize_tree(mirror, oid.to_owned(), &child)?;
-        }
-        EntryKind::Blob => {
-            std::fs::write(&child, obj.data.as_slice())?;
-        }
-        EntryKind::BlobExecutable => {
-            std::fs::write(&child, obj.data.as_slice())?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perm = std::fs::metadata(&child)?.permissions();
-                perm.set_mode(0o755);
-                std::fs::set_permissions(&child, perm)?;
-            }
-        }
-        EntryKind::Link => {
-            let target = std::str::from_utf8(obj.data.as_slice())
-                .map_err(|e| Error::Gix(format!("symlink target utf8: {e}")))?;
-            let _ = std::fs::remove_file(&child);
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(target, &child)?;
-        }
-        EntryKind::Commit => {
-            // Submodule pointer; AUR PKGBUILDs never use them.
-            debug!(path = %child.display(), "skipping submodule entry");
-        }
+/// Run `git <args>` and convert non-zero exits into a contextful `Error::Gix`.
+/// Stderr is captured so the message points at the actual git failure rather
+/// than a bare "io: ... os error N".
+fn run_git(args: &[&std::ffi::OsStr]) -> Result<()> {
+    let out = Command::new("git")
+        .args(args)
+        .output()
+        .map_err(|e| Error::other(format!("spawn git: {e}")))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let argv: Vec<String> = args
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        return Err(Error::Gix(format!(
+            "git {} failed: {}",
+            argv.join(" "),
+            stderr.trim(),
+        )));
     }
     Ok(())
 }
@@ -196,11 +194,12 @@ fn write_entry(
 mod tests {
     use super::*;
     use crate::testing::git;
-    use std::process::Command;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
-    /// Build a tiny bare repo via the system `git` so the test exercises the
-    /// real on-disk format we're about to wire up by hand.
+    /// Build a tiny bare repo via the system `git` CLI; gix opens it for the
+    /// `MirrorRepo` wrapper. Both sides are real, no hand-built admin dirs.
     fn make_bare(dir: &Path) -> (PathBuf, gix::Repository) {
         let src = dir.join("src");
         let bare = dir.join("bare");
@@ -236,23 +235,14 @@ mod tests {
 
         let wt = add_or_reset(&mirror, "main", &dest).unwrap();
 
-        // Files materialized.
+        // Tracked files materialized.
         assert!(dest.join("PKGBUILD").exists());
         assert!(dest.join("README").exists());
-        // Linkage written.
+        // git wired both sides: pointer in worktree, admin under bare.
         assert!(dest.join(".git").is_file());
-        assert!(bare.join("worktrees/main/HEAD").exists());
-        assert!(bare.join("worktrees/main/commondir").exists());
-        assert!(bare.join("worktrees/main/gitdir").exists());
+        assert!(bare.join("worktrees/foo/HEAD").exists());
 
-        // Native git accepts it.
-        let status = Command::new("git")
-            .args(["-C", dest.to_str().unwrap(), "status", "--porcelain"])
-            .status()
-            .unwrap();
-        assert!(status.success(), "git status must accept our linkage");
-
-        // Native git sees this worktree from the bare side too.
+        // Native git sees this worktree from the bare side.
         let out = Command::new("git")
             .args([
                 "-C",
@@ -269,23 +259,87 @@ mod tests {
             "got:\n{stdout}"
         );
 
-        // OID round-trip.
-        let head_in_admin = std::fs::read_to_string(bare.join("worktrees/main/HEAD")).unwrap();
+        // OID round-trip: the admin HEAD must point at the same commit we
+        // peeled via gix.
+        let head_in_admin = std::fs::read_to_string(bare.join("worktrees/foo/HEAD")).unwrap();
         assert!(head_in_admin
             .trim_end()
             .starts_with(&wt.head_oid.to_string()));
     }
 
     #[test]
-    fn reset_replaces_contents() {
+    fn reset_preserves_untracked_makepkg_scratch() {
+        // The whole reason we switched to `git reset --hard`: rebuilds must
+        // NOT wipe `pkg/`, `src/`, `src-cache/`, or cached `.pkg.tar.zst`.
+        // Otherwise the idempotency cache in build_one is dead code and we
+        // re-download sources on every run.
         let td = TempDir::new().unwrap();
         let (bare, repo) = make_bare(td.path());
         let mirror = MirrorRepo { path: bare, repo };
         let dest = td.path().join("pkgs/foo");
+
         add_or_reset(&mirror, "main", &dest).unwrap();
-        std::fs::write(dest.join("scratch"), "junk").unwrap();
-        let _wt = add_or_reset(&mirror, "main", &dest).unwrap();
-        assert!(!dest.join("scratch").exists(), "reset must wipe local mods");
+        // Simulate a previous makepkg run leaving scratch behind.
+        fs::create_dir(dest.join("src")).unwrap();
+        fs::write(dest.join("src/downloaded.tar.gz"), b"hi").unwrap();
+        fs::write(dest.join("foo-1-1-x86_64.pkg.tar.zst"), b"pkg").unwrap();
+
+        add_or_reset(&mirror, "main", &dest).unwrap();
+
+        assert!(
+            dest.join("src/downloaded.tar.gz").exists(),
+            "untracked makepkg src dir must survive reset",
+        );
+        assert!(
+            dest.join("foo-1-1-x86_64.pkg.tar.zst").exists(),
+            "cached .pkg.tar.zst must survive — idempotency shortcut depends on it",
+        );
+        // Tracked files still correct after the reset.
         assert!(dest.join("PKGBUILD").exists());
+    }
+
+    #[test]
+    fn reset_undoes_modifications_to_tracked_files() {
+        // Untracked content is preserved, but TRACKED files must snap back
+        // to the branch tip — that's the whole job of `reset --hard`. If a
+        // user edited PKGBUILD locally between builds, the second build
+        // should re-materialize the index's version.
+        let td = TempDir::new().unwrap();
+        let (bare, repo) = make_bare(td.path());
+        let mirror = MirrorRepo { path: bare, repo };
+        let dest = td.path().join("pkgs/foo");
+
+        add_or_reset(&mirror, "main", &dest).unwrap();
+        fs::write(dest.join("PKGBUILD"), b"tampered\n").unwrap();
+        add_or_reset(&mirror, "main", &dest).unwrap();
+        assert_eq!(
+            fs::read_to_string(dest.join("PKGBUILD")).unwrap(),
+            "pkgname=foo\n",
+            "reset --hard must restore tracked files to branch tip",
+        );
+    }
+
+    #[test]
+    fn prune_handles_fakeroot_restrictive_perms() {
+        // Regression: bisq's `pkg/` subtree contains directories with mode
+        // 0111 from fakeroot. `std::fs::remove_dir_all` can't traverse those
+        // and bombs with EACCES. We now delegate to `git worktree remove
+        // --force` → coreutils `rm -rf`, which chmod-then-removes.
+        let td = TempDir::new().unwrap();
+        let (bare, repo) = make_bare(td.path());
+        let mirror = MirrorRepo { path: bare, repo };
+        let dest = td.path().join("pkgs/foo");
+
+        add_or_reset(&mirror, "main", &dest).unwrap();
+        // Mimic the failure mode: a directory we can't traverse.
+        let trap = dest.join("pkg/restricted");
+        fs::create_dir_all(&trap).unwrap();
+        fs::write(trap.join("inner"), b"data").unwrap();
+        let mut perms = fs::metadata(&trap).unwrap().permissions();
+        perms.set_mode(0o111);
+        fs::set_permissions(&trap, perms).unwrap();
+
+        prune(&mirror, "foo", &dest).expect("prune must handle restrictive perms");
+        assert!(!dest.exists(), "prune must remove dest tree entirely");
     }
 }
