@@ -1,0 +1,19 @@
+# Standalone pkgbase whose sole pkgname is `test-collision-otf` — same name
+# as one of `test-collision-multi`'s pkgnames. The Secondary index's
+# by_name map can only hold one entry per name; without the pkgbase-string
+# pinning in expand_pkgbase_targets, `-S test-collision-multi` would route
+# through by_name on the rewritten pkgnames and accidentally build this
+# unrelated pkgbase too.
+#
+# pkgver 1.x so the distinguishing pacman `Version` field tells the smoke
+# test which pkgbase actually produced the installed file.
+pkgname=test-collision-otf
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: standalone pkgbase with colliding pkgname'
+arch=('any')
+license=('MIT')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/test-collision-otf/standalone.marker"
+}

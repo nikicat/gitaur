@@ -73,7 +73,20 @@ pub fn cmd_install(cfg: &Config, targets: &[String], noconfirm: bool, asdeps: bo
         (&empty_idx, None)
     };
 
-    let plan = resolver::resolve(cfg, idx, by, &pac, targets)?;
+    // Expand bare `-S <pkgbase>` targets into the pkgname(s) the user wants
+    // installed as explicit. Split pkgbases prompt for a subset; single-pkgname
+    // pkgbases pass through silently. The selector closure delegates to
+    // `ui::select_pkgnames` so tests can swap in a deterministic picker.
+    let expanded = resolver::expand_pkgbase_targets(idx, by, &pac, targets, &mut |pb, pns| {
+        ui::select_pkgnames(pb, pns, noconfirm).map_err(|e| Error::other(e.to_string()))
+    })?;
+    let mut plan = resolver::resolve(cfg, idx, by, &pac, &expanded.targets)?;
+    plan.pkgname_selections = expanded.selections;
+    // For pkgbase/provides hits the resolver received the pkgbase string, so
+    // `plan.direct_targets` only contains the pkgbase. Mark the pkgnames the
+    // user actually chose as direct too, so `install_stratum` flags their
+    // `.pkg.tar.zst` Explicit instead of `--asdeps`.
+    plan.direct_targets.extend(expanded.direct_pkgnames);
 
     // Pure-repo fast path: nothing to build, delegate to pacman so the user
     // gets pacman's own "Proceed with installation?" prompt verbatim. Direct
@@ -182,7 +195,13 @@ fn run_aur_pipeline(
         }
         let mut stratum_built: Vec<BuiltPkg> = Vec::with_capacity(stratum.len());
         for pkgbase in stratum {
-            let outputs = build_one(cfg, &mirror, idx, &mut db, pkgbase, noconfirm)?;
+            // Partial-split selection — present only for pkgbases where the
+            // user asked for a subset. makepkg always packages every pkgname
+            // in a split (no `--pkg=` flag); `build_one` returns only the
+            // selected `.pkg.tar.zst` files so `install_stratum`'s
+            // `pacman -U` transaction skips the rest.
+            let selection = plan.pkgname_selections.get(pkgbase).map(Vec::as_slice);
+            let outputs = build_one(cfg, &mirror, idx, &mut db, pkgbase, selection, noconfirm)?;
             stratum_built.push(BuiltPkg {
                 pkgbase: pkgbase.clone(),
                 files: outputs,
@@ -207,13 +226,14 @@ fn run_aur_pipeline(
     Ok(())
 }
 
-#[instrument(skip(cfg, mirror, idx, db))]
+#[instrument(skip(cfg, mirror, idx, db, selection))]
 fn build_one(
     cfg: &Config,
     mirror: &MirrorRepo,
     idx: &IndexFile,
     db: &mut StateDb,
     pkgbase: &str,
+    selection: Option<&[String]>,
     noconfirm: bool,
 ) -> Result<Vec<PathBuf>> {
     let entry = idx
@@ -225,18 +245,34 @@ fn build_one(
     let dest = paths::pkg_worktree(pkgbase);
     let wt = mirror::worktree::add_or_reset(mirror, pkgbase, &dest)?;
 
-    // Idempotency: skip the build if we already produced .pkg.tar.zst at this commit.
+    // Idempotency: a cached build is reusable only when its on-disk
+    // .pkg.tar.zst set covers every pkgname this run wants. A previous run
+    // with `--pkg=A` produced just A; a follow-up that asks for {A,B} would
+    // otherwise reuse A's file and silently drop B.
     if let Some(prev) = db.get(pkgbase)? {
         let existing = install::find_produced(&wt.path)?;
-        if prev.last_built_commit_oid == head_hex && !existing.is_empty() {
+        let covers_selection = match selection {
+            Some(sel) => sel.iter().all(|name| {
+                existing
+                    .iter()
+                    .any(|f| install::extract_pkgname(f).as_deref() == Some(name.as_str()))
+            }),
+            None => entry.pkgnames.iter().all(|pkg| {
+                existing
+                    .iter()
+                    .any(|f| install::extract_pkgname(f).as_deref() == Some(pkg.name.as_str()))
+            }),
+        };
+        if prev.last_built_commit_oid == head_hex && covers_selection {
+            let kept = filter_by_selection(&existing, selection);
             ui::note(&format!("{pkgbase}: already built at {}", &head_hex[..8]));
             debug!(
                 pkgbase,
                 head_hex,
-                files = existing.len(),
+                files = kept.len(),
                 "reusing cached build"
             );
-            return Ok(existing);
+            return Ok(kept);
         }
     }
 
@@ -244,7 +280,8 @@ fn build_one(
     ui::step(&format!("makepkg {pkgbase}"));
     makepkg::run(cfg, &wt.path)?;
 
-    let outputs = install::find_produced(&wt.path)?;
+    let produced = install::find_produced(&wt.path)?;
+    let outputs = filter_by_selection(&produced, selection);
     if outputs.is_empty() {
         return Err(Error::Build(format!(
             "{pkgbase}: makepkg produced no packages"
@@ -255,6 +292,23 @@ fn build_one(
     db.record_build(pkgbase, &head_hex, &version)?;
     info!(pkgbase, version, files = outputs.len(), "build recorded");
     Ok(outputs)
+}
+
+/// Keep only `.pkg.tar.zst` whose pkgname is in `selection`. `None` means no
+/// filter (default for non-split builds and dependency builds). Guards
+/// against stale leftover files (e.g. a prior wider build) when reusing a
+/// cached build.
+fn filter_by_selection(files: &[PathBuf], selection: Option<&[String]>) -> Vec<PathBuf> {
+    let Some(sel) = selection else {
+        return files.to_vec();
+    };
+    files
+        .iter()
+        .filter(|f| {
+            install::extract_pkgname(f).is_some_and(|n| sel.iter().any(|s| s == &n))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Install every `.pkg.tar.zst` produced by one stratum's builds in a single

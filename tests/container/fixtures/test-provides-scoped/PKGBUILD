@@ -1,0 +1,33 @@
+# Split PKGBUILD where exactly one pkgname declares `provides`. Mirrors the
+# real AUR `bisq` shape (pkgbase = bisq, pkgname = bisq-desktop+bisq-cli+
+# bisq-daemon, and only `bisq-desktop` declares `provides=bisq`).
+#
+# Exercises the per-pkgname provides attribution path:
+#   * SRCINFO parser tracks current pkgname when accumulating provides
+#   * Secondary::provider_of returns the owning pkgname for the virtual name
+#   * expand_pkgbase_targets rewrites `-S <virtual>` to that pkgname only
+#   * build pipeline passes `--pkg=<owner>` to makepkg, so siblings are
+#     never packaged or installed
+pkgbase=test-provides-scoped
+pkgname=(test-provides-scoped-main test-provides-scoped-cli test-provides-scoped-daemon)
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: scoped provides on a split pkgbase'
+arch=('any')
+license=('MIT')
+
+package_test-provides-scoped-main() {
+    pkgdesc='main pkg — declares provides=scoped-virt'
+    provides=('scoped-virt')
+    install -Dm644 /dev/null "$pkgdir/usr/share/test-provides-scoped-main/marker"
+}
+
+package_test-provides-scoped-cli() {
+    pkgdesc='cli sibling that should NOT be built when the user typed scoped-virt'
+    install -Dm644 /dev/null "$pkgdir/usr/share/test-provides-scoped-cli/marker"
+}
+
+package_test-provides-scoped-daemon() {
+    pkgdesc='daemon sibling that should NOT be built when the user typed scoped-virt'
+    install -Dm644 /dev/null "$pkgdir/usr/share/test-provides-scoped-daemon/marker"
+}

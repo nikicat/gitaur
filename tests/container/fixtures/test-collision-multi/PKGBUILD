@@ -1,0 +1,26 @@
+# Split pkgbase whose pkgnames collide with another pkgbase's pkgname.
+# Pair with `test-collision-otf` (separate pkgbase, single pkgname
+# `test-collision-otf`) — both put `test-collision-otf` into the index's
+# by_name map. Without the pkgbase-string pinning in
+# expand_pkgbase_targets, the resolver would silently classify the wrong
+# entry and build both pkgbases.
+#
+# pkgver 2.x for this pkgbase so installed `Version` distinguishes which
+# pkgbase actually produced the .pkg.tar.zst that pacman saw.
+pkgbase=test-collision-multi
+pkgname=(test-collision-otf test-collision-ttf)
+pkgver=2.0
+pkgrel=1
+pkgdesc='gitaur test fixture: split pkg with sibling-name collision'
+arch=('any')
+license=('MIT')
+
+package_test-collision-otf() {
+    pkgdesc='OTF variant from the multi pkgbase (pkgver 2.x)'
+    install -Dm644 /dev/null "$pkgdir/usr/share/test-collision-multi/otf.marker"
+}
+
+package_test-collision-ttf() {
+    pkgdesc='TTF variant from the multi pkgbase (pkgver 2.x)'
+    install -Dm644 /dev/null "$pkgdir/usr/share/test-collision-multi/ttf.marker"
+}

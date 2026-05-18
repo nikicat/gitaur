@@ -9,9 +9,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use tracing::{debug, info, instrument};
 
 pub mod classify;
+pub mod pkgbase_expand;
 pub mod topo;
 
 pub use classify::{classify, Source};
+pub use pkgbase_expand::{expand_pkgbase_targets, ExpandedTargets};
 
 /// Resolved install plan partitioned by source.
 #[derive(Debug, Default, Clone)]
@@ -30,6 +32,14 @@ pub struct Plan {
     pub aur_strata: Vec<Vec<String>>,
     /// User-requested top-level targets (pkgnames, not pkgbases).
     pub direct_targets: HashSet<String>,
+    /// Per-pkgbase pkgname subset for split-package targets where the user
+    /// chose to install only some pkgnames. makepkg has no flag to limit
+    /// which pkgnames it builds (`package_*()` is all-or-nothing for a
+    /// pkgbase), so the build always produces every pkgname's
+    /// `.pkg.tar.zst`; this map drives the *install* filter only — only
+    /// listed pkgnames are fed into the final `pacman -U`. Pkgbases absent
+    /// from the map default to "install everything".
+    pub pkgname_selections: HashMap<String, Vec<String>>,
 }
 
 impl Plan {
@@ -95,8 +105,8 @@ pub fn resolve(
             Source::Aur(entry_idx) => {
                 let entry = &idx.entries[entry_idx];
                 let pkgbase = entry.pkgbase.clone();
-                for name in &entry.pkgnames {
-                    pkgname_to_pkgbase.insert(name.clone(), pkgbase.clone());
+                for pkg in &entry.pkgnames {
+                    pkgname_to_pkgbase.insert(pkg.name.clone(), pkgbase.clone());
                 }
                 if !visited_aur.insert(pkgbase.clone()) {
                     continue;
@@ -180,9 +190,16 @@ mod tests {
         checkdepends: &[&str],
         provides: &[&str],
     ) -> IndexEntry {
+        use crate::index::schema::Pkgname;
         IndexEntry {
             pkgbase: pkgbase.into(),
-            pkgnames: pkgnames.iter().map(|s| (*s).into()).collect(),
+            pkgnames: pkgnames
+                .iter()
+                .map(|s| Pkgname {
+                    name: (*s).into(),
+                    provides: Vec::new(),
+                })
+                .collect(),
             depends: depends.iter().map(|s| (*s).into()).collect(),
             makedepends: makedepends.iter().map(|s| (*s).into()).collect(),
             checkdepends: checkdepends.iter().map(|s| (*s).into()).collect(),

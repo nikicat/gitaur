@@ -70,20 +70,40 @@ pub fn cmd_refresh(cfg: &Config, force_reclone: bool) -> Result<()> {
     ui::info("refreshing AUR mirror");
     let mirror = MirrorRepo::open(&path)?;
     let updates = fetch::incremental_fetch(cfg, &mirror)?;
-    if updates.is_empty() && paths::index_path().exists() {
-        ui::note("no ref updates");
-        return Ok(());
-    }
 
-    if paths::index_path().exists() {
-        let mut idx = index::load(&paths::index_path())?;
-        index::update::incremental_update(&mirror, &updates, &mut idx)?;
-        index::save(&idx, &paths::index_path())?;
+    // Load the existing index if any. A failed load (rkyv validation, schema
+    // mismatch after a gitaur upgrade, etc.) is **recovered from in-place**
+    // by falling back to a full rebuild — otherwise the user would be stuck
+    // in a loop where `-Sy` errors out before it can rebuild.
+    let idx_path = paths::index_path();
+    let existing = if idx_path.exists() {
+        match index::load(&idx_path) {
+            Ok(idx) => Some(idx),
+            Err(e) => {
+                ui::warn(&format!("existing index unreadable, rebuilding from scratch: {e}"));
+                None
+            }
+        }
     } else {
-        let idx = index::build::full_build(cfg, &mirror)?;
-        index::save(&idx, &paths::index_path())?;
+        None
+    };
+
+    match existing {
+        Some(mut idx) if !updates.is_empty() => {
+            index::update::incremental_update(&mirror, &updates, &mut idx)?;
+            index::save(&idx, &idx_path)?;
+            ui::note(&format!("{} ref(s) updated", updates.len()));
+        }
+        Some(_) => {
+            ui::note("no ref updates");
+        }
+        None => {
+            ui::info("building index");
+            let idx = index::build::full_build(cfg, &mirror)?;
+            index::save(&idx, &idx_path)?;
+            ui::info("index built");
+        }
     }
-    ui::note(&format!("{} ref(s) updated", updates.len()));
     Ok(())
 }
 

@@ -57,12 +57,18 @@ pub fn classify(by: Option<&Secondary>, pac: &PacmanIndex, name: &str) -> Source
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::schema::{IndexEntry, IndexFile};
+    use crate::index::schema::{IndexEntry, IndexFile, Pkgname};
 
     fn mk_aur(pkgbase: &str, names: &[&str], provides: &[&str]) -> IndexEntry {
         IndexEntry {
             pkgbase: pkgbase.into(),
-            pkgnames: names.iter().map(|s| (*s).into()).collect(),
+            pkgnames: names
+                .iter()
+                .map(|s| Pkgname {
+                    name: (*s).into(),
+                    provides: Vec::new(),
+                })
+                .collect(),
             provides: provides.iter().map(|s| (*s).into()).collect(),
             pkgver: "1".into(),
             pkgrel: "1".into(),

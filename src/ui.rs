@@ -12,7 +12,7 @@
 //! Splitting the two lets callers `set_message` without clobbering the label.
 
 use console::{style, Term};
-use dialoguer::Confirm;
+use dialoguer::{Confirm, MultiSelect};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -126,6 +126,44 @@ pub fn confirm(prompt: &str, noconfirm: bool) -> std::io::Result<bool> {
         .default(true)
         .interact()
         .map_err(std::io::Error::other)
+}
+
+/// Ask the user which pkgnames of a split pkgbase to install.
+///
+/// makepkg packages every pkgname of a split PKGBUILD in one go (there's no
+/// flag to skip), but `gitaur` filters the resulting `.pkg.tar.zst` set
+/// before `pacman -U` runs — so **unselected pkgnames are built but never
+/// installed**. Selected pkgnames are installed as `Explicit`.
+///
+/// Short-circuits without prompting when:
+///   * the pkgbase has a single pkgname (no real choice — just inform);
+///   * `noconfirm` is set (auto-select every pkgname).
+pub fn select_pkgnames(
+    pkgbase: &str,
+    pkgnames: &[String],
+    noconfirm: bool,
+) -> std::io::Result<Vec<String>> {
+    if pkgnames.len() <= 1 {
+        if let Some(only) = pkgnames.first() {
+            if only != pkgbase {
+                note(&format!("resolved pkgbase `{pkgbase}` → `{only}`"));
+            }
+        }
+        return Ok(pkgnames.to_vec());
+    }
+    if noconfirm {
+        return Ok(pkgnames.to_vec());
+    }
+    let chosen = MultiSelect::new()
+        .with_prompt(format!(
+            "[{pkgbase}] split package — pick pkgnames to install \
+             (unselected are built but skipped at install time)"
+        ))
+        .items(pkgnames)
+        .defaults(&vec![true; pkgnames.len()])
+        .interact()
+        .map_err(std::io::Error::other)?;
+    Ok(chosen.into_iter().map(|i| pkgnames[i].clone()).collect())
 }
 
 /// Bounded-byte progress bar (used when a total is known up-front).

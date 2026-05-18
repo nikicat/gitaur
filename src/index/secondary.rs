@@ -28,10 +28,16 @@ impl Secondary {
         let mut by_pkgbase = HashMap::with_capacity(idx.entries.len());
         for (i, e) in idx.entries.iter().enumerate() {
             let i = u32::try_from(i).expect("AUR index entries exceed u32::MAX");
-            for name in &e.pkgnames {
-                by_name.insert(name.clone(), i);
+            for pkg in &e.pkgnames {
+                by_name.insert(pkg.name.clone(), i);
             }
-            for prov in &e.provides {
+            // Both pkgbase-level (e.provides) and pkgname-scoped
+            // (pkgnames[*].provides) entries index back to the same
+            // pkgbase row — by_provides only carries entry indices.
+            // Attribution to a specific pkgname lives in `provider_of`,
+            // which the resolver uses when rewriting `-S <virtual-name>`
+            // into the concrete pkgname.
+            for prov in e.all_provides() {
                 let base = strip_version_constraint(prov);
                 by_provides.entry(base.to_string()).or_default().push(i);
             }
@@ -48,6 +54,49 @@ impl Secondary {
             by_provides,
             by_pkgbase,
         }
+    }
+
+    /// Identify which pkgname inside the entry actually declares `name` as a
+    /// `provides`. Useful for rewriting `-S <virtual-name>` into the
+    /// concrete pkgname the user really wants (the AUR-RPC behaviour yay /
+    /// paru rely on).
+    ///
+    /// Returns the entry index plus the matching pkgname:
+    ///   * pkgname-scoped provides → that pkgname's name.
+    ///   * pkgbase-level provides  → the first pkgname in the entry. A
+    ///     pkgbase-level `provides` semantically applies to *every* pkgname,
+    ///     so picking the first is arbitrary but stable, and matches AUR's
+    ///     "build the whole pkgbase" intent when no single pkgname owns the
+    ///     virtual name.
+    ///
+    /// `None` means no provides match anywhere in the index (the resolver
+    /// should fall back to pkgbase / Missing).
+    pub fn provider_of<'a>(
+        &self,
+        idx: &'a IndexFile,
+        name: &str,
+    ) -> Option<(usize, &'a str)> {
+        let bare = strip_version_constraint(name);
+        let &entry_idx = self.by_provides.get(bare)?.first()?;
+        let entry = idx.entries.get(entry_idx as usize)?;
+        // Prefer the pkgname that explicitly declared this provides; that's
+        // the case the bisq/yay parity work was added for.
+        for pkg in &entry.pkgnames {
+            if pkg
+                .provides
+                .iter()
+                .any(|p| strip_version_constraint(p) == bare)
+            {
+                return Some((entry_idx as usize, pkg.name.as_str()));
+            }
+        }
+        // No pkgname owned it, so the match came from a pkgbase-level
+        // provides — every pkgname provides it implicitly. Pick the first
+        // for a deterministic answer.
+        entry
+            .pkgnames
+            .first()
+            .map(|p| (entry_idx as usize, p.name.as_str()))
     }
 
     /// Resolve a reference to its primary entry. Order matches `classify`:
@@ -77,9 +126,9 @@ impl Secondary {
 }
 
 fn entry_matches(e: &IndexEntry, r: &regex::Regex) -> bool {
-    e.pkgnames.iter().any(|n| r.is_match(n))
+    e.pkgnames.iter().any(|p| r.is_match(&p.name))
         || e.pkgdesc.as_deref().is_some_and(|d| r.is_match(d))
-        || e.provides.iter().any(|p| r.is_match(p))
+        || e.all_provides().any(|p| r.is_match(p))
 }
 
 /// Strip pacman dep operators (`>=`, `=`, `<`, …) plus the version expression.
@@ -96,11 +145,43 @@ pub fn strip_version_constraint(dep: &str) -> &str {
 mod tests {
     use super::*;
 
+    use crate::index::schema::Pkgname;
+
+    /// Construct a pkgbase entry whose `provides` live at the pkgbase level
+    /// (apply to every pkgname implicitly — matches the common AUR shape).
     fn mk(pkgbase: &str, names: &[&str], provides: &[&str]) -> IndexEntry {
         IndexEntry {
             pkgbase: pkgbase.into(),
-            pkgnames: names.iter().map(|s| (*s).into()).collect(),
+            pkgnames: names
+                .iter()
+                .map(|s| Pkgname {
+                    name: (*s).into(),
+                    provides: Vec::new(),
+                })
+                .collect(),
             provides: provides.iter().map(|s| (*s).into()).collect(),
+            pkgver: "1".into(),
+            pkgrel: "1".into(),
+            ..Default::default()
+        }
+    }
+
+    /// Construct a split pkgbase where exactly one pkgname declares the
+    /// given provides — the bisq shape (`bisq-desktop` provides `bisq`).
+    fn mk_scoped(pkgbase: &str, owner: &str, owner_provides: &[&str], others: &[&str]) -> IndexEntry {
+        let mut pkgnames = vec![Pkgname {
+            name: owner.into(),
+            provides: owner_provides.iter().map(|s| (*s).into()).collect(),
+        }];
+        for o in others {
+            pkgnames.push(Pkgname {
+                name: (*o).into(),
+                provides: Vec::new(),
+            });
+        }
+        IndexEntry {
+            pkgbase: pkgbase.into(),
+            pkgnames,
             pkgver: "1".into(),
             pkgrel: "1".into(),
             ..Default::default()
@@ -182,6 +263,60 @@ mod tests {
             let i = u32::try_from(i).unwrap();
             assert_eq!(s.by_pkgbase.get(&e.pkgbase).copied(), Some(i));
         }
+    }
+
+    #[test]
+    fn provider_of_picks_the_pkgname_that_declares_the_provides() {
+        // bisq shape: one of three pkgnames declares `provides = bisq`.
+        // The resolver depends on this exact attribution so `-S bisq`
+        // rewrites to `bisq-desktop`, not the whole pkgbase.
+        let idx = IndexFile {
+            entries: vec![mk_scoped(
+                "bisq",
+                "bisq-desktop",
+                &["bisq"],
+                &["bisq-cli", "bisq-daemon"],
+            )],
+            ..IndexFile::empty()
+        };
+        let s = Secondary::build(&idx);
+        let (entry_idx, pkgname) = s.provider_of(&idx, "bisq").expect("provider lookup");
+        assert_eq!(entry_idx, 0);
+        assert_eq!(pkgname, "bisq-desktop");
+    }
+
+    #[test]
+    fn provider_of_handles_pkgbase_level_provides_deterministically() {
+        // `pkgbase = mypkg`, pkgbase-level `provides = virtual` — every
+        // pkgname provides it implicitly, so we return the first pkgname
+        // for a stable answer.
+        let idx = IndexFile {
+            entries: vec![mk("mypkg", &["mypkg", "mypkg-extras"], &["virtual"])],
+            ..IndexFile::empty()
+        };
+        let s = Secondary::build(&idx);
+        assert_eq!(
+            s.provider_of(&idx, "virtual"),
+            Some((0, "mypkg")),
+            "first pkgname is the canonical provider for pkgbase-level provides",
+        );
+    }
+
+    #[test]
+    fn provider_of_strips_version_constraint() {
+        // `paru-bin` declares `provides = paru=2.0.0`; users may type
+        // `paru>=1` and expect the same provider attribution.
+        let idx = fixture();
+        let s = Secondary::build(&idx);
+        let hit = s.provider_of(&idx, "paru>=1").expect("provider lookup");
+        assert_eq!(hit.1, "paru-bin");
+    }
+
+    #[test]
+    fn provider_of_returns_none_when_no_provides_match() {
+        let idx = fixture();
+        let s = Secondary::build(&idx);
+        assert!(s.provider_of(&idx, "nothing-provides-this").is_none());
     }
 
     #[test]

@@ -7,6 +7,12 @@ use std::process::Command;
 use tracing::{debug, info, instrument};
 
 /// Run `makepkg` in `worktree` with the configured args + env.
+///
+/// makepkg has no flag to limit which pkgnames of a split PKGBUILD get
+/// packaged — `package_*()` is run for every member, all-or-nothing. So we
+/// always build the whole pkgbase; the caller-side install filter
+/// (`build::filter_by_selection`) decides which of the resulting
+/// `.pkg.tar.zst` files end up in the `pacman -U` transaction.
 #[instrument(skip(cfg))]
 pub fn run(cfg: &Config, worktree: &Path) -> Result<()> {
     let mut cmd = Command::new(&cfg.makepkg_path);

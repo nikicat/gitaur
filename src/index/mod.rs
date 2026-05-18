@@ -20,6 +20,11 @@ pub mod update;
 pub use schema::{IndexEntry, IndexFile};
 
 /// Load the on-disk index. Returns an empty index if the file is missing.
+///
+/// Rejects archives whose `format_version` doesn't match the current
+/// [`IndexFile::FORMAT_VERSION`]. Rather than silently rebuilding, we error
+/// out with a `gitaur -Sy` hint so the user notices the schema change and
+/// triggers the rebuild deliberately (rebuilds take ~30 s on a slow disk).
 #[instrument]
 pub fn load(path: &Path) -> Result<IndexFile> {
     if !path.exists() {
@@ -27,8 +32,21 @@ pub fn load(path: &Path) -> Result<IndexFile> {
         return Ok(IndexFile::empty());
     }
     let bytes = std::fs::read(path)?;
-    let idx: IndexFile =
-        rkyv::from_bytes::<IndexFile, RkyvError>(&bytes).map_err(|e| Error::Rkyv(e.to_string()))?;
+    let idx: IndexFile = rkyv::from_bytes::<IndexFile, RkyvError>(&bytes).map_err(|e| {
+        // A schema bump invalidates the on-disk layout, so rkyv's validator
+        // trips before we'd ever see `format_version`. Tell the user how to
+        // recover instead of dumping a raw "validator: bounds mismatch".
+        Error::Rkyv(format!(
+            "{e} — index may be from an older gitaur; run `gitaur -Sy` to rebuild"
+        ))
+    })?;
+    if idx.format_version != IndexFile::FORMAT_VERSION {
+        return Err(Error::other(format!(
+            "index format v{} is incompatible with gitaur v{} — run `gitaur -Sy` to rebuild",
+            idx.format_version,
+            IndexFile::FORMAT_VERSION,
+        )));
+    }
     info!(entries = idx.entries.len(), "index loaded");
     Ok(idx)
 }
@@ -107,8 +125,13 @@ pub fn cmd_info(_cfg: &Config, targets: &[String]) -> Result<u8> {
 fn print_info(e: &IndexEntry) {
     println!("Repository      : aur");
     println!("Name            : {}", e.pkgbase);
-    if !e.pkgnames.is_empty() && e.pkgnames != vec![e.pkgbase.clone()] {
-        println!("Split pkgs      : {}", e.pkgnames.join(" "));
+    // Show the split-pkg list whenever the entry actually has more than one
+    // pkgname (or the single pkgname differs from pkgbase). Cheap join over
+    // names only — provides aren't part of the `-Si` summary.
+    let names: Vec<&str> = e.pkgnames.iter().map(|p| p.name.as_str()).collect();
+    let trivial = names.len() == 1 && names[0] == e.pkgbase;
+    if !names.is_empty() && !trivial {
+        println!("Split pkgs      : {}", names.join(" "));
     }
     println!(
         "Version         : {}",
@@ -123,8 +146,12 @@ fn print_info(e: &IndexEntry) {
     if !e.makedepends.is_empty() {
         println!("Make Deps       : {}", e.makedepends.join(" "));
     }
-    if !e.provides.is_empty() {
-        println!("Provides        : {}", e.provides.join(" "));
+    // Union of pkgbase-level and pkgname-scoped provides — `-Si` users
+    // want to see every virtual name the pkgbase makes available, not the
+    // attribution.
+    let provides: Vec<&str> = e.all_provides().collect();
+    if !provides.is_empty() {
+        println!("Provides        : {}", provides.join(" "));
     }
     println!();
 }
@@ -147,9 +174,13 @@ mod tests {
     }
 
     fn mk(pkgbase: &str) -> IndexEntry {
+        use crate::index::schema::Pkgname;
         IndexEntry {
             pkgbase: pkgbase.into(),
-            pkgnames: vec![pkgbase.into()],
+            pkgnames: vec![Pkgname {
+                name: pkgbase.into(),
+                provides: Vec::new(),
+            }],
             pkgver: "1.0".into(),
             pkgrel: "1".into(),
             ..Default::default()

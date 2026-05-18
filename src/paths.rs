@@ -1,9 +1,27 @@
 //! XDG-aware path helpers for gitaur state and config files.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 
+thread_local! {
+    /// Test-only override for [`state_dir`]. Lives in TLS so each test
+    /// thread can install its own tempdir without leaking into siblings.
+    /// Tests must drive this through the RAII helper in
+    /// `crate::testing::ScopedStateRoot` rather than poking the TLS
+    /// directly — the guard restores the previous value on drop so
+    /// failures don't strand the override.
+    pub(crate) static STATE_ROOT_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
 /// Root for per-user mutable state (e.g. `$XDG_STATE_HOME/gitaur`).
+///
+/// Honors the [`STATE_ROOT_OVERRIDE`] TLS when present so tests can reroute
+/// state into a tempdir without mutating process-wide env vars. Production
+/// callers see the TLS as `None` and fall through to the XDG path.
 pub fn state_dir() -> PathBuf {
+    if let Some(root) = STATE_ROOT_OVERRIDE.with(|c| c.borrow().clone()) {
+        return root;
+    }
     dirs::state_dir()
         .unwrap_or_else(|| dirs::home_dir().expect("home dir").join(".local/state"))
         .join("gitaur")
