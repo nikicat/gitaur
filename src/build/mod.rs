@@ -436,27 +436,27 @@ fn aur_upgrades(
     out
 }
 
-/// `gitaur -Qu` / `gitaur -Su --plan` — print the union of pacman-repo and
-/// AUR upgrade candidates in `pacman -Qu` format (`name old -> new`, one per
-/// line, sorted by name) to stdout. Read-only, no sudo, machine-parseable.
+/// `gitaur -Qu` — show the union of pacman-repo and AUR upgrade candidates
+/// as two aligned, colorized tables grouped by source. Read-only and
+/// unprivileged (no sudo), so safe to call both as the bare `-Qu` and as
+/// a preview before `-Syu` runs.
 #[instrument]
 pub fn cmd_query_upgrades(devel: bool) -> Result<u8> {
-    let repo = invoke::query_repo_upgrades()?;
+    let mut repo = invoke::query_repo_upgrades()?;
     let alpm = alpm_db::open()?;
     let pac = PacmanIndex::build(&alpm);
     let idx_path = paths::index_path();
-    let aur = if idx_path.exists() {
+    let mut aur = if idx_path.exists() {
         let idx = index::load(&idx_path)?;
         let by = Secondary::build(&idx);
         aur_upgrades(&idx, &by, &pac, devel)
     } else {
         Vec::new()
     };
-    let mut merged: Vec<PkgUpgrade> = repo.into_iter().chain(aur).collect();
-    merged.sort_by(|a, b| a.name.cmp(&b.name));
-    for u in &merged {
-        println!("{} {} -> {}", u.name, u.old_ver, u.new_ver);
-    }
+    repo.sort_by(|a, b| a.name.cmp(&b.name));
+    aur.sort_by(|a, b| a.name.cmp(&b.name));
+    ui::upgrade_table("Repo upgrades", &repo);
+    ui::upgrade_table("AUR upgrades", &aur);
     Ok(0)
 }
 

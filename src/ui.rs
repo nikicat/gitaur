@@ -11,6 +11,9 @@
 //!
 //! Splitting the two lets callers `set_message` without clobbering the label.
 
+use crate::pacman::invoke::PkgUpgrade;
+use crate::pacman::verdiff::{self, BumpKind};
+
 use console::{style, Term};
 use dialoguer::{Confirm, MultiSelect};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
@@ -113,6 +116,71 @@ pub fn pkg_list(label: &str, items: &[String]) {
         eprintln!("\n{}\n    {}\n", style(header).bold(), body);
     } else {
         eprintln!("\n{header}\n    {body}\n");
+    }
+}
+
+/// Display an aligned, colorized upgrade table:
+///
+/// ```text
+/// AUR upgrades (3)
+///     neovim-git       0.10.0.r123-1   ->  0.10.0.r130-1
+///     mypkg            1.0.0-1         ->  1.0.0-2
+///     bigpkg           1.2.3-1         ->  2.0.0-1
+/// ```
+///
+/// Columns are space-padded (no rules/lines). Both versions show their
+/// common prefix dimmed; the diverging suffix is colored by [`BumpKind`]
+/// so a glance distinguishes major (red), minor (yellow), patch (green),
+/// pkgrel (cyan), and epoch (red+bold) bumps.
+pub fn upgrade_table(label: &str, upgrades: &[PkgUpgrade]) {
+    if upgrades.is_empty() {
+        return;
+    }
+    let name_w = upgrades.iter().map(|u| u.name.len()).max().unwrap_or(0);
+    let old_w = upgrades.iter().map(|u| u.old_ver.len()).max().unwrap_or(0);
+    let header = format!("{} ({})", label, upgrades.len());
+
+    eprintln!();
+    if color_on() {
+        eprintln!("{}", style(&header).bold());
+        for u in upgrades {
+            let kind = verdiff::classify_bump(&u.old_ver, &u.new_ver);
+            let cut = verdiff::common_prefix_at_boundary(&u.old_ver, &u.new_ver);
+            let (old_pre, old_suf) = u.old_ver.split_at(cut);
+            let (new_pre, new_suf) = u.new_ver.split_at(cut);
+            // Pad after splitting so trailing spaces ride with the (dim) prefix.
+            let old_pad = " ".repeat(old_w.saturating_sub(u.old_ver.len()));
+            eprintln!(
+                "    {name:<name_w$}  {old_pre}{old_suf}{old_pad}  ->  {new_pre}{new_suf}",
+                name = u.name,
+                old_pre = style(old_pre).dim(),
+                old_suf = style(old_suf).red(),
+                old_pad = old_pad,
+                new_pre = style(new_pre).dim(),
+                new_suf = paint_suffix(new_suf, kind),
+            );
+        }
+    } else {
+        eprintln!("{header}");
+        for u in upgrades {
+            eprintln!(
+                "    {name:<name_w$}  {old:<old_w$}  ->  {new}",
+                name = u.name,
+                old = u.old_ver,
+                new = u.new_ver,
+            );
+        }
+    }
+    eprintln!();
+}
+
+fn paint_suffix(s: &str, kind: BumpKind) -> console::StyledObject<&str> {
+    match kind {
+        BumpKind::Epoch | BumpKind::Major => style(s).red().bold(),
+        BumpKind::Minor => style(s).yellow().bold(),
+        BumpKind::Patch => style(s).green(),
+        BumpKind::PkgRel => style(s).cyan(),
+        BumpKind::Other => style(s),
     }
 }
 
@@ -656,5 +724,54 @@ impl NestedProgress for GixProgress {
 
     fn add_child_with_id(&mut self, name: impl Into<String>, _id: Id) -> Self::SubProgress {
         self.add_child(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paint_suffix_dispatches_every_kind() {
+        // Smoke-test the dispatch table: every BumpKind renders a string that
+        // still contains the input text. Exact ANSI codes are an internal of
+        // `console` and not worth pinning.
+        for kind in [
+            BumpKind::Epoch,
+            BumpKind::Major,
+            BumpKind::Minor,
+            BumpKind::Patch,
+            BumpKind::PkgRel,
+            BumpKind::Other,
+        ] {
+            let s = paint_suffix("1.2.3", kind).force_styling(true).to_string();
+            assert!(s.contains("1.2.3"), "{kind:?} dropped the text: {s:?}");
+        }
+    }
+
+    /// `upgrade_table` writes to stderr so we can't capture its output without
+    /// process plumbing, but we *can* assert it doesn't panic on the cases
+    /// most likely to break the padding/split math.
+    #[test]
+    fn upgrade_table_smoke() {
+        let ups = vec![
+            PkgUpgrade {
+                name: "short".into(),
+                old_ver: "1.0-1".into(),
+                new_ver: "1.0-2".into(),
+            },
+            PkgUpgrade {
+                name: "much-longer-name".into(),
+                old_ver: "1.2.3-1".into(),
+                new_ver: "2.0.0-1".into(),
+            },
+            PkgUpgrade {
+                name: "epochpkg".into(),
+                old_ver: "1:1.0-1".into(),
+                new_ver: "2:1.0-1".into(),
+            },
+        ];
+        upgrade_table("Test upgrades", &ups);
+        upgrade_table("Empty", &[]);
     }
 }

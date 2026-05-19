@@ -3,3 +3,4 @@
 pub mod alpm_db;
 pub mod invoke;
 pub mod vercmp;
+pub mod verdiff;
