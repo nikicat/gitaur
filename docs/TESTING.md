@@ -198,8 +198,8 @@ Inside the container the gitaur binary is at `/work/target/debug/gitaur`,
 The unit + container suites use synthetic fixtures by design, so they
 exercise the code paths but not the messy shape of real-world AUR data.
 For sanity-checking changes to `resolver/` or to plan-rendering, run
-`--plan-only` against representative pkgbases from a populated index
-(`gitaur -Sy` first). `--plan-only` resolves the full Plan and prints
+`--plan` against representative pkgbases from a populated index
+(`gitaur -Sy` first). `--plan` resolves the full Plan and prints
 strata without touching `makepkg` or `pacman`, so it's safe to run
 freely.
 

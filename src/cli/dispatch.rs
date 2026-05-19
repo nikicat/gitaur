@@ -1,6 +1,6 @@
 //! Decide whether to handle an operation natively or pass through to pacman.
 
-use crate::build::{self, PlanMode};
+use crate::build;
 use crate::cli::flags::{self, PacFlags};
 use crate::cli::Cli;
 use crate::config::Config;
@@ -18,7 +18,7 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
     let f = flags::parse(argv);
 
     if argv.is_empty() {
-        if cli.plan_only {
+        if cli.plan {
             ui::info("plan: refresh AUR mirror + rebuild index");
             return Ok(0);
         }
@@ -43,14 +43,7 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
     let noconfirm = cli.noconfirm || f.has_long("noconfirm");
     let asdeps = cli.asdeps || f.has_long("asdeps");
     let devel = cli.devel || f.has_long("devel");
-    let plan_only = cli.plan_only || f.has_long("plan-only");
-    let plan_mode = if plan_only {
-        PlanMode::Only
-    } else if cli.plan || f.has_long("plan") {
-        PlanMode::Show
-    } else {
-        PlanMode::Run
-    };
+    let plan = cli.plan || f.has_long("plan");
 
     if f.has('h') || f.has_long("help") {
         // Same auto-generated help as `gitaur --help` — clap already lists
@@ -80,7 +73,7 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
     let force_reclone = f.op_letters.iter().filter(|c| **c == 'y').count() >= 2;
 
     if refresh {
-        if plan_only {
+        if plan {
             let what = if force_reclone {
                 "plan: force-reclone AUR mirror + rebuild index"
             } else {
@@ -93,8 +86,8 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
     }
 
     if upgrade {
-        if plan_only {
-            ui::info("plan: pacman -Syu (skipped in plan-only mode)");
+        if plan {
+            ui::info("plan: pacman -Syu (skipped in --plan mode)");
         } else {
             let mut pac_args = vec!["-Syu".to_string()];
             if noconfirm {
@@ -102,11 +95,11 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
             }
             invoke::exec_pacman(cfg, &pac_args)?;
         }
-        build::cmd_sysupgrade(cfg, cfg.devel || devel, noconfirm, plan_mode)?;
+        build::cmd_sysupgrade(cfg, cfg.devel || devel, noconfirm, plan)?;
     }
 
     if !f.positional.is_empty() {
-        build::cmd_install(cfg, &f.positional, noconfirm, asdeps, plan_mode)?;
+        build::cmd_install(cfg, &f.positional, noconfirm, asdeps, plan)?;
     } else if !upgrade && !refresh {
         return Err(Error::other("no targets specified"));
     }

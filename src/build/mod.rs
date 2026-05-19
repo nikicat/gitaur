@@ -34,31 +34,9 @@ struct BuiltPkg {
     files: Vec<PathBuf>,
 }
 
-/// Whether to display the resolved [`Plan`] before executing it, and whether
-/// to execute at all. Driven by `--plan` / `--plan-only` on the command line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PlanMode {
-    /// Default: print the plan only when a build prompt would otherwise show it.
-    #[default]
-    Run,
-    /// Print the plan before executing it.
-    Show,
-    /// Print the plan and exit without executing.
-    Only,
-}
-
-impl PlanMode {
-    fn show(self) -> bool {
-        matches!(self, Self::Show | Self::Only)
-    }
-    fn dry(self) -> bool {
-        matches!(self, Self::Only)
-    }
-}
-
 /// Render the resolved [`Plan`] to stderr using the same grouped list format
-/// the AUR confirmation prompt uses. Shared by `--plan` / `--plan-only` and
-/// the regular pre-confirm display so output is identical.
+/// the AUR confirmation prompt uses. Shared by `--plan` and the regular
+/// pre-confirm display so output is identical.
 fn print_plan(plan: &Plan) {
     if plan.direct_repo.is_empty()
         && plan.transitive_repo.is_empty()
@@ -100,7 +78,7 @@ pub fn cmd_install(
     targets: &[String],
     noconfirm: bool,
     asdeps: bool,
-    plan_mode: PlanMode,
+    plan_only: bool,
 ) -> Result<u8> {
     let idx_path = paths::index_path();
 
@@ -148,10 +126,8 @@ pub fn cmd_install(
     // `.pkg.tar.zst` Explicit instead of `--asdeps`.
     plan.direct_targets.extend(expanded.direct_pkgnames);
 
-    if plan_mode.show() {
+    if plan_only {
         print_plan(&plan);
-    }
-    if plan_mode.dry() {
         return Ok(0);
     }
 
@@ -183,9 +159,7 @@ pub fn cmd_install(
         .map(|(i, _)| i)
         .ok_or_else(|| Error::other("internal: AUR plan without index"))?;
 
-    if !plan_mode.show() {
-        print_plan(&plan);
-    }
+    print_plan(&plan);
 
     if !ui::confirm("Proceed with build?", noconfirm)? {
         return Err(Error::UserAbort);
@@ -431,7 +405,7 @@ pub fn cmd_sysupgrade(
     cfg: &Config,
     devel: bool,
     noconfirm: bool,
-    plan_mode: PlanMode,
+    plan_only: bool,
 ) -> Result<u8> {
     let idx = index::load(&paths::index_path())?;
     let by = Secondary::build(&idx);
@@ -463,7 +437,7 @@ pub fn cmd_sysupgrade(
         return Ok(0);
     }
     ui::pkg_list("AUR upgrades", &queue);
-    cmd_install(cfg, &queue, noconfirm, false, plan_mode)
+    cmd_install(cfg, &queue, noconfirm, false, plan_only)
 }
 
 /// Entry point for `-Sc` / `-Scc`.

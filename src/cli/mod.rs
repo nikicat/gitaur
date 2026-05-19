@@ -42,13 +42,9 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub asdeps: bool,
 
-    /// Show the resolved execution plan before running it.
-    #[arg(long, global = true)]
-    pub plan: bool,
-
     /// Show the resolved execution plan and exit without making changes.
     #[arg(long, global = true)]
-    pub plan_only: bool,
+    pub plan: bool,
 
     /// Color mode: `auto` (default), `always`, `never`.
     #[arg(long, global = true)]
@@ -70,8 +66,7 @@ const AFTER_HELP: &str = "GITAUR-OWNED OPERATIONS:\n\
   -Sc / -Scc     clean built worktrees (cc also drops state.db)\n\
 \n\
 PLAN PREVIEW:\n\
-  --plan         print the resolved execution plan before running it\n\
-  --plan-only    print the plan and exit without making any changes\n\
+  --plan         print the resolved execution plan and exit without making changes\n\
 \n\
 PASS-THROUGH (raw `pacman` — clap doesn't parse these):\n\
   -Q, -R, -T, -D, -F, -U, and any flags they accept\n\
