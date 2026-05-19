@@ -86,10 +86,11 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
     }
 
     if upgrade {
+        let pac_op = pacman_op_from_letters(&f.op_letters);
         if plan {
-            ui::info("plan: pacman -Syu (skipped in --plan mode)");
+            ui::info(&format!("plan: pacman {pac_op} (skipped in --plan mode)"));
         } else {
-            let mut pac_args = vec!["-Syu".to_string()];
+            let mut pac_args = vec![pac_op];
             if noconfirm {
                 pac_args.push("--noconfirm".into());
             }
@@ -105,4 +106,53 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
     }
 
     Ok(0)
+}
+
+/// Reconstruct the pacman `-S*` op cluster from the parsed letter modifiers,
+/// preserving order and repetition so `-Su` stays `-Su`, `-Syyu` stays `-Syyu`,
+/// etc. By the time the upgrade branch runs, `s`/`i`/`c` have been routed to
+/// their own handlers, so the remaining letters are a subset of {y, u}.
+fn pacman_op_from_letters(letters: &[char]) -> String {
+    let mut s = String::with_capacity(2 + letters.len());
+    s.push('-');
+    s.push('S');
+    s.extend(letters);
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn op_passthrough_su() {
+        assert_eq!(pacman_op_from_letters(&['u']), "-Su");
+    }
+
+    #[test]
+    fn op_passthrough_syu() {
+        assert_eq!(pacman_op_from_letters(&['y', 'u']), "-Syu");
+    }
+
+    #[test]
+    fn op_passthrough_syyu_keeps_double_y() {
+        // -Syy forces a full sync DB re-fetch in pacman; collapsing to -Syu
+        // would silently downgrade the user's intent.
+        assert_eq!(pacman_op_from_letters(&['y', 'y', 'u']), "-Syyu");
+    }
+
+    #[test]
+    fn op_passthrough_preserves_order() {
+        // pacman accepts modifiers in any order, but we should round-trip the
+        // user's spelling rather than re-sort.
+        assert_eq!(pacman_op_from_letters(&['u', 'y']), "-Suy");
+    }
+
+    #[test]
+    fn op_passthrough_bare_s() {
+        // Edge case: `-S` with no positional and no `u` is rejected upstream
+        // by the "no targets" check, but the builder should still produce a
+        // valid string rather than panic.
+        assert_eq!(pacman_op_from_letters(&[]), "-S");
+    }
 }
