@@ -131,8 +131,7 @@ mod tests {
     fn installed_pkgbase_round_trips() {
         let mut idx = PacmanIndex::default();
         idx.installed.insert("foo-debug".into(), "1-1".into());
-        idx.installed_base
-            .insert("foo-debug".into(), "foo".into());
+        idx.installed_base.insert("foo-debug".into(), "foo".into());
         assert_eq!(idx.installed_pkgbase("foo-debug"), Some("foo"));
         assert_eq!(idx.installed_pkgbase("foo"), None);
     }

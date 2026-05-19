@@ -38,9 +38,7 @@ struct BuiltPkg {
 /// the AUR confirmation prompt uses. Shared by `--plan` and the regular
 /// pre-confirm display so output is identical.
 fn print_plan(plan: &Plan) {
-    if plan.direct_repo.is_empty()
-        && plan.transitive_repo.is_empty()
-        && plan.aur_strata.is_empty()
+    if plan.direct_repo.is_empty() && plan.transitive_repo.is_empty() && plan.aur_strata.is_empty()
     {
         ui::info("plan: nothing to do");
         return;
@@ -57,10 +55,7 @@ fn print_plan(plan: &Plan) {
             ui::pkg_list("AUR build order", &plan.aur_strata[0]);
         } else {
             for (i, stratum) in plan.aur_strata.iter().enumerate() {
-                ui::pkg_list(
-                    &format!("AUR build stratum {}/{total}", i + 1),
-                    stratum,
-                );
+                ui::pkg_list(&format!("AUR build stratum {}/{total}", i + 1), stratum);
             }
         }
     }
@@ -401,12 +396,7 @@ fn install_stratum(
 }
 
 /// Entry point for the AUR half of `-Syu`.
-pub fn cmd_sysupgrade(
-    cfg: &Config,
-    devel: bool,
-    noconfirm: bool,
-    plan_only: bool,
-) -> Result<u8> {
+pub fn cmd_sysupgrade(cfg: &Config, devel: bool, noconfirm: bool, plan_only: bool) -> Result<u8> {
     let idx = index::load(&paths::index_path())?;
     let by = Secondary::build(&idx);
     let alpm = alpm_db::open()?;
