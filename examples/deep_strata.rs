@@ -1,5 +1,6 @@
 //! Find AUR pkgbases that resolve to the deepest stratum stack — i.e. the
-//! biggest build pipeline `gitaur -S <pkg> --plan-only` would print.
+//! biggest build pipeline `gitaur -S <pkg>` would print (decline the
+//! confirmation prompt for a dry run).
 //!
 //! Uses the real resolver, so the strata count matches what gitaur would
 //! actually do. Skips entries the resolver rejects (cycles, missing deps).

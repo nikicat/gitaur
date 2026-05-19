@@ -198,10 +198,10 @@ Inside the container the gitaur binary is at `/work/target/debug/gitaur`,
 The unit + container suites use synthetic fixtures by design, so they
 exercise the code paths but not the messy shape of real-world AUR data.
 For sanity-checking changes to `resolver/` or to plan-rendering, run
-`--plan` against representative pkgbases from a populated index
-(`gitaur -Sy` first). `--plan` resolves the full Plan and prints
-strata without touching `makepkg` or `pacman`, so it's safe to run
-freely.
+`gitaur -S <pkgbase>` against representative entries from a populated
+index (`gitaur -Sy` first) and decline the `Proceed with installation?`
+prompt — the resolver prints the full Plan up front, so `n` exits
+cleanly without touching `makepkg` or `pacman`.
 
 Candidates (verified against the May 2026 AUR mirror — pkgbase names
 are stable, the exact dep counts drift):

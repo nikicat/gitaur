@@ -42,10 +42,6 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub asdeps: bool,
 
-    /// Show the resolved execution plan and exit without making changes.
-    #[arg(long, global = true)]
-    pub plan: bool,
-
     /// Color mode: `auto` (default), `always`, `never`.
     #[arg(long, global = true)]
     pub color: Option<String>,
@@ -57,17 +53,14 @@ pub struct Cli {
 }
 
 const AFTER_HELP: &str = "GITAUR-OWNED OPERATIONS:\n\
-  -S <pkg>...    install AUR packages (recursive deps, batched sudo)\n\
+  -S <pkg>...    install AUR packages (plan shown, one confirm, batched sudo)\n\
   -Sy            refresh AUR mirror + rebuild index (incremental fetch)\n\
   -Syy           force full re-clone of the AUR mirror (~8–9 min)\n\
-  -Syu           pacman -Syu, then AUR upgrades (plan shown up front, no sudo)\n\
+  -Syu           pacman -Syu + AUR upgrades (plan shown, one confirm up front)\n\
   -Ss <regex>    search AUR by name/desc/provides\n\
   -Si <pkg>      show AUR package info\n\
   -Sc / -Scc     clean built worktrees (cc also drops state.db)\n\
   -Qu            list upgrades from repos + AUR, no sudo (dry-run for -Syu)\n\
-\n\
-PLAN PREVIEW:\n\
-  --plan         print the resolved install plan for `-S <pkg>` and exit\n\
 \n\
 PASS-THROUGH (raw `pacman` — clap doesn't parse these):\n\
   -Q (except -Qu), -R, -T, -D, -F, -U, and any flags they accept\n\

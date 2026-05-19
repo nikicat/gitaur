@@ -18,10 +18,6 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
     let f = flags::parse(argv);
 
     if argv.is_empty() {
-        if cli.plan {
-            ui::info("plan: refresh AUR mirror + rebuild index");
-            return Ok(0);
-        }
         return mirror::cmd_refresh(cfg, false).map(|()| 0);
     }
 
@@ -46,7 +42,6 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
     let noconfirm = cli.noconfirm || f.has_long("noconfirm");
     let asdeps = cli.asdeps || f.has_long("asdeps");
     let devel = cli.devel || f.has_long("devel");
-    let plan = cli.plan || f.has_long("plan");
 
     if f.has('h') || f.has_long("help") {
         // Same auto-generated help as `gitaur --help` — clap already lists
@@ -76,34 +71,24 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
     let force_reclone = f.op_letters.iter().filter(|c| **c == 'y').count() >= 2;
 
     if refresh {
-        if plan {
-            let what = if force_reclone {
-                "plan: force-reclone AUR mirror + rebuild index"
-            } else {
-                "plan: refresh AUR mirror + rebuild index"
-            };
-            ui::info(what);
-        } else {
-            mirror::cmd_refresh(cfg, force_reclone)?;
-        }
+        mirror::cmd_refresh(cfg, force_reclone)?;
     }
 
     if upgrade {
         // Show the union (repo + AUR) upgrade plan first — identical to
-        // `gitaur -Qu`, unprivileged — then run the real upgrade. `--plan`
-        // no longer has a dedicated upgrade-side handler: use `-Qu` for a
-        // dry-run preview.
+        // `gitaur -Qu`, unprivileged — gate on a single confirmation, then
+        // run pacman and the AUR pipeline without re-prompting. Use `-Qu`
+        // for a dry-run preview that never reaches this confirm step.
         build::cmd_query_upgrades(cfg.devel || devel)?;
-        let mut pac_args = vec!["-Syu".to_string()];
-        if noconfirm {
-            pac_args.push("--noconfirm".into());
+        if !ui::confirm("Proceed with upgrade?", noconfirm)? {
+            return Err(Error::UserAbort);
         }
-        invoke::exec_pacman(cfg, &pac_args)?;
+        invoke::exec_pacman(cfg, &["-Syu".into(), "--noconfirm".into()])?;
         build::cmd_sysupgrade(cfg, cfg.devel || devel, noconfirm)?;
     }
 
     if !f.positional.is_empty() {
-        build::cmd_install(cfg, &f.positional, noconfirm, asdeps, plan)?;
+        build::cmd_install(cfg, &f.positional, noconfirm, asdeps, false)?;
     } else if !upgrade && !refresh {
         return Err(Error::other("no targets specified"));
     }

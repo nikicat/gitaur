@@ -36,8 +36,7 @@ struct BuiltPkg {
 }
 
 /// Render the resolved [`Plan`] to stderr using the same grouped list format
-/// the AUR confirmation prompt uses. Shared by `--plan` and the regular
-/// pre-confirm display so output is identical.
+/// the AUR confirmation prompt uses.
 fn print_plan(plan: &Plan) {
     if plan.direct_repo.is_empty() && plan.transitive_repo.is_empty() && plan.aur_strata.is_empty()
     {
@@ -65,16 +64,19 @@ fn print_plan(plan: &Plan) {
 /// Entry point for `gitaur -S <targets>`.
 ///
 /// Loads the pacman snapshot and (optionally) the AUR index in parallel, then
-/// classifies every target. Pure-repo plans hand off straight to `pacman -S`
-/// so the user sees pacman's native UI; only mixed/AUR plans run the full
-/// build pipeline.
+/// classifies every target. After printing the unified plan and getting a
+/// single confirmation gitaur drives every `pacman` call with `--noconfirm`
+/// so the user is asked once; pacman never re-prompts. `already_confirmed`
+/// short-circuits the gate for callers that have already confirmed at a
+/// higher level (e.g. `-Syu` → [`cmd_sysupgrade`]); PKGBUILD review prompts
+/// still respect `noconfirm`.
 #[instrument(skip(cfg))]
 pub fn cmd_install(
     cfg: &Config,
     targets: &[String],
     noconfirm: bool,
     asdeps: bool,
-    plan_only: bool,
+    already_confirmed: bool,
 ) -> Result<u8> {
     let idx_path = paths::index_path();
 
@@ -122,69 +124,54 @@ pub fn cmd_install(
     // `.pkg.tar.zst` Explicit instead of `--asdeps`.
     plan.direct_targets.extend(expanded.direct_pkgnames);
 
-    if plan_only {
-        print_plan(&plan);
+    print_plan(&plan);
+
+    if plan.direct_repo.is_empty() && plan.transitive_repo.is_empty() && plan.aur_strata.is_empty()
+    {
         return Ok(0);
     }
 
-    // Pure-repo fast path: nothing to build, delegate to pacman so the user
-    // gets pacman's own "Proceed with installation?" prompt verbatim. Direct
-    // targets stay explicit; transitive repo deps (none here, since AUR is
-    // empty) would be marked --asdeps via a follow-up `pacman -D`.
-    if plan.aur_strata.is_empty() {
-        if plan.direct_repo.is_empty() && plan.transitive_repo.is_empty() {
-            ui::info("nothing to do");
-            return Ok(0);
-        }
-        let mut args = vec!["-S".to_string(), "--needed".into()];
-        if noconfirm {
-            args.push("--noconfirm".into());
-        }
-        if asdeps {
-            args.push("--asdeps".into());
-        }
-        args.extend(plan.direct_repo.iter().cloned());
-        args.extend(plan.transitive_repo.iter().cloned());
-        return invoke::exec_pacman(cfg, &args);
-    }
-
-    // AUR path needs a loaded index — by construction `aur_order` is empty
-    // when `by == None`, so this unwrap is unreachable.
-    let idx = aur_loaded
-        .as_ref()
-        .map(|(i, _)| i)
-        .ok_or_else(|| Error::other("internal: AUR plan without index"))?;
-
-    print_plan(&plan);
-
-    if !ui::confirm("Proceed with build?", noconfirm)? {
+    if !already_confirmed && !ui::confirm("Proceed with installation?", noconfirm)? {
         return Err(Error::UserAbort);
     }
 
-    install_repo_phase(cfg, &plan, noconfirm)?;
-    run_aur_pipeline(cfg, idx, &plan, noconfirm, asdeps)?;
+    install_repo_phase(cfg, &plan, asdeps)?;
+
+    if !plan.aur_strata.is_empty() {
+        // AUR path needs a loaded index — by construction `aur_strata` is
+        // empty when `by == None`, so this unwrap is unreachable.
+        let idx = aur_loaded
+            .as_ref()
+            .map(|(i, _)| i)
+            .ok_or_else(|| Error::other("internal: AUR plan without index"))?;
+        run_aur_pipeline(cfg, idx, &plan, noconfirm, asdeps)?;
+    }
     Ok(0)
 }
 
 /// Install the user's repo targets up front: direct ones as explicit, deps
 /// as `--asdeps`. Two `pacman -S` calls so the install-reason flag is per-
 /// batch; sudo cache bridges them. No-op when both buckets are empty.
-fn install_repo_phase(cfg: &Config, plan: &Plan, noconfirm: bool) -> Result<()> {
+/// Always `--noconfirm`: gitaur already gated this with its own prompt, so
+/// pacman shouldn't ask again.
+fn install_repo_phase(cfg: &Config, plan: &Plan, asdeps: bool) -> Result<()> {
     if !plan.direct_repo.is_empty() {
         ui::info("installing repo packages");
-        let mut args = vec!["-S".to_string(), "--needed".into()];
-        if noconfirm {
-            args.push("--noconfirm".into());
+        let mut args = vec!["-S".to_string(), "--needed".into(), "--noconfirm".into()];
+        if asdeps {
+            args.push("--asdeps".into());
         }
         args.extend(plan.direct_repo.iter().cloned());
         invoke::exec_pacman(cfg, &args)?;
     }
     if !plan.transitive_repo.is_empty() {
         ui::info("installing repo dependencies");
-        let mut args = vec!["-S".to_string(), "--needed".into(), "--asdeps".into()];
-        if noconfirm {
-            args.push("--noconfirm".into());
-        }
+        let mut args = vec![
+            "-S".to_string(),
+            "--needed".into(),
+            "--noconfirm".into(),
+            "--asdeps".into(),
+        ];
         args.extend(plan.transitive_repo.iter().cloned());
         invoke::exec_pacman(cfg, &args)?;
     }
@@ -246,7 +233,6 @@ fn run_aur_pipeline(
             &stratum_built,
             &direct_names,
             asdeps,
-            noconfirm,
             &mut transitive_marks,
         )?;
     }
@@ -354,7 +340,6 @@ fn install_stratum(
     built: &[BuiltPkg],
     direct: &HashSet<&str>,
     asdeps_override: bool,
-    noconfirm: bool,
     transitive_marks: &mut Vec<String>,
 ) -> Result<()> {
     if built.is_empty() {
@@ -382,10 +367,9 @@ fn install_stratum(
         }
     }
 
-    let mut args = vec!["-U".to_string(), "--needed".into()];
-    if noconfirm {
-        args.push("--noconfirm".into());
-    }
+    // Always `--noconfirm`: gitaur's plan+confirm at the top of `cmd_install`
+    // is the single user gate; pacman shouldn't ask again.
+    let mut args = vec!["-U".to_string(), "--needed".into(), "--noconfirm".into()];
     if asdeps_override {
         args.push("--asdeps".into());
     }
@@ -460,7 +444,10 @@ pub fn cmd_query_upgrades(devel: bool) -> Result<u8> {
     Ok(0)
 }
 
-/// Entry point for the AUR half of `-Syu`.
+/// Entry point for the AUR half of `-Syu`. The dispatch-level `-Syu` confirm
+/// has already accepted the unified plan, so `already_confirmed=true` short-
+/// circuits `cmd_install`'s own gate (PKGBUILD review still honors
+/// `noconfirm`).
 pub fn cmd_sysupgrade(cfg: &Config, devel: bool, noconfirm: bool) -> Result<u8> {
     let idx = index::load(&paths::index_path())?;
     let by = Secondary::build(&idx);
@@ -474,8 +461,7 @@ pub fn cmd_sysupgrade(cfg: &Config, devel: bool, noconfirm: bool) -> Result<u8> 
         ui::info("nothing to do");
         return Ok(0);
     }
-    ui::pkg_list("AUR upgrades", &queue);
-    cmd_install(cfg, &queue, noconfirm, false, false)
+    cmd_install(cfg, &queue, noconfirm, false, true)
 }
 
 /// Entry point for `-Sc` / `-Scc`.
