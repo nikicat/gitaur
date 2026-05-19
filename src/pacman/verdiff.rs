@@ -6,8 +6,14 @@
 //! Pure version ordering still lives in [`super::vercmp`] — this module is
 //! about *how* two versions differ, for the upgrade-table UI.
 
-/// Granularity of a version bump — drives upgrade-table colorization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Granularity of a version bump — drives upgrade-table colorization and
+/// row ordering.
+///
+/// Variants are declared **most-severe → least-severe**, and the derived
+/// `Ord` reflects that: `Epoch < Major < … < Other`. Sorting a slice of
+/// `BumpKind` ascending therefore lists the highest-severity bumps first,
+/// which is the order the upgrade table renders rows in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BumpKind {
     /// Epoch (`N:`) changed — a forced ordering override.
     Epoch,
@@ -114,6 +120,33 @@ mod tests {
     fn classify_bump_first_layer_wins() {
         // pkgrel also changed, but the pkgver bump is what we report.
         assert_eq!(classify_bump("1.0-3", "1.1-1"), BumpKind::Minor);
+    }
+
+    /// `BumpKind`'s derived `Ord` is load-bearing: `upgrade_table` sorts
+    /// rows by it to put the most-severe bumps first. If a future refactor
+    /// reorders the enum variants this test breaks immediately.
+    #[test]
+    fn bumpkind_orders_most_severe_first() {
+        let mut kinds = [
+            BumpKind::Other,
+            BumpKind::PkgRel,
+            BumpKind::Patch,
+            BumpKind::Minor,
+            BumpKind::Major,
+            BumpKind::Epoch,
+        ];
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            [
+                BumpKind::Epoch,
+                BumpKind::Major,
+                BumpKind::Minor,
+                BumpKind::Patch,
+                BumpKind::PkgRel,
+                BumpKind::Other,
+            ]
+        );
     }
 
     /// Helper: byte index → suffix of `new`. Reads more naturally in tests.

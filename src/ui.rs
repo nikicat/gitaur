@@ -140,11 +140,12 @@ pub fn upgrade_table(label: &str, upgrades: &[PkgUpgrade]) {
     let old_w = upgrades.iter().map(|u| u.old_ver.len()).max().unwrap_or(0);
     let header = format!("{} ({})", label, upgrades.len());
 
+    let rows = classify_and_sort(upgrades);
+
     eprintln!();
     if color_on() {
         eprintln!("{}", dim(&header));
-        for u in upgrades {
-            let kind = verdiff::classify_bump(&u.old_ver, &u.new_ver);
+        for (kind, u) in &rows {
             let cut = verdiff::common_prefix_at_boundary(&u.old_ver, &u.new_ver);
             let (old_pre, old_suf) = u.old_ver.split_at(cut);
             let (new_pre, new_suf) = u.new_ver.split_at(cut);
@@ -157,12 +158,12 @@ pub fn upgrade_table(label: &str, upgrades: &[PkgUpgrade]) {
                 old_suf = style(old_suf).red(),
                 old_pad = old_pad,
                 new_pre = style(new_pre).dim(),
-                new_suf = paint_suffix(new_suf, kind),
+                new_suf = paint_suffix(new_suf, *kind),
             );
         }
     } else {
         eprintln!("{header}");
-        for u in upgrades {
+        for (_, u) in &rows {
             eprintln!(
                 "    {name:<name_w$}  {old:<old_w$}  ->  {new}",
                 name = u.name,
@@ -172,6 +173,18 @@ pub fn upgrade_table(label: &str, upgrades: &[PkgUpgrade]) {
         }
     }
     eprintln!();
+}
+
+/// Pair each upgrade with its [`BumpKind`] and sort most-severe first.
+/// Stable: rows with the same severity keep their input order (typically
+/// alphabetical from `pacman -Qu` / AUR).
+fn classify_and_sort(upgrades: &[PkgUpgrade]) -> Vec<(BumpKind, &PkgUpgrade)> {
+    let mut rows: Vec<(BumpKind, &PkgUpgrade)> = upgrades
+        .iter()
+        .map(|u| (verdiff::classify_bump(&u.old_ver, &u.new_ver), u))
+        .collect();
+    rows.sort_by_key(|(kind, _)| *kind);
+    rows
 }
 
 fn paint_suffix(s: &str, kind: BumpKind) -> console::StyledObject<&str> {
@@ -758,6 +771,55 @@ mod tests {
         assert!(out.contains("\u{1b}[38;5;244m"), "missing color 244: {out:?}");
         assert!(out.contains("\u{1b}[3m"), "missing italic: {out:?}");
         assert!(!out.contains("\u{1b}[1m"), "header should not be bold: {out:?}");
+    }
+
+    /// Upgrade rows must render most-severe first within each group, with
+    /// stable secondary order. The colored and uncolored branches both iterate
+    /// `classify_and_sort`, so testing it covers both display paths.
+    #[test]
+    fn classify_and_sort_orders_by_severity_then_input() {
+        let ups = vec![
+            PkgUpgrade {
+                name: "patch-a".into(),
+                old_ver: "1.0.0-1".into(),
+                new_ver: "1.0.1-1".into(),
+            },
+            PkgUpgrade {
+                name: "major".into(),
+                old_ver: "1.0-1".into(),
+                new_ver: "2.0-1".into(),
+            },
+            PkgUpgrade {
+                name: "pkgrel".into(),
+                old_ver: "1.0-1".into(),
+                new_ver: "1.0-2".into(),
+            },
+            PkgUpgrade {
+                name: "epoch".into(),
+                old_ver: "1:1.0-1".into(),
+                new_ver: "2:1.0-1".into(),
+            },
+            PkgUpgrade {
+                name: "patch-b".into(),
+                old_ver: "2.3.4-1".into(),
+                new_ver: "2.3.5-1".into(),
+            },
+            PkgUpgrade {
+                name: "minor".into(),
+                old_ver: "1.0-1".into(),
+                new_ver: "1.1-1".into(),
+            },
+        ];
+        let sorted: Vec<&str> = classify_and_sort(&ups)
+            .iter()
+            .map(|(_, u)| u.name.as_str())
+            .collect();
+        // Severity order: Epoch, Major, Minor, Patch, PkgRel. Within Patch
+        // the two rows preserve input order (patch-a before patch-b).
+        assert_eq!(
+            sorted,
+            ["epoch", "major", "minor", "patch-a", "patch-b", "pkgrel"]
+        );
     }
 
     /// `upgrade_table` writes to stderr so we can't capture its output without
