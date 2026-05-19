@@ -17,6 +17,7 @@
 //! through unchanged — preserving any version constraint suffix.
 
 use crate::error::{Error, Result};
+use crate::index::schema::IndexEntry;
 use crate::index::secondary::{self, Secondary};
 use crate::index::IndexFile;
 use crate::pacman::alpm_db::PacmanIndex;
@@ -83,9 +84,33 @@ pub fn expand_pkgbase_targets(
             out.targets.push(t.clone());
             continue;
         };
-        // pacman & by_name both bypass any AUR rewriting.
-        if pac.is_installed(bare) || pac.in_sync(bare) || by.by_name.contains_key(bare) {
+        // pacman wins outright — never reroute a name pacman can satisfy.
+        if pac.is_installed(bare) || pac.in_sync(bare) {
             out.targets.push(t.clone());
+            continue;
+        }
+        // Pkgname hit. Single-pkgname pkgbases pass through unchanged; multi-
+        // pkgname pkgbases must rewrite to the pkgbase string AND record a
+        // selection, otherwise `install_stratum` has no way to skip the
+        // sibling .pkg.tar.zst files makepkg always produces from a split
+        // PKGBUILD (the bisq-cli regression: `-S bisq-cli` installed
+        // bisq-daemon + bisq-desktop too).
+        if let Some(&entry_idx) = by.by_name.get(bare) {
+            let entry = &idx.entries[entry_idx as usize];
+            if entry.pkgnames.len() == 1 {
+                out.targets.push(t.clone());
+                continue;
+            }
+            let chosen = chosen_with_sibling_deps(entry, bare);
+            debug!(
+                pkgbase = %entry.pkgbase,
+                pkgname = bare,
+                chosen = chosen.len(),
+                "rewrote split-pkg pkgname target to pkgbase with selection",
+            );
+            extend_selection(&mut out.selections, &entry.pkgbase, &chosen);
+            out.targets.push(entry.pkgbase.clone());
+            out.direct_pkgnames.push(bare.to_string());
             continue;
         }
         // Virtual name (`-S bisq` where `bisq-desktop` declares
@@ -115,8 +140,8 @@ pub fn expand_pkgbase_targets(
                         .any(|x| secondary::strip_version_constraint(x) == bare)
             });
             if scoped && entry.pkgnames.len() > 1 {
-                out.selections
-                    .insert(entry.pkgbase.clone(), vec![pkgname.to_string()]);
+                let chosen = chosen_with_sibling_deps(entry, pkgname);
+                extend_selection(&mut out.selections, &entry.pkgbase, &chosen);
             }
             out.targets.push(entry.pkgbase.clone());
             out.direct_pkgnames.push(pkgname.to_string());
@@ -158,12 +183,62 @@ pub fn expand_pkgbase_targets(
         // Record selection only when it's a true subset — full selection
         // is the default and doesn't need to constrain `pacman -U`.
         if chosen.len() < entry.pkgnames.len() {
-            out.selections.insert(entry.pkgbase.clone(), chosen.clone());
+            extend_selection(&mut out.selections, &entry.pkgbase, &chosen);
         }
         out.targets.push(entry.pkgbase.clone());
         out.direct_pkgnames.extend(chosen);
     }
     Ok(out)
+}
+
+/// Merge `additions` into the per-pkgbase selection list, deduping. Multiple
+/// targets in the same `gitaur -S` invocation may reference different
+/// pkgnames of the same split pkgbase (`-S bisq-cli bisq-daemon`); each
+/// must extend the selection rather than overwrite it.
+fn extend_selection(
+    selections: &mut HashMap<String, Vec<String>>,
+    pkgbase: &str,
+    additions: &[String],
+) {
+    let bucket = selections.entry(pkgbase.to_string()).or_default();
+    for a in additions {
+        if !bucket.iter().any(|s| s == a) {
+            bucket.push(a.clone());
+        }
+    }
+}
+
+/// Sibling pkgnames of `pkgname` that appear in the pkgbase's pooled
+/// `depends`. These are intra-split runtime deps the .SRCINFO parser
+/// flattened into a single list — without per-pkgname attribution, we
+/// can't tell which sibling owns which dep, so any sibling appearing in
+/// the pool is conservatively pulled into the install selection.
+fn sibling_runtime_deps<'a>(entry: &'a IndexEntry, pkgname: &str) -> Vec<&'a str> {
+    let siblings: std::collections::HashSet<&str> = entry
+        .pkgnames
+        .iter()
+        .map(|p| p.name.as_str())
+        .filter(|n| *n != pkgname)
+        .collect();
+    entry
+        .depends
+        .iter()
+        .map(|d| secondary::strip_version_constraint(d))
+        .filter(|d| siblings.contains(d))
+        .collect()
+}
+
+/// `pkgname` plus its sibling intra-split runtime deps, deduped. Used by
+/// both the `by_name` and scoped-provides paths to compute the install
+/// selection for a split pkgbase whose target is a single pkgname.
+fn chosen_with_sibling_deps(entry: &IndexEntry, pkgname: &str) -> Vec<String> {
+    let mut chosen = vec![pkgname.to_string()];
+    for sib in sibling_runtime_deps(entry, pkgname) {
+        if !chosen.iter().any(|c| c == sib) {
+            chosen.push(sib.to_string());
+        }
+    }
+    chosen
 }
 
 #[cfg(test)]
@@ -248,26 +323,6 @@ mod tests {
     #[allow(clippy::unnecessary_wraps)]
     fn select_all(_: &str, pkgnames: &[String]) -> Result<Vec<String>> {
         Ok(pkgnames.to_vec())
-    }
-
-    #[test]
-    fn passes_through_pkgname_targets_unchanged() {
-        let (idx, by, pac) = fixture();
-        let r = expand_pkgbase_targets(
-            &idx,
-            Some(&by),
-            &pac,
-            &["bisq-desktop".to_string()],
-            &mut select_all,
-        )
-        .unwrap();
-        // by_name hit: passthrough, classifier handles direct_targets itself.
-        assert_eq!(r.targets, vec!["bisq-desktop".to_string()]);
-        assert!(r.selections.is_empty(), "no selection for pkgname targets");
-        assert!(
-            r.direct_pkgnames.is_empty(),
-            "passthrough → resolver populates direct_targets from `targets`",
-        );
     }
 
     #[test]
@@ -430,16 +485,20 @@ mod tests {
 
     #[test]
     fn version_constraint_preserved_on_passthrough() {
+        // Single-pkgname pkgbase (`cower`) stays in the passthrough lane.
+        // Multi-pkgname pkgnames now rewrite to pkgbase and would drop the
+        // version constraint suffix; only single-pkgname / pacman / no-AUR
+        // passthroughs preserve it.
         let (idx, by, pac) = fixture();
         let r = expand_pkgbase_targets(
             &idx,
             Some(&by),
             &pac,
-            &["bisq-desktop>=1.2".to_string()],
+            &["cower>=1.2".to_string()],
             &mut select_all,
         )
         .unwrap();
-        assert_eq!(r.targets, vec!["bisq-desktop>=1.2".to_string()]);
+        assert_eq!(r.targets, vec!["cower>=1.2".to_string()]);
     }
 
     #[test]
@@ -517,6 +576,133 @@ mod tests {
         assert_eq!(
             r.direct_pkgnames,
             vec!["otf-commit-mono".to_string(), "ttf-commit-mono".to_string()],
+        );
+    }
+
+    #[test]
+    fn pkgname_in_multi_pkgbase_restricts_to_that_pkgname() {
+        // Regression: `gitaur -S bisq-cli` (a pkgname of the split pkgbase
+        // `bisq`) used to install all three siblings because the by_name hit
+        // was a bare passthrough — install_stratum has no way to filter
+        // without a selection. Selection must pin the install to bisq-cli;
+        // sibling pkgnames must NOT appear in direct_pkgnames.
+        let (idx, by, pac) = fixture();
+        let r = expand_pkgbase_targets(
+            &idx,
+            Some(&by),
+            &pac,
+            &["bisq-cli".to_string()],
+            &mut select_all,
+        )
+        .unwrap();
+        assert_eq!(r.targets, vec!["bisq".to_string()]);
+        assert_eq!(r.direct_pkgnames, vec!["bisq-cli".to_string()]);
+        assert_eq!(
+            r.selections.get("bisq"),
+            Some(&vec!["bisq-cli".to_string()]),
+            "pkgname-target on split pkgbase must restrict install to that pkgname",
+        );
+    }
+
+    #[test]
+    fn pkgname_in_multi_pkgbase_pulls_sibling_runtime_deps() {
+        // Per-pkgname runtime depends end up in the pkgbase-level
+        // `e.depends` after .SRCINFO parsing — there's no per-pkgname
+        // depends bucket today. If a sibling pkgname appears in that
+        // pooled list, include it in the selection so pacman -U has the
+        // intra-split dep on disk. Over-includes when the dep belongs to
+        // a different sibling than the one targeted; that's a safe
+        // over-install rather than a broken transaction.
+        let idx = IndexFile {
+            entries: vec![IndexEntry {
+                pkgbase: "test-split".into(),
+                pkgnames: vec![
+                    Pkgname {
+                        name: "test-split-core".into(),
+                        provides: Vec::new(),
+                    },
+                    Pkgname {
+                        name: "test-split-extras".into(),
+                        provides: Vec::new(),
+                    },
+                ],
+                depends: vec!["test-split-core".into()],
+                pkgver: "1".into(),
+                pkgrel: "1".into(),
+                ..Default::default()
+            }],
+            ..IndexFile::empty()
+        };
+        let by = Secondary::build(&idx);
+        let pac = PacmanIndex::default();
+        let r = expand_pkgbase_targets(
+            &idx,
+            Some(&by),
+            &pac,
+            &["test-split-extras".to_string()],
+            &mut select_all,
+        )
+        .unwrap();
+        assert_eq!(r.targets, vec!["test-split".to_string()]);
+        assert_eq!(
+            r.direct_pkgnames,
+            vec!["test-split-extras".to_string()],
+            "direct_pkgnames stays at the user's explicit choice; sibling deps install --asdeps",
+        );
+        let mut sel = r.selections.get("test-split").cloned().unwrap_or_default();
+        sel.sort();
+        assert_eq!(
+            sel,
+            vec!["test-split-core".to_string(), "test-split-extras".to_string()],
+            "sibling pkgname appearing in pkgbase.depends must join the install selection",
+        );
+    }
+
+    #[test]
+    fn pkgname_in_single_pkgbase_remains_passthrough() {
+        // Trivial pkgbase (one pkgname): no selection needed, no
+        // pkgbase-rewrite needed; the by_name passthrough is sufficient.
+        let (idx, by, pac) = fixture();
+        let r = expand_pkgbase_targets(
+            &idx,
+            Some(&by),
+            &pac,
+            &["cower".to_string()],
+            &mut select_all,
+        )
+        .unwrap();
+        assert_eq!(r.targets, vec!["cower".to_string()]);
+        assert!(r.selections.is_empty());
+        assert!(r.direct_pkgnames.is_empty());
+    }
+
+    #[test]
+    fn multiple_pkgnames_in_same_split_pkgbase_merge_selection() {
+        // `gitaur -S bisq-cli bisq-daemon` must install BOTH (and not
+        // bisq-desktop). The second target must extend the existing
+        // selection rather than overwrite it.
+        let (idx, by, pac) = fixture();
+        let r = expand_pkgbase_targets(
+            &idx,
+            Some(&by),
+            &pac,
+            &["bisq-cli".to_string(), "bisq-daemon".to_string()],
+            &mut select_all,
+        )
+        .unwrap();
+        assert_eq!(r.targets, vec!["bisq".to_string(), "bisq".to_string()]);
+        let mut dp = r.direct_pkgnames.clone();
+        dp.sort();
+        assert_eq!(
+            dp,
+            vec!["bisq-cli".to_string(), "bisq-daemon".to_string()],
+        );
+        let mut sel = r.selections.get("bisq").cloned().unwrap_or_default();
+        sel.sort();
+        assert_eq!(
+            sel,
+            vec!["bisq-cli".to_string(), "bisq-daemon".to_string()],
+            "multiple pkgname targets must accumulate into the same pkgbase selection",
         );
     }
 

@@ -1,0 +1,23 @@
+# Split pkgbase mirroring the real `bisq` AUR entry: 3 pkgnames, none with
+# intra-split runtime deps. Regression target for the bug where
+# `gitaur -S <pkgname>` of a split pkgbase used to install every sibling
+# .pkg.tar.zst in the same pacman -U transaction.
+pkgbase=test-bisq-shape
+pkgname=(test-bisq-shape-cli test-bisq-shape-daemon test-bisq-shape-desktop)
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: 3-way split pkg with no intra-split deps'
+arch=('any')
+license=('MIT')
+
+package_test-bisq-shape-cli() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/test-bisq-shape-cli/marker"
+}
+
+package_test-bisq-shape-daemon() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/test-bisq-shape-daemon/marker"
+}
+
+package_test-bisq-shape-desktop() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/test-bisq-shape-desktop/marker"
+}
