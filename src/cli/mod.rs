@@ -60,16 +60,17 @@ const AFTER_HELP: &str = "GITAUR-OWNED OPERATIONS:\n\
   -S <pkg>...    install AUR packages (recursive deps, batched sudo)\n\
   -Sy            refresh AUR mirror + rebuild index (incremental fetch)\n\
   -Syy           force full re-clone of the AUR mirror (~8–9 min)\n\
-  -Syu           pacman -Syu, then AUR upgrades\n\
+  -Syu           pacman -Syu, then AUR upgrades (plan shown up front, no sudo)\n\
   -Ss <regex>    search AUR by name/desc/provides\n\
   -Si <pkg>      show AUR package info\n\
   -Sc / -Scc     clean built worktrees (cc also drops state.db)\n\
+  -Qu            list upgrades from repos + AUR, no sudo (dry-run for -Syu)\n\
 \n\
 PLAN PREVIEW:\n\
-  --plan         print the resolved execution plan and exit without making changes\n\
+  --plan         print the resolved install plan for `-S <pkg>` and exit\n\
 \n\
 PASS-THROUGH (raw `pacman` — clap doesn't parse these):\n\
-  -Q, -R, -T, -D, -F, -U, and any flags they accept\n\
+  -Q (except -Qu), -R, -T, -D, -F, -U, and any flags they accept\n\
 \n\
 ENVIRONMENT:\n\
   RUST_LOG=gitaur=debug    raise console tracing level\n\
@@ -87,10 +88,14 @@ pub fn run() -> Result<u8> {
 
     // Pre-scan: if the first operation letter is pacman-owned, forward
     // verbatim and never let clap see it (clap would reject unknown short
-    // flags like `-Rns`).
+    // flags like `-Rns`). `-Qu` is the one Q-family op gitaur owns — it
+    // augments `pacman -Qu` with AUR upgrade candidates, so we let it fall
+    // through to clap + dispatch.
     if let Some(op) = first_op_letter(&raw_argv) {
-        if matches!(op, 'Q' | 'R' | 'T' | 'D' | 'F' | 'U') {
-            // No color/log setup needed for pure pass-through.
+        if matches!(op, 'R' | 'T' | 'D' | 'F' | 'U') {
+            return invoke::exec_pacman(&cfg, &raw_argv);
+        }
+        if op == 'Q' && !is_plain_qu(&raw_argv) {
             return invoke::exec_pacman(&cfg, &raw_argv);
         }
     }
@@ -102,6 +107,24 @@ pub fn run() -> Result<u8> {
         .map_or_else(|| cfg.color_mode(), parse_color_mode);
     ui::set_color(mode);
     dispatch::dispatch(&cfg, &cli)
+}
+
+/// Decide whether argv is the gitaur-owned `-Qu` form (merge of repo + AUR
+/// upgrades) or a pure-pacman query that should pass straight through.
+///
+/// `run()` forwards every `-Q*` to pacman by default because clap doesn't
+/// know pacman's short flags and would reject `-Qul`, `-Qe`, `-Qm`, etc.
+/// Gitaur only reimplements one member of the Q family — bare `-Qu` — so
+/// the carve-out is intentionally narrow: cluster of nothing but `u`'s, no
+/// positional filter. `-Qul`, `-Qu pkgname`, `-Quq`, … all keep pacman's
+/// exact semantics by failing this check and falling through to the
+/// pass-through.
+fn is_plain_qu(argv: &[String]) -> bool {
+    let f = flags::parse(argv);
+    f.op == Some('Q')
+        && !f.op_letters.is_empty()
+        && f.op_letters.iter().all(|c| *c == 'u')
+        && f.positional.is_empty()
 }
 
 /// Scan argv for the first short-flag uppercase letter (`-S` / `-Q` / …).

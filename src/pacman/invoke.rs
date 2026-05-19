@@ -5,10 +5,10 @@ use crate::error::{Error, Result};
 use std::process::Command;
 use tracing::{debug, info, instrument};
 
-/// One repo package whose installed version is older than what's available in
-/// any registered sync DB — i.e. a row of `pacman -Qu` output.
+/// One package whose installed version is older than what's available
+/// in a sync repo (a row of `pacman -Qu` output) or in the AUR index.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepoUpgrade {
+pub struct PkgUpgrade {
     pub name: String,
     pub old_ver: String,
     pub new_ver: String,
@@ -19,7 +19,7 @@ pub struct RepoUpgrade {
 /// sudo prompt. Exit status 1 with empty stdout is pacman's "nothing to
 /// upgrade" — treated as `Ok(vec![])`, not an error.
 #[instrument]
-pub fn query_repo_upgrades() -> Result<Vec<RepoUpgrade>> {
+pub fn query_repo_upgrades() -> Result<Vec<PkgUpgrade>> {
     let out = Command::new("pacman").arg("-Qu").output()?;
     let code = out.status.code().unwrap_or(-1);
     if code == 1 && out.stdout.is_empty() {
@@ -45,7 +45,7 @@ pub fn query_repo_upgrades() -> Result<Vec<RepoUpgrade>> {
 /// Parse one line of `pacman -Qu` output: `name old_ver -> new_ver`. Anything
 /// else (blank lines, `[ignored]` markers pacman tacks onto held packages)
 /// returns `None` so the caller drops it silently.
-fn parse_qu_line(line: &str) -> Option<RepoUpgrade> {
+fn parse_qu_line(line: &str) -> Option<PkgUpgrade> {
     let mut parts = line.split_whitespace();
     let name = parts.next()?;
     let old_ver = parts.next()?;
@@ -53,7 +53,7 @@ fn parse_qu_line(line: &str) -> Option<RepoUpgrade> {
         return None;
     }
     let new_ver = parts.next()?;
-    Some(RepoUpgrade {
+    Some(PkgUpgrade {
         name: name.to_string(),
         old_ver: old_ver.to_string(),
         new_ver: new_ver.to_string(),
@@ -127,7 +127,7 @@ mod tests {
     fn parses_qu_line() {
         assert_eq!(
             parse_qu_line("vim 9.0-1 -> 9.1-2"),
-            Some(RepoUpgrade {
+            Some(PkgUpgrade {
                 name: "vim".into(),
                 old_ver: "9.0-1".into(),
                 new_ver: "9.1-2".into(),

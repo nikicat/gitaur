@@ -27,8 +27,11 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
 
     match f.op {
         Some('S') => handle_s(cfg, cli, &f, argv),
+        // Pre-scan in `cli::run` only routes the bare `-Qu` form here; every
+        // other Q variant is plain pacman territory and never reaches dispatch.
+        Some('Q') => build::cmd_query_upgrades(cli.devel || cfg.devel || f.has_long("devel")),
         Some(other) => Err(Error::other(format!(
-            "unsupported gitaur op `-{other}` (pacman pass-through goes via the pre-scan, this dispatch is `-S` only)"
+            "unsupported gitaur op `-{other}` (pacman pass-through goes via the pre-scan, this dispatch is `-S` / `-Qu` only)"
         ))),
         None => invoke::exec_pacman(cfg, argv),
     }
@@ -86,28 +89,17 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
     }
 
     if upgrade {
-        // `pacman -Qu` reads the local + sync DBs without elevation, so the
-        // repo half of the plan can be shown before any sudo prompt. In
-        // `--plan` mode this also replaces the actual `pacman -Syu` call;
-        // otherwise pacman still gets the final say (and prompts on its own).
-        let repo_upgrades = invoke::query_repo_upgrades()?;
-        if repo_upgrades.is_empty() {
-            ui::info("no repo upgrades pending");
-        } else {
-            let rows: Vec<(String, String, String)> = repo_upgrades
-                .into_iter()
-                .map(|u| (u.name, u.old_ver, u.new_ver))
-                .collect();
-            ui::upgrade_list("Repo upgrades", &rows);
+        // Show the union (repo + AUR) upgrade plan first — identical to
+        // `gitaur -Qu`, unprivileged — then run the real upgrade. `--plan`
+        // no longer has a dedicated upgrade-side handler: use `-Qu` for a
+        // dry-run preview.
+        build::cmd_query_upgrades(cfg.devel || devel)?;
+        let mut pac_args = vec!["-Syu".to_string()];
+        if noconfirm {
+            pac_args.push("--noconfirm".into());
         }
-        if !plan {
-            let mut pac_args = vec!["-Syu".to_string()];
-            if noconfirm {
-                pac_args.push("--noconfirm".into());
-            }
-            invoke::exec_pacman(cfg, &pac_args)?;
-        }
-        build::cmd_sysupgrade(cfg, cfg.devel || devel, noconfirm, plan)?;
+        invoke::exec_pacman(cfg, &pac_args)?;
+        build::cmd_sysupgrade(cfg, cfg.devel || devel, noconfirm)?;
     }
 
     if !f.positional.is_empty() {

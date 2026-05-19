@@ -12,6 +12,7 @@ use crate::index::secondary::Secondary;
 use crate::index::{self, IndexEntry, IndexFile};
 use crate::mirror::{self, MirrorRepo};
 use crate::pacman::alpm_db::{self, PacmanIndex};
+use crate::pacman::invoke::PkgUpgrade;
 use crate::pacman::{invoke, vercmp};
 use crate::paths;
 use crate::resolver::{self, Plan};
@@ -395,39 +396,86 @@ fn install_stratum(
     Ok(())
 }
 
+/// Scan the localdb for foreign pkgs with a newer version in the AUR index.
+///
+/// `devel=true` forces every VCS pkgbase (`-git`/`-svn`/`-hg`/`-bzr`) into
+/// the list regardless of vercmp, since their `pkgver` is only refreshed by
+/// `makepkg`. Otherwise VCS pkgs are skipped (their on-disk version always
+/// looks stale).
+///
+// TODO: match paru/yay's `--devel`: cache the upstream source commit OID per
+// pkgbase in state.db and only mark a VCS pkg outdated when `git ls-remote`
+// reports a different ref. Today every `--devel` run schedules a rebuild for
+// every VCS pkgbase, which is correct but wasteful.
+fn aur_upgrades(
+    idx: &IndexFile,
+    by: &Secondary,
+    pac: &PacmanIndex,
+    devel: bool,
+) -> Vec<PkgUpgrade> {
+    let mut out = Vec::new();
+    for (name, installed_ver) in pac.foreign() {
+        let Some(entry) = by.lookup(idx, &name) else {
+            warn!(name, "foreign pkg not in AUR index");
+            continue;
+        };
+        let is_vcs = is_vcs_pkg(&entry.pkgbase);
+        if !devel && is_vcs {
+            continue;
+        }
+        let aur_ver = version_string(entry);
+        let need = (devel && is_vcs) || vercmp::is_outdated(&installed_ver, &aur_ver);
+        if need {
+            out.push(PkgUpgrade {
+                name,
+                old_ver: installed_ver,
+                new_ver: aur_ver,
+            });
+        }
+    }
+    out
+}
+
+/// `gitaur -Qu` / `gitaur -Su --plan` — print the union of pacman-repo and
+/// AUR upgrade candidates in `pacman -Qu` format (`name old -> new`, one per
+/// line, sorted by name) to stdout. Read-only, no sudo, machine-parseable.
+#[instrument]
+pub fn cmd_query_upgrades(devel: bool) -> Result<u8> {
+    let repo = invoke::query_repo_upgrades()?;
+    let alpm = alpm_db::open()?;
+    let pac = PacmanIndex::build(&alpm);
+    let idx_path = paths::index_path();
+    let aur = if idx_path.exists() {
+        let idx = index::load(&idx_path)?;
+        let by = Secondary::build(&idx);
+        aur_upgrades(&idx, &by, &pac, devel)
+    } else {
+        Vec::new()
+    };
+    let mut merged: Vec<PkgUpgrade> = repo.into_iter().chain(aur).collect();
+    merged.sort_by(|a, b| a.name.cmp(&b.name));
+    for u in &merged {
+        println!("{} {} -> {}", u.name, u.old_ver, u.new_ver);
+    }
+    Ok(0)
+}
+
 /// Entry point for the AUR half of `-Syu`.
-pub fn cmd_sysupgrade(cfg: &Config, devel: bool, noconfirm: bool, plan_only: bool) -> Result<u8> {
+pub fn cmd_sysupgrade(cfg: &Config, devel: bool, noconfirm: bool) -> Result<u8> {
     let idx = index::load(&paths::index_path())?;
     let by = Secondary::build(&idx);
     let alpm = alpm_db::open()?;
     let pac = PacmanIndex::build(&alpm);
-    let foreign = pac.foreign();
-
-    let mut queue: Vec<String> = Vec::new();
-    for (name, installed_ver) in foreign {
-        let Some(entry) = by.lookup(&idx, &name) else {
-            warn!(name, "foreign pkg not in AUR index");
-            continue;
-        };
-        if !devel && is_vcs_pkg(&entry.pkgbase) {
-            continue;
-        }
-        let aur_ver = version_string(entry);
-        let need = if devel && is_vcs_pkg(&entry.pkgbase) {
-            true
-        } else {
-            vercmp::is_outdated(&installed_ver, &aur_ver)
-        };
-        if need {
-            queue.push(name);
-        }
-    }
+    let queue: Vec<String> = aur_upgrades(&idx, &by, &pac, devel)
+        .into_iter()
+        .map(|u| u.name)
+        .collect();
     if queue.is_empty() {
         ui::info("nothing to do");
         return Ok(0);
     }
     ui::pkg_list("AUR upgrades", &queue);
-    cmd_install(cfg, &queue, noconfirm, false, plan_only)
+    cmd_install(cfg, &queue, noconfirm, false, false)
 }
 
 /// Entry point for `-Sc` / `-Scc`.
