@@ -116,6 +116,34 @@ pub fn pkg_list(label: &str, items: &[String]) {
     }
 }
 
+/// Display upgrade candidates one per line, version transitions aligned via a
+/// dimmed arrow. Used for the `pacman -Qu` half of the `-Syu`/`--plan` plan
+/// preview, where the old → new transition matters more than density.
+pub fn upgrade_list(label: &str, items: &[(String, String, String)]) {
+    if items.is_empty() {
+        return;
+    }
+    let header = format!("{} ({})", label, items.len());
+    let name_width = items.iter().map(|(n, ..)| n.len()).max().unwrap_or(0);
+    let old_width = items.iter().map(|(_, o, _)| o.len()).max().unwrap_or(0);
+    if color_on() {
+        eprintln!("\n{}", style(&header).bold());
+        for (name, old, new) in items {
+            eprintln!(
+                "    {name:<name_width$}  {old:<old_width$}  {arrow} {new}",
+                arrow = style("->").color256(244),
+            );
+        }
+        eprintln!();
+    } else {
+        eprintln!("\n{header}");
+        for (name, old, new) in items {
+            eprintln!("    {name:<name_width$}  {old:<old_width$}  -> {new}");
+        }
+        eprintln!();
+    }
+}
+
 /// Y/n confirmation prompt with `Y` default. Honors `noconfirm` to auto-accept.
 pub fn confirm(prompt: &str, noconfirm: bool) -> std::io::Result<bool> {
     if noconfirm {

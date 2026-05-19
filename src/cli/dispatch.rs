@@ -86,9 +86,21 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
     }
 
     if upgrade {
-        if plan {
-            ui::info("plan: pacman -Syu (skipped in --plan mode)");
+        // `pacman -Qu` reads the local + sync DBs without elevation, so the
+        // repo half of the plan can be shown before any sudo prompt. In
+        // `--plan` mode this also replaces the actual `pacman -Syu` call;
+        // otherwise pacman still gets the final say (and prompts on its own).
+        let repo_upgrades = invoke::query_repo_upgrades()?;
+        if repo_upgrades.is_empty() {
+            ui::info("no repo upgrades pending");
         } else {
+            let rows: Vec<(String, String, String)> = repo_upgrades
+                .into_iter()
+                .map(|u| (u.name, u.old_ver, u.new_ver))
+                .collect();
+            ui::upgrade_list("Repo upgrades", &rows);
+        }
+        if !plan {
             let mut pac_args = vec!["-Syu".to_string()];
             if noconfirm {
                 pac_args.push("--noconfirm".into());
