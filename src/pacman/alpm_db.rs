@@ -30,6 +30,10 @@ pub fn open() -> Result<Alpm> {
 pub struct PacmanIndex {
     /// pkgname → installed version (from localdb).
     pub installed: HashMap<String, String>,
+    /// pkgname → pkgbase recorded in localdb metadata, when present.
+    /// Lets us tie split subpackages (notably `*-debug`) back to their
+    /// pkgbase so they aren't surfaced as unknown foreign pkgs.
+    pub installed_base: HashMap<String, String>,
     /// Set of exact pkgnames available across all sync repos.
     pub sync_names: HashSet<String>,
     /// Set of virtual `provides` names exposed by any sync-repo pkg.
@@ -40,12 +44,15 @@ impl PacmanIndex {
     /// Snapshot `&Alpm` into owned hash tables. Single pass over each DB.
     #[instrument(skip(alpm))]
     pub fn build(alpm: &Alpm) -> Self {
-        let installed: HashMap<String, String> = alpm
-            .localdb()
-            .pkgs()
-            .iter()
-            .map(|p| (p.name().to_string(), p.version().to_string()))
-            .collect();
+        let mut installed: HashMap<String, String> = HashMap::new();
+        let mut installed_base: HashMap<String, String> = HashMap::new();
+        for p in alpm.localdb().pkgs() {
+            let name = p.name().to_string();
+            installed.insert(name.clone(), p.version().to_string());
+            if let Some(base) = p.base() {
+                installed_base.insert(name, base.to_string());
+            }
+        }
         let mut sync_names: HashSet<String> = HashSet::new();
         let mut sync_provides: HashSet<String> = HashSet::new();
         for db in alpm.syncdbs() {
@@ -64,9 +71,15 @@ impl PacmanIndex {
         );
         Self {
             installed,
+            installed_base,
             sync_names,
             sync_provides,
         }
+    }
+
+    /// pkgbase recorded for `name` in the local DB, if any.
+    pub fn installed_pkgbase(&self, name: &str) -> Option<&str> {
+        self.installed_base.get(name).map(String::as_str)
     }
 
     /// Installed version of `name`, or `None` if not installed.
@@ -112,6 +125,16 @@ mod tests {
         assert!(!idx.in_sync("nonexistent"));
         assert_eq!(idx.installed_version("vim"), Some("9.0-1"));
         assert_eq!(idx.installed_version("firefox"), None);
+    }
+
+    #[test]
+    fn installed_pkgbase_round_trips() {
+        let mut idx = PacmanIndex::default();
+        idx.installed.insert("foo-debug".into(), "1-1".into());
+        idx.installed_base
+            .insert("foo-debug".into(), "foo".into());
+        assert_eq!(idx.installed_pkgbase("foo-debug"), Some("foo"));
+        assert_eq!(idx.installed_pkgbase("foo"), None);
     }
 
     #[test]

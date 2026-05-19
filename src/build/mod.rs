@@ -416,7 +416,14 @@ pub fn cmd_sysupgrade(
     let mut queue: Vec<String> = Vec::new();
     for (name, installed_ver) in foreign {
         let Some(entry) = by.lookup(&idx, &name) else {
-            warn!(name, "foreign pkg not in AUR index");
+            match classify_unresolved_foreign(&idx, &by, &pac, &name) {
+                UnresolvedForeign::KnownSubpackage { base } => {
+                    debug!(name, base, "skipping split subpackage; pkgbase in AUR");
+                }
+                UnresolvedForeign::Unknown => {
+                    warn!(name, "foreign pkg not in AUR index");
+                }
+            }
             continue;
         };
         if !devel && is_vcs_pkg(&entry.pkgbase) {
@@ -461,6 +468,38 @@ pub fn cmd_clean(cfg: &Config, deep: bool, argv: &[String]) -> Result<u8> {
         }
     }
     Ok(0)
+}
+
+/// Outcome of looking up a foreign pkg whose pkgname missed the AUR index.
+///
+/// `KnownSubpackage` means alpm's localdb pkgbase metadata points at an entry
+/// that *is* in AUR — typically a `${pkgname}-debug` auto-split. We stay silent
+/// because the pkgbase build (if outdated) will rebuild the subpackage too,
+/// and if the pkgbase is itself foreign-and-unknown it warns on its own.
+#[derive(Debug, PartialEq, Eq)]
+enum UnresolvedForeign {
+    KnownSubpackage { base: String },
+    Unknown,
+}
+
+fn classify_unresolved_foreign(
+    idx: &IndexFile,
+    by: &Secondary,
+    pac: &PacmanIndex,
+    name: &str,
+) -> UnresolvedForeign {
+    let Some(base) = pac.installed_pkgbase(name) else {
+        return UnresolvedForeign::Unknown;
+    };
+    if base == name {
+        return UnresolvedForeign::Unknown;
+    }
+    if by.lookup(idx, base).is_none() {
+        return UnresolvedForeign::Unknown;
+    }
+    UnresolvedForeign::KnownSubpackage {
+        base: base.to_string(),
+    }
 }
 
 fn is_vcs_pkg(pkgbase: &str) -> bool {
@@ -529,5 +568,97 @@ mod tests {
         b[0] = 0xde;
         b[1] = 0xad;
         assert!(hex(&b).starts_with("dead"));
+    }
+
+    mod unresolved_foreign {
+        use super::*;
+        use crate::index::schema::{IndexFile, Pkgname};
+
+        fn aur_entry(pkgbase: &str, pkgnames: &[&str]) -> IndexEntry {
+            IndexEntry {
+                pkgbase: pkgbase.into(),
+                pkgnames: pkgnames
+                    .iter()
+                    .map(|n| Pkgname {
+                        name: (*n).into(),
+                        provides: Vec::new(),
+                    })
+                    .collect(),
+                pkgver: "1".into(),
+                pkgrel: "1".into(),
+                ..Default::default()
+            }
+        }
+
+        fn fixture() -> (IndexFile, Secondary, PacmanIndex) {
+            // AUR knows `systemd-cron` (single pkgname == pkgbase). The
+            // installed `systemd-cron-debug` is the makepkg auto-split, with
+            // pkgbase `systemd-cron` recorded in localdb metadata.
+            let idx = IndexFile {
+                entries: vec![aur_entry("systemd-cron", &["systemd-cron"])],
+                ..IndexFile::empty()
+            };
+            let by = Secondary::build(&idx);
+            let mut pac = PacmanIndex::default();
+            pac.installed
+                .insert("systemd-cron-debug".into(), "2.1-1".into());
+            pac.installed_base
+                .insert("systemd-cron-debug".into(), "systemd-cron".into());
+            pac.installed.insert("orphan-pkg".into(), "1-1".into());
+            pac.installed
+                .insert("orphan-pkg-debug".into(), "1-1".into());
+            pac.installed_base
+                .insert("orphan-pkg-debug".into(), "orphan-pkg".into());
+            (idx, by, pac)
+        }
+
+        #[test]
+        fn debug_subpackage_with_aur_pkgbase_is_silent() {
+            let (idx, by, pac) = fixture();
+            assert_eq!(
+                classify_unresolved_foreign(&idx, &by, &pac, "systemd-cron-debug"),
+                UnresolvedForeign::KnownSubpackage {
+                    base: "systemd-cron".into()
+                }
+            );
+        }
+
+        #[test]
+        fn debug_subpackage_whose_pkgbase_also_unknown_falls_through() {
+            // `orphan-pkg` isn't in the AUR index either, so the subpackage
+            // can't be excused by its base — it warns just like its base will.
+            let (idx, by, pac) = fixture();
+            assert_eq!(
+                classify_unresolved_foreign(&idx, &by, &pac, "orphan-pkg-debug"),
+                UnresolvedForeign::Unknown
+            );
+        }
+
+        #[test]
+        fn pkg_without_pkgbase_metadata_is_unknown() {
+            // Old localdb entries can lack the `%BASE%` field; nothing to
+            // cross-reference, so we must still warn.
+            let (idx, by, mut pac) = fixture();
+            pac.installed.insert("ancient-pkg".into(), "1-1".into());
+            assert_eq!(
+                classify_unresolved_foreign(&idx, &by, &pac, "ancient-pkg"),
+                UnresolvedForeign::Unknown
+            );
+        }
+
+        #[test]
+        fn pkgbase_equal_to_pkgname_does_not_self_resolve() {
+            // A non-split pkg whose pkgbase == pkgname must not be silenced
+            // just because alpm records the trivial base — otherwise we'd
+            // mask genuinely unknown foreign pkgs.
+            let (idx, by, mut pac) = fixture();
+            pac.installed.insert("self-base".into(), "1-1".into());
+            pac.installed_base
+                .insert("self-base".into(), "self-base".into());
+            assert_eq!(
+                classify_unresolved_foreign(&idx, &by, &pac, "self-base"),
+                UnresolvedForeign::Unknown
+            );
+        }
     }
 }
