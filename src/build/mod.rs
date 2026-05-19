@@ -35,30 +35,71 @@ struct BuiltPkg {
     files: Vec<PathBuf>,
 }
 
-/// Render the resolved [`Plan`] to stderr using the same grouped list format
-/// the AUR confirmation prompt uses.
-fn print_plan(plan: &Plan) {
+/// Render the resolved [`Plan`] to stderr as aligned `name  version` tables
+/// — one group per source — mirroring the style of [`ui::upgrade_table`] used
+/// by `-Su`. Versions are looked up live from `pac` (sync DBs) and `idx`
+/// (AUR index), so the plan answers "which exact version would land?" for
+/// every row before the user confirms.
+fn print_plan(plan: &Plan, idx: &IndexFile, pac: &PacmanIndex) {
     if plan.direct_repo.is_empty() && plan.transitive_repo.is_empty() && plan.aur_strata.is_empty()
     {
         ui::info("plan: nothing to do");
         return;
     }
     if !plan.direct_repo.is_empty() {
-        ui::pkg_list("Repo packages (explicit)", &plan.direct_repo);
+        ui::install_table(
+            "Repo packages (explicit)",
+            &rows_for_repo(&plan.direct_repo, pac),
+        );
     }
     if !plan.transitive_repo.is_empty() {
-        ui::pkg_list("Repo dependencies", &plan.transitive_repo);
+        ui::install_table(
+            "Repo dependencies",
+            &rows_for_repo(&plan.transitive_repo, pac),
+        );
     }
     if !plan.aur_strata.is_empty() {
         let total = plan.aur_strata.len();
         if total == 1 {
-            ui::pkg_list("AUR build order", &plan.aur_strata[0]);
+            ui::install_table("AUR build order", &rows_for_aur(&plan.aur_strata[0], idx));
         } else {
             for (i, stratum) in plan.aur_strata.iter().enumerate() {
-                ui::pkg_list(&format!("AUR build stratum {}/{total}", i + 1), stratum);
+                ui::install_table(
+                    &format!("AUR build stratum {}/{total}", i + 1),
+                    &rows_for_aur(stratum, idx),
+                );
             }
         }
     }
+}
+
+/// Pair each repo pkgname with its sync-repo version. A name that only
+/// matched via a virtual `provides` won't carry a version of its own (pacman
+/// will choose a concrete provider at install time); render an empty version
+/// cell rather than guessing.
+fn rows_for_repo(names: &[String], pac: &PacmanIndex) -> Vec<(String, String)> {
+    names
+        .iter()
+        .map(|n| (n.clone(), pac.sync_version(n).unwrap_or("").to_string()))
+        .collect()
+}
+
+/// Pair each AUR pkgbase with its index version (`[epoch:]pkgver-pkgrel`).
+/// All pkgnames in a split pkgbase share that version, so the pkgbase row
+/// is unambiguous even when only a subset of pkgnames will be installed.
+fn rows_for_aur(pkgbases: &[String], idx: &IndexFile) -> Vec<(String, String)> {
+    pkgbases
+        .iter()
+        .map(|pb| {
+            let ver = idx
+                .entries
+                .iter()
+                .find(|e| e.pkgbase == *pb)
+                .map(version_string)
+                .unwrap_or_default();
+            (pb.clone(), ver)
+        })
+        .collect()
 }
 
 /// Entry point for `gitaur -S <targets>`.
@@ -124,7 +165,7 @@ pub fn cmd_install(
     // `.pkg.tar.zst` Explicit instead of `--asdeps`.
     plan.direct_targets.extend(expanded.direct_pkgnames);
 
-    print_plan(&plan);
+    print_plan(&plan, idx, &pac);
 
     if plan.direct_repo.is_empty() && plan.transitive_repo.is_empty() && plan.aur_strata.is_empty()
     {

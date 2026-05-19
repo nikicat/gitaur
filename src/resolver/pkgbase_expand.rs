@@ -239,7 +239,7 @@ mod tests {
         };
         let by = Secondary::build(&idx);
         let mut pac = PacmanIndex::default();
-        pac.sync_names.insert("firefox".into());
+        pac.sync_versions.insert("firefox".into(), "110.0-1".into());
         (idx, by, pac)
     }
 

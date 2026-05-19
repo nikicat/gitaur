@@ -119,6 +119,44 @@ pub fn pkg_list(label: &str, items: &[String]) {
     }
 }
 
+/// Display an aligned install plan table:
+///
+/// ```text
+/// Repo packages (explicit) (2)
+///     firefox          110.0-1
+///     vim              9.1-2
+/// ```
+///
+/// Companion to [`upgrade_table`] for `-S <pkg>` plans — the rows here are
+/// always fresh installs (anything already at the target version was dropped
+/// by the resolver), so there's no `old -> new` arrow to draw. An empty
+/// `version` (e.g. an AUR name we couldn't look up) renders the name alone.
+pub fn install_table(label: &str, rows: &[(String, String)]) {
+    if rows.is_empty() {
+        return;
+    }
+    let name_w = rows.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+    let header = format!("{} ({})", label, rows.len());
+
+    eprintln!();
+    if color_on() {
+        eprintln!("{}", dim(&header));
+        for (name, ver) in rows {
+            eprintln!(
+                "    {name:<name_w$}  {ver}",
+                name = name,
+                ver = style(ver).green(),
+            );
+        }
+    } else {
+        eprintln!("{header}");
+        for (name, ver) in rows {
+            eprintln!("    {name:<name_w$}  {ver}");
+        }
+    }
+    eprintln!();
+}
+
 /// Display an aligned, colorized upgrade table:
 ///
 /// ```text
@@ -768,9 +806,15 @@ mod tests {
     #[test]
     fn dim_is_italic_color244_not_bold() {
         let out = dim("Repo upgrades (3)").force_styling(true).to_string();
-        assert!(out.contains("\u{1b}[38;5;244m"), "missing color 244: {out:?}");
+        assert!(
+            out.contains("\u{1b}[38;5;244m"),
+            "missing color 244: {out:?}"
+        );
         assert!(out.contains("\u{1b}[3m"), "missing italic: {out:?}");
-        assert!(!out.contains("\u{1b}[1m"), "header should not be bold: {out:?}");
+        assert!(
+            !out.contains("\u{1b}[1m"),
+            "header should not be bold: {out:?}"
+        );
     }
 
     /// Upgrade rows must render most-severe first within each group, with
@@ -820,6 +864,19 @@ mod tests {
             sorted,
             ["epoch", "major", "minor", "patch-a", "patch-b", "pkgrel"]
         );
+    }
+
+    /// Empty version cells (provides-only matches) must not break the
+    /// name-column padding or panic on the format machinery.
+    #[test]
+    fn install_table_smoke() {
+        let rows = vec![
+            ("short".to_string(), "1.0-1".to_string()),
+            ("much-longer-name".to_string(), "1.2.3-4".to_string()),
+            ("provides-only".to_string(), String::new()),
+        ];
+        install_table("Test installs", &rows);
+        install_table("Empty", &[]);
     }
 
     /// `upgrade_table` writes to stderr so we can't capture its output without

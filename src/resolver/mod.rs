@@ -88,18 +88,21 @@ pub fn resolve(
     while let Some((target, is_direct)) = queue.pop() {
         let bare = secondary::strip_version_constraint(&target).to_string();
         match classify(by, pac, &bare) {
-            Source::Installed => {
-                debug!(target = %bare, "already installed");
+            Source::Installed(concrete) => {
+                debug!(target = %bare, %concrete, "already satisfied (installed)");
             }
-            Source::Repo => {
+            Source::Repo(concrete) => {
+                // direct_set is keyed on the **user-typed** name so explicit
+                // `gitaur -S cargo` flips the resolved provider (`rust`) into
+                // direct_repo even when it also appears as another pkg's dep.
                 let direct = is_direct || direct_set.contains(&bare);
                 let bucket = if direct {
                     &mut plan.direct_repo
                 } else {
                     &mut plan.transitive_repo
                 };
-                if !bucket.iter().any(|s| s == &bare) {
-                    bucket.push(bare);
+                if !bucket.iter().any(|s| s == &concrete) {
+                    bucket.push(concrete);
                 }
             }
             Source::Aur(entry_idx) => {
@@ -161,6 +164,16 @@ pub fn resolve(
         .collect();
 
     plan.aur_strata = topo::strata(&make_edges_resolved, &visited_aur)?;
+
+    // Cross-bucket dedup: a concrete pkg may have landed in direct_repo via
+    // one alias (e.g. user typed `rust`) and in transitive_repo via another
+    // (an AUR makedep `cargo` → `rust`). Direct wins — drop the transitive
+    // copy so the install isn't double-listed and explicit-vs-asdeps stays
+    // consistent.
+    let direct_set: HashSet<&str> = plan.direct_repo.iter().map(String::as_str).collect();
+    plan.transitive_repo
+        .retain(|n| !direct_set.contains(n.as_str()));
+
     info!(
         direct_repo = plan.direct_repo.len(),
         transitive_repo = plan.transitive_repo.len(),
@@ -218,7 +231,7 @@ mod tests {
         let by = Secondary::build(&idx);
         let mut pac = PacmanIndex::default();
         for n in repo {
-            pac.sync_names.insert((*n).into());
+            pac.sync_versions.insert((*n).into(), "1.0-1".into());
         }
         let cfg = default_config();
         let targets: Vec<String> = targets.iter().map(|s| (*s).to_string()).collect();
@@ -418,6 +431,95 @@ mod tests {
         let plan = run(&["a"], vec![entry("a", &[], &["foo"])], &["foo"]).unwrap();
         assert!(plan.direct_repo.is_empty());
         assert_eq!(plan.transitive_repo, vec!["foo".to_string()]);
+    }
+
+    // ---- provides resolution: the `paru` regression --------------------
+
+    /// AUR `paru` makedepends on the virtual `cargo` and `libalpm.so`.
+    /// Those are not packages — `rust` provides `cargo` and `pacman`
+    /// provides `libalpm.so`. The plan must list the concrete pkgnames
+    /// with their versions, never the virtuals.
+    #[test]
+    fn aur_makedep_virtual_provides_resolves_to_concrete() {
+        let idx = IndexFile {
+            entries: vec![entry("paru", &[], &["cargo", "libalpm.so"])],
+            ..IndexFile::empty()
+        };
+        let by = Secondary::build(&idx);
+        let mut pac = PacmanIndex::default();
+        pac.sync_versions.insert("rust".into(), "1.80.0-1".into());
+        pac.sync_providers
+            .insert("cargo".into(), vec!["rust".into()]);
+        pac.sync_versions.insert("pacman".into(), "6.1.0-1".into());
+        pac.sync_providers
+            .insert("libalpm.so".into(), vec!["pacman".into()]);
+        let cfg = default_config();
+        let plan = resolve(&cfg, &idx, Some(&by), &pac, &["paru".to_string()]).unwrap();
+
+        assert_eq!(plan.aur_strata, vec![vec!["paru".to_string()]]);
+        let mut t = plan.transitive_repo.clone();
+        t.sort();
+        assert_eq!(t, vec!["pacman".to_string(), "rust".to_string()]);
+        assert!(plan.direct_repo.is_empty());
+    }
+
+    /// When a provider is already installed, the dep is already satisfied —
+    /// pacman --needed would no-op — so the resolver must drop it entirely
+    /// rather than show a phantom row in the plan.
+    #[test]
+    fn aur_makedep_provider_already_installed_is_dropped() {
+        let idx = IndexFile {
+            entries: vec![entry("paru", &[], &["cargo"])],
+            ..IndexFile::empty()
+        };
+        let by = Secondary::build(&idx);
+        let mut pac = PacmanIndex::default();
+        pac.installed.insert("rust".into(), "1.80.0-1".into());
+        pac.installed_providers
+            .insert("cargo".into(), vec!["rust".into()]);
+        // rust is also in sync, but installed wins.
+        pac.sync_versions.insert("rust".into(), "1.80.0-1".into());
+        pac.sync_providers
+            .insert("cargo".into(), vec!["rust".into()]);
+        let cfg = default_config();
+        let plan = resolve(&cfg, &idx, Some(&by), &pac, &["paru".to_string()]).unwrap();
+
+        assert_eq!(plan.aur_strata, vec![vec!["paru".to_string()]]);
+        assert!(plan.transitive_repo.is_empty());
+        assert!(plan.direct_repo.is_empty());
+    }
+
+    /// A concrete pkg may land in `direct_repo` via one alias (`rust`) AND in
+    /// `transitive_repo` via another (a dep `cargo` → `rust`). Direct wins —
+    /// the cross-bucket dedup pass must drop the transitive copy so the
+    /// install argv isn't double-listed.
+    #[test]
+    fn provides_dedup_prefers_direct_over_transitive() {
+        let idx = IndexFile {
+            entries: vec![entry("paru", &[], &["cargo"])],
+            ..IndexFile::empty()
+        };
+        let by = Secondary::build(&idx);
+        let mut pac = PacmanIndex::default();
+        pac.sync_versions.insert("rust".into(), "1.80.0-1".into());
+        pac.sync_providers
+            .insert("cargo".into(), vec!["rust".into()]);
+        let cfg = default_config();
+        let plan = resolve(
+            &cfg,
+            &idx,
+            Some(&by),
+            &pac,
+            &["rust".to_string(), "paru".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(plan.direct_repo, vec!["rust".to_string()]);
+        assert!(
+            plan.transitive_repo.is_empty(),
+            "rust must not appear in both buckets, got transitive {:?}",
+            plan.transitive_repo
+        );
     }
 
     // ---- cycles ---------------------------------------------------------
