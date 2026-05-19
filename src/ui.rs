@@ -142,7 +142,7 @@ pub fn upgrade_table(label: &str, upgrades: &[PkgUpgrade]) {
 
     eprintln!();
     if color_on() {
-        eprintln!("{}", style(&header).bold());
+        eprintln!("{}", dim(&header));
         for u in upgrades {
             let kind = verdiff::classify_bump(&u.old_ver, &u.new_ver);
             let cut = verdiff::common_prefix_at_boundary(&u.old_ver, &u.new_ver);
@@ -572,7 +572,7 @@ fn leaf_is_muted(name: &str) -> bool {
 /// italic. Reads clearly without competing with the bright primary text.
 /// Use for hint annotations, last-built timestamps, anything the eye should
 /// *not* lock onto.
-pub fn dim(text: impl AsRef<str>) -> impl std::fmt::Display {
+pub fn dim(text: impl AsRef<str>) -> console::StyledObject<String> {
     style(text.as_ref().to_string()).color256(244).italic()
 }
 
@@ -747,6 +747,17 @@ mod tests {
             let s = paint_suffix("1.2.3", kind).force_styling(true).to_string();
             assert!(s.contains("1.2.3"), "{kind:?} dropped the text: {s:?}");
         }
+    }
+
+    /// The upgrade-table header is auxiliary information — it must render in
+    /// the same gray-italic style as phase hints, never bold. Pins the ANSI
+    /// codes so a refactor that re-bolds the header fails loudly.
+    #[test]
+    fn dim_is_italic_color244_not_bold() {
+        let out = dim("Repo upgrades (3)").force_styling(true).to_string();
+        assert!(out.contains("\u{1b}[38;5;244m"), "missing color 244: {out:?}");
+        assert!(out.contains("\u{1b}[3m"), "missing italic: {out:?}");
+        assert!(!out.contains("\u{1b}[1m"), "header should not be bold: {out:?}");
     }
 
     /// `upgrade_table` writes to stderr so we can't capture its output without
