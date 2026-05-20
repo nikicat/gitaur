@@ -45,6 +45,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 jiff = "0.2"
 glob = "0.3"
+# Pure-Rust regex backend (fancy-regex) avoids the onig C dep; ~10 transitive
+# crates and ~1.5 MB binary growth for bash syntax coloring during PKGBUILD review.
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
 
 [dev-dependencies]
 tempfile = "3"

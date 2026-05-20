@@ -53,7 +53,7 @@ pub fn set_color(mode: ColorMode) {
     let _ = COLOR.set(mode);
 }
 
-fn color_on() -> bool {
+pub fn color_on() -> bool {
     match COLOR.get().copied().unwrap_or(ColorMode::Auto) {
         ColorMode::Always => true,
         ColorMode::Never => false,

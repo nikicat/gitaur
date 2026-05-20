@@ -75,9 +75,7 @@ fn show(
 
 fn show_pkgbuild(wt: &Worktree) -> Result<()> {
     let text = std::fs::read_to_string(wt.path.join("PKGBUILD"))?;
-    for line in text.lines() {
-        println!("{line}");
-    }
+    print!("{}", highlight::pkgbuild(&text));
     Ok(())
 }
 
@@ -143,6 +141,128 @@ fn print_unified(old: &str, new: &str) {
             similar_minimal::Op::Keep(line) => println!(" {line}"),
             similar_minimal::Op::Add(line) => println!("{}", style(format!("+{line}")).green()),
             similar_minimal::Op::Remove(line) => println!("{}", style(format!("-{line}")).red()),
+        }
+    }
+}
+
+mod highlight {
+    //! Bash syntax coloring for the PKGBUILD review screen, via `syntect`'s
+    //! bundled Sublime grammar (same grammar `bat` uses for `.sh`/PKGBUILD).
+    //!
+    //! Loaded lazily — the bundled `SyntaxSet` costs ~100 ms to parse on first
+    //! use, then is cached for the rest of the process. Any failure (theme
+    //! missing, grammar unloadable, per-line highlight error) falls back to
+    //! plain text rather than aborting review.
+    use crate::ui;
+    use std::sync::OnceLock;
+    use syntect::easy::HighlightLines;
+    use syntect::highlighting::{Theme, ThemeSet};
+    use syntect::parsing::SyntaxSet;
+    use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
+
+    struct Ctx {
+        syntaxes: SyntaxSet,
+        theme: Theme,
+    }
+
+    fn ctx() -> &'static Ctx {
+        static CTX: OnceLock<Ctx> = OnceLock::new();
+        CTX.get_or_init(|| Ctx {
+            syntaxes: SyntaxSet::load_defaults_newlines(),
+            theme: ThemeSet::load_defaults()
+                .themes
+                .remove("base16-ocean.dark")
+                .expect("syntect ships base16-ocean.dark"),
+        })
+    }
+
+    /// Render PKGBUILD source. Always ends with a single `\n` so the prompt
+    /// that follows lands on a fresh line; passes `false` to the terminal
+    /// escaper so the theme's background never paints over the user's bg.
+    pub fn pkgbuild(text: &str) -> String {
+        render(text, ui::color_on())
+    }
+
+    fn render(text: &str, colors: bool) -> String {
+        if !colors {
+            return plain(text);
+        }
+        try_color(text).unwrap_or_else(|| plain(text))
+    }
+
+    fn plain(text: &str) -> String {
+        if text.is_empty() || text.ends_with('\n') {
+            return text.to_owned();
+        }
+        let mut s = String::with_capacity(text.len() + 1);
+        s.push_str(text);
+        s.push('\n');
+        s
+    }
+
+    fn try_color(text: &str) -> Option<String> {
+        if text.is_empty() {
+            return Some(String::new());
+        }
+        let Ctx { syntaxes, theme } = ctx();
+        let syntax = syntaxes
+            .find_syntax_by_name("Bourne Again Shell (bash)")
+            .or_else(|| syntaxes.find_syntax_by_extension("sh"))?;
+        let mut hl = HighlightLines::new(syntax, theme);
+        let mut out = String::with_capacity(text.len() * 2);
+        for line in LinesWithEndings::from(text) {
+            let ranges = hl.highlight_line(line, syntaxes).ok()?;
+            out.push_str(&as_24_bit_terminal_escaped(&ranges, false));
+        }
+        // Move any trailing newline past the reset so the styled block ends
+        // with `\x1b[0m\n` regardless of whether the source had a final \n.
+        if out.ends_with('\n') {
+            out.pop();
+        }
+        out.push_str("\u{1b}[0m\n");
+        Some(out)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::render;
+        use console::strip_ansi_codes;
+
+        #[test]
+        fn colored_roundtrips_to_source() {
+            let src = "pkgname=foo\npkgver=1.2.3\n\nbuild() {\n    cd \"$srcdir/$pkgname-$pkgver\"  # comment\n    make\n}\n";
+            let out = render(src, true);
+            assert!(out.contains("\u{1b}["), "expected ANSI escapes: {out:?}");
+            assert!(out.ends_with("\u{1b}[0m\n"), "missing final reset+nl: {out:?}");
+            // Strip the trailing reset before comparing, since strip_ansi_codes
+            // leaves the surrounding text alone.
+            assert_eq!(strip_ansi_codes(&out).trim_end_matches('\n'), src.trim_end_matches('\n'));
+        }
+
+        #[test]
+        fn plain_when_colors_off() {
+            let src = "pkgname=foo\n";
+            assert_eq!(render(src, false), src);
+        }
+
+        #[test]
+        fn adds_trailing_newline_when_source_lacks_one() {
+            assert_eq!(render("pkgname=foo", false), "pkgname=foo\n");
+            let out = render("pkgname=foo", true);
+            assert!(out.ends_with("\u{1b}[0m\n"));
+        }
+
+        #[test]
+        fn empty_input_stays_empty() {
+            assert_eq!(render("", false), "");
+            assert_eq!(render("", true), "");
+        }
+
+        #[test]
+        fn utf8_in_pkgdesc_does_not_panic() {
+            let src = "pkgdesc=\"héllo wörld — 漢字\"\n";
+            let out = render(src, true);
+            assert_eq!(strip_ansi_codes(&out).trim_end_matches('\n'), src.trim_end_matches('\n'));
         }
     }
 }
