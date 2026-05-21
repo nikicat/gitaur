@@ -30,7 +30,14 @@ const FILE_LOG_FILTER: &str =
 pub fn init() -> Option<PathBuf> {
     let console_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
-    let console_layer = fmt::layer().with_target(false).with_filter(console_filter);
+    // `fmt::layer()` defaults to stdout, which competes with subprocess
+    // stdout (makepkg, pacman -U). Pin to stderr so log lines interleave
+    // cleanly with `ui::{step,note,…}` (which all use eprintln) and don't
+    // pollute callers that capture gitaur's stdout.
+    let console_layer = fmt::layer()
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .with_filter(console_filter);
 
     let (file_layer, log_path) = match open_log_file() {
         Ok((file, path)) => {

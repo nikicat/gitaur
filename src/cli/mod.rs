@@ -59,7 +59,7 @@ const AFTER_HELP: &str = "GITAUR-OWNED OPERATIONS:\n\
   -Syu           pacman -Syu + AUR upgrades (plan shown, one confirm up front)\n\
   -Ss <regex>    search AUR by name/desc/provides\n\
   -Si <pkg>      show AUR package info\n\
-  -Sc / -Scc     clean built worktrees (cc also drops state.db)\n\
+  -Sc / -Scc     remove built worktrees + pass -Sc/-Scc through to pacman\n\
   -Qu            list upgrades from repos + AUR, no sudo (dry-run for -Syu)\n\
 \n\
 PASS-THROUGH (raw `pacman` — clap doesn't parse these):\n\

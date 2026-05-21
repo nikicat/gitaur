@@ -33,7 +33,8 @@ use tracing::{debug, instrument};
 pub struct Worktree {
     /// Materialized files live here.
     pub path: PathBuf,
-    /// Commit OID we checked out, for state.db recording and diff-on-update.
+    /// Commit OID we checked out — the starting point for review's history
+    /// walk when finding the AUR commit that produced `installed_ver`.
     pub head_oid: ObjectId,
 }
 
@@ -155,7 +156,7 @@ fn force_remove(path: &Path) -> Result<()> {
 
 /// Resolve `refname` to its tip OID using the bare repo's object DB. We do
 /// this via gix instead of `git rev-parse` so the hot path (every `build_one`)
-/// avoids a fork — and because state.db needs the OID anyway.
+/// avoids a fork.
 fn peel_branch(mirror: &MirrorRepo, refname: &str) -> Result<ObjectId> {
     let mut r = mirror
         .repo

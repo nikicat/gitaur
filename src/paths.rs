@@ -49,11 +49,6 @@ pub fn index_path() -> PathBuf {
     state_dir().join("index.bin")
 }
 
-/// Path to the `SQLite` build state database.
-pub fn state_db_path() -> PathBuf {
-    state_dir().join("state.db")
-}
-
 /// Path to `config.toml`.
 pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")

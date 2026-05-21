@@ -22,10 +22,6 @@ pub enum Error {
     #[error("alpm: {0}")]
     Alpm(#[from] alpm::Error),
 
-    /// `SQLite` error from state.db access.
-    #[error("sqlite: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-
     /// TOML parse failure from config.
     #[error("toml: {0}")]
     Toml(#[from] TomlDeError),
@@ -46,7 +42,7 @@ pub enum Error {
     #[error("resolve: {0}")]
     Resolve(String),
 
-    /// Build pipeline failure (makepkg, install, state.db).
+    /// Build pipeline failure (makepkg, install).
     #[error("build: {0}")]
     Build(String),
 

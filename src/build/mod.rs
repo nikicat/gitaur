@@ -1,10 +1,12 @@
 //! Build orchestration: plan → batched repo deps → unprivileged build loop → final batched install.
 //!
 //! Sudo is deferred to the very end and prompted exactly once for the `pacman -U`
-//! step. Builds are idempotent: a pkgbase whose `state.db.last_built_commit_oid`
-//! equals the current branch tip *and* whose `.pkg.tar.zst` is still on disk
-//! is skipped, so re-running after declining the install just replays the
-//! install step.
+//! step. Builds are idempotent on the artifact: a pkgbase whose worktree
+//! already holds a `.pkg.tar.{zst,xz}` named at the AUR index's exact
+//! `[epoch:]pkgver-pkgrel` for every required pkgname is skipped, so
+//! re-running after declining the install just replays the install step.
+//! VCS pkgbases never hit this cache (their static pkgver is overridden by
+//! `pkgver()`), which is the right thing — they're rebuilt on demand.
 
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -18,16 +20,12 @@ use crate::paths;
 use crate::resolver::{self, Plan};
 use crate::ui;
 use std::collections::HashSet;
-use std::fmt::Write as _;
 use std::path::PathBuf;
 use tracing::{debug, info, instrument, warn};
 
 pub mod install;
 pub mod makepkg;
 pub mod review;
-pub mod state_db;
-
-use state_db::StateDb;
 
 /// One built pkgbase's set of `.pkg.tar.zst` outputs.
 struct BuiltPkg {
@@ -95,7 +93,7 @@ fn rows_for_aur(pkgbases: &[String], idx: &IndexFile) -> Vec<(String, String)> {
                 .entries
                 .iter()
                 .find(|e| e.pkgbase == *pb)
-                .map(version_string)
+                .map(IndexEntry::version)
                 .unwrap_or_default();
             (pb.clone(), ver)
         })
@@ -238,7 +236,6 @@ fn run_aur_pipeline(
     asdeps: bool,
 ) -> Result<()> {
     let mirror = MirrorRepo::open(&paths::aur_repo_path())?;
-    let mut db = StateDb::open(&paths::state_db_path())?;
     let direct_names: HashSet<&str> = plan
         .direct_targets
         .iter()
@@ -246,7 +243,33 @@ fn run_aur_pipeline(
         .collect();
     let mut transitive_marks: Vec<String> = Vec::new();
 
-    for (stratum_idx, stratum) in plan.aur_strata.iter().enumerate() {
+    // Phase 1: open every worktree, run idempotency checks, and prompt the
+    // user for review across all strata up front. Skipped pkgbases are
+    // dropped; an "abort" propagates immediately as Error::UserAbort. No
+    // makepkg runs in this phase, so the user can walk through every diff
+    // before any build kicks off.
+    let mut prep_strata: Vec<Vec<Prep<'_>>> = Vec::with_capacity(plan.aur_strata.len());
+    for stratum in &plan.aur_strata {
+        let mut row = Vec::with_capacity(stratum.len());
+        for pkgbase in stratum {
+            // Partial-split selection — present only when the user asked
+            // for a subset. makepkg always packages every pkgname in a
+            // split (no `--pkg=` flag); we filter the produced files down
+            // to the selection so `install_stratum`'s `pacman -U` skips
+            // the rest.
+            let selection = plan.pkgname_selections.get(pkgbase).map(Vec::as_slice);
+            row.push(prepare_one(
+                &mirror, idx, pac, pkgbase, selection, noconfirm,
+            )?);
+        }
+        prep_strata.push(row);
+    }
+
+    // Phase 2: makepkg approved pkgbases, install per-stratum so later
+    // strata's makepkg finds earlier strata's deps in localdb.
+    for (stratum_idx, (stratum, preps)) in
+        plan.aur_strata.iter().zip(prep_strata).enumerate()
+    {
         if plan.aur_strata.len() > 1 {
             ui::info(&format!(
                 "build stratum {}/{}: {}",
@@ -255,20 +278,26 @@ fn run_aur_pipeline(
                 stratum.join(" "),
             ));
         }
-        let mut stratum_built: Vec<BuiltPkg> = Vec::with_capacity(stratum.len());
-        for pkgbase in stratum {
-            // Partial-split selection — present only for pkgbases where the
-            // user asked for a subset. makepkg always packages every pkgname
-            // in a split (no `--pkg=` flag); `build_one` returns only the
-            // selected `.pkg.tar.zst` files so `install_stratum`'s
-            // `pacman -U` transaction skips the rest.
-            let selection = plan.pkgname_selections.get(pkgbase).map(Vec::as_slice);
-            let outputs =
-                build_one(cfg, &mirror, idx, pac, &mut db, pkgbase, selection, noconfirm)?;
-            stratum_built.push(BuiltPkg {
-                pkgbase: pkgbase.clone(),
-                files: outputs,
-            });
+        let mut stratum_built: Vec<BuiltPkg> = Vec::with_capacity(preps.len());
+        for prep in preps {
+            match prep.disposition {
+                Disposition::Skipped => {
+                    ui::note(&format!("{}: skipped", prep.pkgbase));
+                }
+                Disposition::Cached(files) => {
+                    stratum_built.push(BuiltPkg {
+                        pkgbase: prep.pkgbase.to_owned(),
+                        files,
+                    });
+                }
+                Disposition::Build => {
+                    let files = run_build(cfg, &prep)?;
+                    stratum_built.push(BuiltPkg {
+                        pkgbase: prep.pkgbase.to_owned(),
+                        files,
+                    });
+                }
+            }
         }
         install_stratum(
             cfg,
@@ -288,85 +317,122 @@ fn run_aur_pipeline(
     Ok(())
 }
 
-#[instrument(skip(cfg, mirror, idx, pac, db, selection))]
-#[allow(clippy::too_many_arguments)]
-fn build_one(
-    cfg: &Config,
+/// One pkgbase's prepared state, produced in phase 1 and consumed in phase 2.
+struct Prep<'a> {
+    pkgbase: &'a str,
+    wt: mirror::worktree::Worktree,
+    new_ver: String,
+    selection: Option<&'a [String]>,
+    disposition: Disposition,
+}
+
+/// What phase 2 should do with a [`Prep`].
+enum Disposition {
+    /// Already built at exactly `new_ver`; reuse the listed files.
+    Cached(Vec<PathBuf>),
+    /// Approved by the user (or noconfirm); run makepkg in phase 2.
+    Build,
+    /// User chose "skip" — drop from this run.
+    Skipped,
+}
+
+#[instrument(skip(mirror, idx, pac, selection))]
+fn prepare_one<'a>(
     mirror: &MirrorRepo,
-    idx: &IndexFile,
+    idx: &'a IndexFile,
     pac: &PacmanIndex,
-    db: &mut StateDb,
-    pkgbase: &str,
-    selection: Option<&[String]>,
+    pkgbase: &'a str,
+    selection: Option<&'a [String]>,
     noconfirm: bool,
-) -> Result<Vec<PathBuf>> {
+) -> Result<Prep<'a>> {
     let entry = idx
         .entries
         .iter()
         .find(|e| e.pkgbase == pkgbase)
         .ok_or_else(|| Error::Build(format!("{pkgbase}: missing from index")))?;
-    let head_hex = hex(&entry.commit_oid);
     let dest = paths::pkg_worktree(pkgbase);
     let wt = mirror::worktree::add_or_reset(mirror, pkgbase, &dest)?;
 
-    // Idempotency: a cached build is reusable only when its on-disk
-    // .pkg.tar.zst set covers every pkgname this run wants. A previous run
-    // with `--pkg=A` produced just A; a follow-up that asks for {A,B} would
-    // otherwise reuse A's file and silently drop B.
-    if let Some(prev) = db.get(pkgbase)? {
-        let existing = install::find_produced(&wt.path)?;
-        let covers_selection = match selection {
-            Some(sel) => sel.iter().all(|name| {
-                existing
-                    .iter()
-                    .any(|f| install::extract_pkgname(f).as_deref() == Some(name.as_str()))
-            }),
-            None => entry.pkgnames.iter().all(|pkg| {
-                existing
-                    .iter()
-                    .any(|f| install::extract_pkgname(f).as_deref() == Some(pkg.name.as_str()))
-            }),
-        };
-        if prev.last_built_commit_oid == head_hex && covers_selection {
-            let kept = filter_by_selection(&existing, selection);
-            ui::note(&format!("{pkgbase}: already built at {}", &head_hex[..8]));
-            debug!(
-                pkgbase,
-                head_hex,
-                files = kept.len(),
-                "reusing cached build"
-            );
-            return Ok(kept);
-        }
+    let new_ver = entry.version();
+    let required: Vec<&str> = match selection {
+        Some(sel) => sel.iter().map(String::as_str).collect(),
+        None => entry.pkgnames.iter().map(|p| p.name.as_str()).collect(),
+    };
+
+    // Idempotency: skip rebuild iff a .pkg.tar.{zst,xz} file at exactly
+    // `new_ver` already exists for every required pkgname. Derived purely
+    // from on-disk artifacts — no sidecar DB needed. VCS pkgbases never hit
+    // this (their static `pkgver` differs from the dynamic one makepkg
+    // writes into the artifact filename), so they always rebuild, which is
+    // the right behavior for `-git`/`-svn`/etc.
+    let existing = install::find_produced(&wt.path)?;
+    let cached = !required.is_empty()
+        && required.iter().all(|name| {
+            existing
+                .iter()
+                .any(|f| install::matches_pkg(f, name, &new_ver))
+        });
+    if cached {
+        let kept = filter_by_selection(&existing, selection);
+        ui::note(&format!("{pkgbase}: already built {new_ver}"));
+        debug!(
+            pkgbase,
+            version = %new_ver,
+            files = kept.len(),
+            "reusing cached build"
+        );
+        return Ok(Prep {
+            pkgbase,
+            wt,
+            new_ver,
+            selection,
+            disposition: Disposition::Cached(kept),
+        });
     }
 
-    let new_ver = version_string(entry);
     let installed_ver = entry
         .pkgnames
         .iter()
         .find_map(|p| pac.installed_version(&p.name));
-    review::review(
-        db,
+    let disposition = match review::review(
         mirror,
         pkgbase,
         &new_ver,
         installed_ver,
         &wt,
         noconfirm,
-    )?;
-    ui::step(&format!("makepkg {pkgbase}"));
-    makepkg::run(cfg, &wt.path)?;
+    )? {
+        review::Outcome::Approved => Disposition::Build,
+        review::Outcome::Skipped => Disposition::Skipped,
+    };
+    Ok(Prep {
+        pkgbase,
+        wt,
+        new_ver,
+        selection,
+        disposition,
+    })
+}
 
-    let produced = install::find_produced(&wt.path)?;
-    let outputs = filter_by_selection(&produced, selection);
+#[instrument(skip(cfg, prep), fields(pkgbase = prep.pkgbase, version = %prep.new_ver))]
+fn run_build(cfg: &Config, prep: &Prep) -> Result<Vec<PathBuf>> {
+    ui::step(&format!("makepkg {}", prep.pkgbase));
+    makepkg::run(cfg, &prep.wt.path)?;
+
+    let produced = install::find_produced(&prep.wt.path)?;
+    let outputs = filter_by_selection(&produced, prep.selection);
     if outputs.is_empty() {
         return Err(Error::Build(format!(
-            "{pkgbase}: makepkg produced no packages"
+            "{}: makepkg produced no packages",
+            prep.pkgbase
         )));
     }
-
-    db.record_build(pkgbase, &head_hex, &new_ver)?;
-    info!(pkgbase, version = new_ver, files = outputs.len(), "build recorded");
+    info!(
+        pkgbase = prep.pkgbase,
+        version = %prep.new_ver,
+        files = outputs.len(),
+        "build complete"
+    );
     Ok(outputs)
 }
 
@@ -443,11 +509,6 @@ fn install_stratum(
 /// the list regardless of vercmp, since their `pkgver` is only refreshed by
 /// `makepkg`. Otherwise VCS pkgs are skipped (their on-disk version always
 /// looks stale).
-///
-// TODO: match paru/yay's `--devel`: cache the upstream source commit OID per
-// pkgbase in state.db and only mark a VCS pkg outdated when `git ls-remote`
-// reports a different ref. Today every `--devel` run schedules a rebuild for
-// every VCS pkgbase, which is correct but wasteful.
 fn aur_upgrades(
     idx: &IndexFile,
     by: &Secondary,
@@ -464,7 +525,7 @@ fn aur_upgrades(
         if !devel && is_vcs {
             continue;
         }
-        let aur_ver = version_string(entry);
+        let aur_ver = entry.version();
         let need = (devel && is_vcs) || vercmp::is_outdated(&installed_ver, &aur_ver);
         if need {
             out.push(PkgUpgrade {
@@ -504,9 +565,12 @@ pub fn collect_upgrade_plan(devel: bool) -> Result<Vec<PkgUpgrade>> {
     Ok(plan)
 }
 
-/// Entry point for `-Sc` / `-Scc`.
+/// Entry point for `-Sc` / `-Scc`. The depth of pacman's own cache cleanup is
+/// already encoded in `argv`; gitaur just wipes its per-pkgbase worktrees
+/// (idempotency cache lives entirely inside them as the produced
+/// `.pkg.tar.{zst,xz}` files).
 #[instrument(skip(cfg, argv))]
-pub fn cmd_clean(cfg: &Config, deep: bool, argv: &[String]) -> Result<u8> {
+pub fn cmd_clean(cfg: &Config, argv: &[String]) -> Result<u8> {
     invoke::exec_pacman(cfg, argv)?;
 
     let pkgs_root = paths::state_dir().join("pkgs");
@@ -517,13 +581,6 @@ pub fn cmd_clean(cfg: &Config, deep: bool, argv: &[String]) -> Result<u8> {
         }
         let _ = std::fs::create_dir_all(&pkgs_root);
     }
-    if deep {
-        ui::info("clearing build state DB");
-        let db_path = paths::state_db_path();
-        if db_path.exists() {
-            std::fs::remove_file(&db_path)?;
-        }
-    }
     Ok(0)
 }
 
@@ -532,24 +589,6 @@ fn is_vcs_pkg(pkgbase: &str) -> bool {
         || pkgbase.ends_with("-svn")
         || pkgbase.ends_with("-hg")
         || pkgbase.ends_with("-bzr")
-}
-
-fn version_string(e: &IndexEntry) -> String {
-    let epoch = e
-        .epoch
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(|s| format!("{s}:"))
-        .unwrap_or_default();
-    format!("{epoch}{}-{}", e.pkgver, e.pkgrel)
-}
-
-fn hex(b: &[u8; 20]) -> String {
-    let mut s = String::with_capacity(40);
-    for x in b {
-        let _ = write!(s, "{x:02x}");
-    }
-    s
 }
 
 #[cfg(test)]
@@ -564,34 +603,5 @@ mod tests {
         assert!(is_vcs_pkg("baz-bzr"));
         assert!(!is_vcs_pkg("neovim"));
         assert!(!is_vcs_pkg("git-lfs"));
-    }
-
-    #[test]
-    fn version_with_epoch() {
-        let e = IndexEntry {
-            pkgver: "1.0".into(),
-            pkgrel: "2".into(),
-            epoch: Some("3".into()),
-            ..Default::default()
-        };
-        assert_eq!(version_string(&e), "3:1.0-2");
-    }
-
-    #[test]
-    fn version_without_epoch() {
-        let e = IndexEntry {
-            pkgver: "1.0".into(),
-            pkgrel: "2".into(),
-            ..Default::default()
-        };
-        assert_eq!(version_string(&e), "1.0-2");
-    }
-
-    #[test]
-    fn hex_encodes() {
-        let mut b = [0u8; 20];
-        b[0] = 0xde;
-        b[1] = 0xad;
-        assert!(hex(&b).starts_with("dead"));
     }
 }

@@ -1,11 +1,15 @@
 //! PKGBUILD review UX: label by installed-vs-new (install / upgrade / reinstall),
-//! and show full PKGBUILD on a fresh build or a diff against the last build.
+//! and on upgrade show a colored diff against the AUR commit whose `.SRCINFO`
+//! declares the currently-installed version. Falls back to the full PKGBUILD
+//! on fresh installs, reinstalls, and upgrades where no historic commit
+//! matches (typical for VCS pkgbases whose `pkgver()` overrides the static
+//! field at build time, or for installs older than the bounded history walk).
 //!
 //! Diff uses the bare mirror repo's object DB (not a `.git` inside the
 //! worktree) — the build directory is just materialized files.
 
-use crate::build::state_db::{BuildRecord, StateDb};
 use crate::error::{Error, Result};
+use crate::index::srcinfo;
 use crate::mirror::worktree::Worktree;
 use crate::mirror::MirrorRepo;
 use crate::ui;
@@ -15,31 +19,43 @@ use gix::ObjectId;
 use std::process::Command;
 use tracing::{debug, info, instrument};
 
+/// How many commits back to scan looking for the AUR commit that produced
+/// `installed_ver`. AUR maintainers bump versions one commit at a time, so
+/// the match almost always sits in the first few commits. Bounded to keep
+/// the walk cheap on a very stale install.
+const MAX_HISTORY_SCAN: usize = 64;
+
+/// What the user decided about this pkgbase. `Aborted` short-circuits the
+/// whole pipeline (propagated as [`Error::UserAbort`] by the caller), so it
+/// isn't a variant here — only "include it" vs "drop it".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// User approved: include in the upcoming build batch.
+    Approved,
+    /// User chose "skip": drop this pkgbase from the build batch but keep
+    /// reviewing the rest.
+    Skipped,
+}
+
 /// Drive the review prompt loop for one pkgbase. `installed_ver` is the
 /// pacman-localdb version of any pkgname in this pkgbase (None when not
 /// installed); `new_ver` is the version the AUR index reports.
-#[instrument(skip(db, mirror, wt))]
+#[instrument(skip(mirror, wt))]
 pub fn review(
-    db: &StateDb,
     mirror: &MirrorRepo,
     pkgbase: &str,
     new_ver: &str,
     installed_ver: Option<&str>,
     wt: &Worktree,
     noconfirm: bool,
-) -> Result<()> {
-    let prior = db.get(pkgbase)?;
+) -> Result<Outcome> {
     if noconfirm {
-        info!(
-            pkgbase,
-            prior = prior.is_some(),
-            "auto-proceeding (noconfirm)"
-        );
-        return Ok(());
+        info!(pkgbase, "auto-proceeding (noconfirm)");
+        return Ok(Outcome::Approved);
     }
 
     loop {
-        show(mirror, pkgbase, new_ver, installed_ver, wt, prior.as_ref())?;
+        show(mirror, pkgbase, new_ver, installed_ver, wt)?;
         let choice = Select::new()
             .with_prompt(format!("[{pkgbase}] review"))
             .items(&["proceed", "view PKGBUILD", "edit", "skip", "abort"])
@@ -47,10 +63,10 @@ pub fn review(
             .interact()
             .map_err(|e| Error::other(format!("prompt: {e}")))?;
         match choice {
-            0 => return Ok(()),
+            0 => return Ok(Outcome::Approved),
             1 => show_pkgbuild(wt)?,
             2 => edit_pkgbuild(wt)?,
-            3 => return Err(Error::Build(format!("{pkgbase}: skipped"))),
+            3 => return Ok(Outcome::Skipped),
             _ => return Err(Error::UserAbort),
         }
     }
@@ -62,7 +78,6 @@ fn show(
     new_ver: &str,
     installed_ver: Option<&str>,
     wt: &Worktree,
-    prior: Option<&BuildRecord>,
 ) -> Result<()> {
     let header = match installed_ver {
         None => format!("install: {pkgbase} {new_ver}"),
@@ -70,14 +85,21 @@ fn show(
         Some(v) => format!("upgrade: {pkgbase} {v} → {new_ver}"),
     };
     ui::step(&header);
-    match prior {
-        None => show_pkgbuild(wt)?,
-        Some(prev) => {
-            ui::note(&format!("last built {}", prev.last_built_version));
-            show_diff(mirror, wt, &prev.last_built_commit_oid)?;
-        }
+
+    // Fresh install or reinstall: no historic version to diff against, so the
+    // full PKGBUILD is the only meaningful review surface.
+    let Some(installed) = installed_ver.filter(|v| *v != new_ver) else {
+        return show_pkgbuild(wt);
+    };
+
+    if let Some(base) = find_installed_commit(mirror, wt.head_oid, installed)? {
+        show_diff(mirror, wt, base)
+    } else {
+        ui::note(&format!(
+            "no AUR commit in the last {MAX_HISTORY_SCAN} matches installed {installed}; showing full PKGBUILD"
+        ));
+        show_pkgbuild(wt)
     }
-    Ok(())
 }
 
 fn show_pkgbuild(wt: &Worktree) -> Result<()> {
@@ -97,48 +119,89 @@ fn edit_pkgbuild(wt: &Worktree) -> Result<()> {
     Ok(())
 }
 
-/// Show a line-diff of `PKGBUILD` between the previously-built commit and
-/// the freshly-materialized worktree's commit. Listing every other changed
-/// path is left to the user — they have a real linked worktree, so plain
-/// `git diff` works there.
-fn show_diff(mirror: &MirrorRepo, wt: &Worktree, last_oid_hex: &str) -> Result<()> {
-    let last_oid = ObjectId::from_hex(last_oid_hex.as_bytes())
-        .map_err(|e| Error::Gix(format!("bad oid {last_oid_hex}: {e}")))?;
-    let Ok(old_commit) = mirror.repo.find_commit(last_oid) else {
-        ui::note("last-built commit not in mirror; showing full PKGBUILD");
-        return show_pkgbuild(wt);
-    };
-    let new_commit = mirror
+/// Show a line-diff of `PKGBUILD` between `base` and the freshly-materialized
+/// worktree's commit. Listing every other changed path is left to the user —
+/// they have a real linked worktree, so plain `git diff` works there.
+fn show_diff(mirror: &MirrorRepo, wt: &Worktree, base: ObjectId) -> Result<()> {
+    let old_tree = mirror
         .repo
-        .find_commit(wt.head_oid)
-        .map_err(|e| Error::Gix(format!("find_commit {}: {e}", wt.head_oid)))?;
-    let old_tree = old_commit
+        .find_commit(base)
+        .map_err(|e| Error::Gix(format!("find_commit {base}: {e}")))?
         .tree()
         .map_err(|e| Error::Gix(format!("old tree: {e}")))?;
-    let new_tree = new_commit
+    let new_tree = mirror
+        .repo
+        .find_commit(wt.head_oid)
+        .map_err(|e| Error::Gix(format!("find_commit {}: {e}", wt.head_oid)))?
         .tree()
         .map_err(|e| Error::Gix(format!("new tree: {e}")))?;
 
-    let old_text = read_pkgbuild(mirror, &old_tree)?;
-    let new_text = read_pkgbuild(mirror, &new_tree)?;
+    let old_text = read_blob(mirror, &old_tree, "PKGBUILD")?.unwrap_or_default();
+    let new_text = read_blob(mirror, &new_tree, "PKGBUILD")?.unwrap_or_default();
     if old_text == new_text {
-        ui::note("PKGBUILD unchanged since last build");
+        ui::note("PKGBUILD unchanged");
         return Ok(());
     }
     print_unified(&old_text, &new_text);
     Ok(())
 }
 
-fn read_pkgbuild(mirror: &MirrorRepo, tree: &gix::Tree<'_>) -> Result<String> {
-    let entry = tree
-        .find_entry("PKGBUILD")
-        .ok_or_else(|| Error::Build("no PKGBUILD in tree".into()))?;
+/// Walk the AUR branch back from `head_oid` looking for the commit whose
+/// `.SRCINFO` declares `installed_ver`. Returns `None` if no such commit is
+/// found within [`MAX_HISTORY_SCAN`] steps — VCS pkgbases never match here
+/// because their static pkgver is overridden by `pkgver()` at build time,
+/// and very stale installs may sit further back than the bound.
+///
+/// Uses `.SRCINFO` rather than parsing `PKGBUILD` ourselves: the AUR ships
+/// the post-bash-expansion `.SRCINFO` alongside every PKGBUILD, and the
+/// existing [`srcinfo::parse`] already turns it into an [`IndexEntry`] —
+/// the same code path the rkyv index uses.
+///
+/// `pub` for integration tests (`tests/review_diff_history.rs`).
+pub fn find_installed_commit(
+    mirror: &MirrorRepo,
+    head_oid: ObjectId,
+    installed_ver: &str,
+) -> Result<Option<ObjectId>> {
+    let head = mirror
+        .repo
+        .find_commit(head_oid)
+        .map_err(|e| Error::Gix(format!("find_commit {head_oid}: {e}")))?;
+    let walk = head
+        .ancestors()
+        .first_parent_only()
+        .all()
+        .map_err(|e| Error::Gix(format!("ancestors {head_oid}: {e}")))?;
+    for info in walk.take(MAX_HISTORY_SCAN) {
+        let info = info.map_err(|e| Error::Gix(format!("walk: {e}")))?;
+        let tree = info
+            .object()
+            .map_err(|e| Error::Gix(format!("walk object {}: {e}", info.id)))?
+            .tree()
+            .map_err(|e| Error::Gix(format!("walk tree {}: {e}", info.id)))?;
+        let Some(text) = read_blob(mirror, &tree, ".SRCINFO")? else {
+            continue;
+        };
+        let Ok(entry) = srcinfo::parse(&text) else {
+            continue;
+        };
+        if entry.version() == installed_ver {
+            return Ok(Some(info.id));
+        }
+    }
+    Ok(None)
+}
+
+fn read_blob(mirror: &MirrorRepo, tree: &gix::Tree<'_>, name: &str) -> Result<Option<String>> {
+    let Some(entry) = tree.find_entry(name) else {
+        return Ok(None);
+    };
     let oid = entry.oid().to_owned();
     let blob = mirror
         .repo
         .find_object(oid)
-        .map_err(|e| Error::Gix(format!("find PKGBUILD blob: {e}")))?;
-    Ok(String::from_utf8_lossy(blob.data.as_slice()).into_owned())
+        .map_err(|e| Error::Gix(format!("find {name} blob: {e}")))?;
+    Ok(Some(String::from_utf8_lossy(blob.data.as_slice()).into_owned()))
 }
 
 fn print_unified(old: &str, new: &str) {

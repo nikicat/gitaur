@@ -88,6 +88,18 @@ impl IndexEntry {
                 .flat_map(|p| p.provides.iter().map(String::as_str)),
         )
     }
+
+    /// Pacman-style `[epoch:]pkgver-pkgrel` string. Empty `epoch` is treated
+    /// the same as no epoch — matches what `version_string` used to produce.
+    pub fn version(&self) -> String {
+        let epoch = self
+            .epoch
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("{s}:"))
+            .unwrap_or_default();
+        format!("{epoch}{}-{}", self.pkgver, self.pkgrel)
+    }
 }
 
 impl IndexFile {
@@ -104,5 +116,42 @@ impl IndexFile {
             built_at_unix: 0,
             entries: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_with_epoch() {
+        let e = IndexEntry {
+            pkgver: "1.0".into(),
+            pkgrel: "2".into(),
+            epoch: Some("3".into()),
+            ..Default::default()
+        };
+        assert_eq!(e.version(), "3:1.0-2");
+    }
+
+    #[test]
+    fn version_without_epoch() {
+        let e = IndexEntry {
+            pkgver: "1.0".into(),
+            pkgrel: "2".into(),
+            ..Default::default()
+        };
+        assert_eq!(e.version(), "1.0-2");
+    }
+
+    #[test]
+    fn version_treats_empty_epoch_as_none() {
+        let e = IndexEntry {
+            pkgver: "1.0".into(),
+            pkgrel: "2".into(),
+            epoch: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(e.version(), "1.0-2");
     }
 }

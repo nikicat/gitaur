@@ -30,7 +30,6 @@ alpm-utils = "4"
 pacmanconf = "3"
 rkyv = { version = "0.8", features = ["bytecheck"] }
 memmap2 = "0.9"
-rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dialoguer = "0.11"

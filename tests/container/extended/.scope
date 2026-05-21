@@ -20,11 +20,10 @@
 #   - asdeps_overrides_direct.sh         (`-S --asdeps` even for direct)
 #
 # State / idempotency:
-#   - rebuild_cached_skips.sh            (state.db hit, no makepkg)
-#   - rebuild_cached_files_missing.sh    (state.db hit but .pkg.tar.zst gone)
+#   - rebuild_cached_skips.sh            (.pkg.tar.zst at exact ver → no makepkg)
+#   - rebuild_after_artifact_deleted.sh  (cached .pkg.tar.zst removed → rebuild)
 #   - declined_install_keeps_artifacts.sh
 #   - sc_clears_worktrees.sh             (-Sc)
-#   - scc_clears_state_db.sh             (-Scc)
 #
 # Refresh:
 #   - sy_incremental_fetch.sh            (delta only)

@@ -60,8 +60,7 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
         return index::cmd_info(cfg, &f.positional);
     }
     if f.has('c') {
-        let deep = f.op_letters.iter().filter(|c| **c == 'c').count() >= 2;
-        return build::cmd_clean(cfg, deep, argv);
+        return build::cmd_clean(cfg, argv);
     }
 
     let refresh = f.has('y');

@@ -63,8 +63,14 @@ done
 # Each test runs in its own fresh container so state is isolated. With -j>1
 # they run concurrently — each container has its own pacman DB / state dir
 # so there is no cross-test contention.
+#
+# Captured-output files (one per script) are written to $results_dir. We
+# keep that directory around on failure so a user can `cat` an individual
+# log even if the inline dump was clipped by their terminal; on success we
+# clean it up via the trap below.
 results_dir="$(mktemp -d)"
-trap 'rm -rf "$results_dir"' EXIT
+keep_results=0
+trap '[[ "$keep_results" == "1" ]] || rm -rf "$results_dir"' EXIT
 
 run_one() {
     local script="$1"
@@ -78,15 +84,29 @@ run_one() {
             bash -c "set -e; cd /work && bash $rel" >"$out" 2>&1; then
         echo "PASS $rel"
     else
-        { echo "FAIL $rel"; sed 's/^/    /' "$out"; }
+        # Print the captured-output path explicitly so the user can re-read
+        # it after the run finishes, and indent the body so the boundary
+        # between FAIL header and captured lines is unambiguous. An empty
+        # `$out` (e.g. when podman exits before producing output) shows up
+        # as a clearly empty body, which is itself diagnostic.
+        local size
+        size=$(wc -c <"$out" 2>/dev/null || echo 0)
+        echo "FAIL $rel  ($size bytes captured at $out)"
+        if [[ "$size" -gt 0 ]]; then
+            sed 's/^/    /' "$out"
+        else
+            echo "    <no output captured — likely container crash or silent set -e abort>"
+        fi
     fi
 }
 export -f run_one
 export CONTAINER IMAGE REPO_ROOT results_dir
 
 pass=0 fail=0
+# `stdbuf -oL` flushes xargs's stdout per line so the FAIL+body block reaches
+# the `while` reader without being held in a parallel-job buffer.
 printf '%s\n' "${scripts[@]}" \
-    | xargs -P "$jobs" -I {} bash -c 'run_one "$@"' _ {} \
+    | stdbuf -oL xargs -P "$jobs" -I {} bash -c 'run_one "$@"' _ {} \
     | while IFS= read -r line; do
         echo "$line"
         case "$line" in
@@ -100,4 +120,8 @@ printf '%s\n' "${scripts[@]}" \
 read -r pass fail < "$results_dir/.counters"
 echo
 echo "== $pass passed, $fail failed =="
+if [[ "$fail" -gt 0 ]]; then
+    keep_results=1
+    echo "captured logs preserved in $results_dir"
+fi
 [[ "$fail" -eq 0 ]]
