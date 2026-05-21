@@ -53,6 +53,10 @@ syntect = { version = "5.3", default-features = false, features = [
 [dev-dependencies]
 tempfile = "3"
 nix = { version = "0.31", features = ["resource"] }
+# Drive `examples/picker_e2e` under a real PTY and assert against the parsed
+# screen grid in `tests/picker_artifacts.rs`.
+portable-pty = "0.9"
+vt100 = "0.16"
 
 [profile.release]
 lto = "thin"

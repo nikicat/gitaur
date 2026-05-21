@@ -16,9 +16,11 @@ use crate::pacman::invoke::{PkgUpgrade, REPO_AUR};
 use crate::pacman::verdiff::{self, BumpKind};
 
 use console::{style, Term};
+use dialoguer::theme::Theme;
 use dialoguer::{Confirm, MultiSelect};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::io::{BufRead, IsTerminal, Write};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -214,6 +216,40 @@ impl UpgradeSelection {
     }
 }
 
+/// `dialoguer::Theme` shim that swaps each plain item back to its colored
+/// rendering at draw time. dialoguer 0.11 measures wrap from `items[i].len()`
+/// (raw bytes); feeding it ANSI-styled labels makes its redraw over-clear and
+/// overwrite output above the prompt. We feed it plain labels and recolor
+/// here — output strings aren't measured, so wrap math stays correct.
+struct UpgradePickerTheme<'a> {
+    colored: HashMap<&'a str, String>,
+}
+
+impl<'a> UpgradePickerTheme<'a> {
+    fn new(colored: HashMap<&'a str, String>) -> Self {
+        Self { colored }
+    }
+}
+
+impl Theme for UpgradePickerTheme<'_> {
+    fn format_multi_select_prompt_item(
+        &self,
+        f: &mut dyn fmt::Write,
+        text: &str,
+        checked: bool,
+        active: bool,
+    ) -> fmt::Result {
+        let prefix = match (checked, active) {
+            (true, true) => "> [x]",
+            (true, false) => "  [x]",
+            (false, true) => "> [ ]",
+            (false, false) => "  [ ]",
+        };
+        let display = self.colored.get(text).map_or(text, String::as_str);
+        write!(f, "{prefix} {display}")
+    }
+}
+
 /// Render the upgrade plan as a `dialoguer::MultiSelect` and split the user's
 /// selection into the three buckets `UpgradeSelection` carries.
 ///
@@ -236,16 +272,28 @@ pub fn select_upgrades(
     let selected: Vec<usize> = if interactive {
         let (repo_w, name_w, old_w) = col_widths(&ordered);
         let colored = color_on();
-        let labels: Vec<String> = ordered
+        // Pass plain-ASCII labels to dialoguer so its redraw
+        // (`clear_preserve_prompt`) measures byte length ≈ visible width;
+        // it counts bytes against terminal columns to estimate wrap and
+        // would otherwise over-clear every redraw — eating lines above the
+        // prompt — when items carry ANSI escapes. Colour is reapplied at
+        // render time via [`UpgradePickerTheme`].
+        let plain: Vec<String> = ordered
             .iter()
-            .map(|u| render_row(u, repo_w, name_w, old_w, colored))
+            .map(|u| render_row(u, repo_w, name_w, old_w, false))
             .collect();
-        // Print a count banner above the prompt so the user sees the scope
-        // before navigating; the MultiSelect itself only owns its own area.
-        info(&format!("Upgrades ({})", ordered.len()));
-        MultiSelect::new()
+        let theme = UpgradePickerTheme::new(if colored {
+            ordered
+                .iter()
+                .zip(&plain)
+                .map(|(u, p)| (p.as_str(), render_row(u, repo_w, name_w, old_w, true)))
+                .collect()
+        } else {
+            HashMap::new()
+        });
+        MultiSelect::with_theme(&theme)
             .with_prompt("Select upgrades to apply (space toggles, a inverts, enter confirms)")
-            .items(&labels)
+            .items(&plain)
             .defaults(&defaults)
             .interact()
             .map_err(std::io::Error::other)?
@@ -1139,5 +1187,60 @@ mod tests {
         ];
         upgrade_table(&ups);
         upgrade_table(&[]);
+    }
+
+    /// `UpgradePickerTheme` must never hand dialoguer an ANSI-bearing string
+    /// for an item: that's the whole reason the theme exists. Items always
+    /// arrive plain; the theme paints them on the way out. Cover both the
+    /// hit (key present in the map → colored output) and the miss (key
+    /// absent → plain fallback), plus every `(checked, active)` prefix.
+    #[test]
+    fn picker_theme_paints_known_rows_and_falls_back_for_unknown() {
+        let mut colored = HashMap::new();
+        colored.insert(
+            "extra  vim",
+            "\u{1b}[38;5;244mextra\u{1b}[0m  vim".to_string(),
+        );
+        let theme = UpgradePickerTheme::new(colored);
+
+        let mut buf = String::new();
+        theme
+            .format_multi_select_prompt_item(&mut buf, "extra  vim", true, true)
+            .unwrap();
+        assert!(buf.starts_with("> [x] "), "wrong prefix: {buf:?}");
+        assert!(
+            buf.contains("\u{1b}[38;5;244m"),
+            "colored mapping was not applied: {buf:?}"
+        );
+
+        let mut buf = String::new();
+        theme
+            .format_multi_select_prompt_item(&mut buf, "aur  unmapped", false, false)
+            .unwrap();
+        assert_eq!(buf, "  [ ] aur  unmapped");
+    }
+
+    /// All four `(checked, active)` cells must emit the prefix dialoguer's
+    /// `SimpleTheme` would emit — that's the contract we replaced, and the
+    /// regression test for it is that the cursor + checkbox glyphs stay
+    /// where the user expects them.
+    #[test]
+    fn picker_theme_prefix_matrix() {
+        let theme = UpgradePickerTheme::new(HashMap::new());
+        for (checked, active, expected) in [
+            (true, true, "> [x] "),
+            (true, false, "  [x] "),
+            (false, true, "> [ ] "),
+            (false, false, "  [ ] "),
+        ] {
+            let mut buf = String::new();
+            theme
+                .format_multi_select_prompt_item(&mut buf, "x", checked, active)
+                .unwrap();
+            assert!(
+                buf.starts_with(expected),
+                "checked={checked} active={active} → {buf:?} (want prefix {expected:?})"
+            );
+        }
     }
 }
