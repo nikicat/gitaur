@@ -89,13 +89,20 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
             }
             run_repo_upgrade(cfg, &sel)?;
             if !sel.aur.is_empty() {
-                build::cmd_install(cfg, &sel.aur, noconfirm, false, true)?;
+                let code = build::cmd_install(cfg, &sel.aur, noconfirm, false, true)?;
+                if code != 0 {
+                    return Ok(code);
+                }
             }
         }
     }
 
     if !f.positional.is_empty() {
-        build::cmd_install(cfg, &f.positional, noconfirm, asdeps, false)?;
+        // cmd_install returns 1 when the AUR pipeline finished with at
+        // least one build failure or dep-block — the summary already
+        // explains what happened, so we just propagate the exit code so
+        // shells / `||` chains see the failure.
+        return build::cmd_install(cfg, &f.positional, noconfirm, asdeps, false);
     } else if !upgrade && !refresh {
         return Err(Error::other("no targets specified"));
     }

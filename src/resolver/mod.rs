@@ -30,6 +30,11 @@ pub struct Plan {
     /// Plain runtime `depends` don't constrain build order — they only need
     /// to resolve in the eventual install transaction.
     pub aur_strata: Vec<Vec<String>>,
+    /// AUR pkgbase → AUR pkgbase makedeps (the same edges fed to
+    /// `topo::strata`). Lets the build pipeline propagate failures: if A
+    /// fails, anything with A in its closure is skipped instead of being
+    /// attempted with a missing dep.
+    pub aur_make_edges: HashMap<String, Vec<String>>,
     /// User-requested top-level targets (pkgnames, not pkgbases).
     pub direct_targets: HashSet<String>,
     /// Per-pkgbase pkgname subset for split-package targets where the user
@@ -165,6 +170,7 @@ pub fn resolve(
         .collect();
 
     plan.aur_strata = topo::strata(&make_edges_resolved, &visited_aur)?;
+    plan.aur_make_edges = make_edges_resolved;
 
     // Cross-bucket dedup: a concrete pkg may have landed in direct_repo via
     // one alias (e.g. user typed `rust`) and in transitive_repo via another

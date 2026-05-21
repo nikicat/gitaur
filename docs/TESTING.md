@@ -193,6 +193,18 @@ Inside the container the gitaur binary is at `/work/target/debug/gitaur`,
   tempfile. Don't try to make it interactive — the parallel runner
   intentionally swallows stdin.
 
+### Smoke tests for build resilience
+
+`smoke/28-30` cover the per-pkgbase failure isolation introduced
+alongside the makepkg log capture: independent pkgbases keep building
+when a sibling fails, dependents of a failed pkgbase are auto-skipped
+instead of attempted with a missing dep, and `<worktree>/build.log`
+keeps a verbatim copy of every makepkg run for post-mortem use. The
+failing-build fixtures (`test-fail-build`, `test-needs-fail`) exist
+only to drive these three tests — they are baked into the image, so
+adding a new test that touches them does not require `--rebuild`
+unless you also edit the fixture's `PKGBUILD`.
+
 ## Manual smoke tests against the real AUR
 
 The unit + container suites use synthetic fixtures by design, so they

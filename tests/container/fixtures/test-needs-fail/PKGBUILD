@@ -1,0 +1,15 @@
+# makedepends on test-fail-build so the resolver puts it in a stratum
+# above the failing pkgbase. Used to assert that gitaur auto-skips this
+# pkgbase (the dep would not be in localdb) instead of attempting a
+# guaranteed-to-fail build.
+pkgname=test-needs-fail
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: makedepends on test-fail-build'
+arch=('any')
+license=('MIT')
+makedepends=('test-fail-build')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

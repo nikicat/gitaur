@@ -96,6 +96,20 @@ cargo test
 
 CI runs all of the above on an `archlinux:latest` container.
 
+In addition to the in-process Rust tests there is a black-box container
+suite under `tests/container/` that runs every gitaur command against
+real `pacman` + `makepkg` inside an ephemeral Arch userspace (podman
+default, docker via `CONTAINER=docker`). It is the only place where the
+multi-process build pipeline — sudo gating, asdeps flips, build
+failure isolation, makepkg log capture — is exercised end-to-end.
+
+```sh
+bash tests/container/run.sh                 # smoke tier (~30 s on 8 cores)
+bash tests/container/run.sh --rebuild smoke # bust image cache after fixture changes
+```
+
+Full details: [`docs/TESTING.md`](docs/TESTING.md).
+
 A `.pre-commit-config.yaml` is checked in to catch the cheap failures
 (`cargo fmt --check`, `taplo fmt --check`, `taplo lint`) before they round-trip
 through CI. One-time setup per clone:

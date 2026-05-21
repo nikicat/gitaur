@@ -19,7 +19,7 @@ use crate::pacman::{invoke, vercmp};
 use crate::paths;
 use crate::resolver::{self, Plan};
 use crate::ui;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use tracing::{debug, info, instrument, warn};
 
@@ -183,7 +183,7 @@ pub fn cmd_install(
             .as_ref()
             .map(|(i, _)| i)
             .ok_or_else(|| Error::other("internal: AUR plan without index"))?;
-        run_aur_pipeline(cfg, idx, &pac, &plan, noconfirm, asdeps)?;
+        return run_aur_pipeline(cfg, idx, &pac, &plan, noconfirm, asdeps);
     }
     Ok(0)
 }
@@ -217,7 +217,7 @@ fn install_repo_phase(cfg: &Config, plan: &Plan, asdeps: bool) -> Result<()> {
     Ok(())
 }
 
-/// Stratified AUR build+install loop.
+/// Stratified AUR build+install loop with per-pkgbase failure isolation.
 ///
 /// For each stratum (set of AUR pkgbases whose build-time deps are all in
 /// earlier strata): build every pkgbase, then `pacman -U` the resulting
@@ -227,6 +227,13 @@ fn install_repo_phase(cfg: &Config, plan: &Plan, asdeps: bool) -> Result<()> {
 /// resolving against the same batch. After all strata, transitive AUR pkgs
 /// that ended up Explicit during their stratum's `-U` are flipped to
 /// `--asdeps` via a single cheap `pacman -D` call.
+///
+/// A single makepkg failure no longer aborts the run: the offending pkgbase
+/// is marked failed, anything in the closure of `plan.aur_make_edges`
+/// rooted at it is auto-skipped (its deps wouldn't be in localdb anyway),
+/// and the remaining independent pkgbases keep building. A final summary
+/// lists installed / failed / skipped pkgbases; the return code is non-zero
+/// iff anything failed or was skipped due to a dep failure.
 fn run_aur_pipeline(
     cfg: &Config,
     idx: &IndexFile,
@@ -234,7 +241,7 @@ fn run_aur_pipeline(
     plan: &Plan,
     noconfirm: bool,
     asdeps: bool,
-) -> Result<()> {
+) -> Result<u8> {
     let mirror = MirrorRepo::open(&paths::aur_repo_path())?;
     let direct_names: HashSet<&str> = plan
         .direct_targets
@@ -265,6 +272,8 @@ fn run_aur_pipeline(
         prep_strata.push(row);
     }
 
+    let mut report = RunReport::default();
+
     // Phase 2: makepkg approved pkgbases, install per-stratum so later
     // strata's makepkg finds earlier strata's deps in localdb.
     for (stratum_idx, (stratum, preps)) in plan.aur_strata.iter().zip(prep_strata).enumerate() {
@@ -276,43 +285,192 @@ fn run_aur_pipeline(
                 stratum.join(" "),
             ));
         }
-        let mut stratum_built: Vec<BuiltPkg> = Vec::with_capacity(preps.len());
-        for prep in preps {
-            match prep.disposition {
-                Disposition::Skipped => {
-                    ui::note(&format!("{}: skipped", prep.pkgbase));
-                }
-                Disposition::Cached(files) => {
-                    stratum_built.push(BuiltPkg {
-                        pkgbase: prep.pkgbase.to_owned(),
-                        files,
-                    });
-                }
-                Disposition::Build => {
-                    let files = run_build(cfg, &prep)?;
-                    stratum_built.push(BuiltPkg {
-                        pkgbase: prep.pkgbase.to_owned(),
-                        files,
-                    });
-                }
-            }
-        }
-        install_stratum(
+        let built = build_stratum(cfg, preps, &plan.aur_make_edges, &mut report);
+        commit_stratum(
             cfg,
             idx,
-            &stratum_built,
+            &built,
+            stratum_idx,
             &direct_names,
             asdeps,
             &mut transitive_marks,
-        )?;
+            &mut report,
+        );
     }
 
     if !asdeps && !transitive_marks.is_empty() {
         let mut args = vec!["-D".to_string(), "--asdeps".into()];
         args.extend(transitive_marks);
-        invoke::exec_pacman(cfg, &args)?;
+        if let Err(e) = invoke::exec_pacman(cfg, &args) {
+            // Cosmetic only: pacman will still recompute install reasons on
+            // the next `-D`/`-Syu`. Warn instead of failing the run.
+            ui::warn(&format!("could not flip transitive pkgs to --asdeps: {e}"));
+        }
     }
-    Ok(())
+
+    print_final_summary(&report);
+    Ok(u8::from(report.had_failures()))
+}
+
+/// Build every pkgbase in one stratum, mutating `report` as failures /
+/// user-skips happen. Returns the `BuiltPkg`s ready for `commit_stratum`.
+fn build_stratum(
+    cfg: &Config,
+    preps: Vec<Prep<'_>>,
+    make_edges: &HashMap<String, Vec<String>>,
+    report: &mut RunReport,
+) -> Vec<BuiltPkg> {
+    let mut built: Vec<BuiltPkg> = Vec::with_capacity(preps.len());
+    for prep in preps {
+        // Skip anything whose makedep closure already contains a
+        // failed/skipped pkgbase — the build would just fail with a
+        // confusing "missing dep" error. `aur_make_edges` is the resolver's
+        // pkgbase→makedep-pkgbases map, so a direct lookup is enough (the
+        // transitive case was caught when the ancestor itself was skipped
+        // in an earlier stratum).
+        if let Some(blocker) = blocking_dep(prep.pkgbase, make_edges, report) {
+            ui::warn(&format!(
+                "{}: skipping (depends on failed/skipped {blocker})",
+                prep.pkgbase,
+            ));
+            report
+                .skipped_dep
+                .insert(prep.pkgbase.to_owned(), blocker.to_owned());
+            continue;
+        }
+        match prep.disposition {
+            Disposition::Skipped => {
+                ui::note(&format!("{}: skipped", prep.pkgbase));
+                report.skipped_user.push(prep.pkgbase.to_owned());
+            }
+            Disposition::Cached(files) => built.push(BuiltPkg {
+                pkgbase: prep.pkgbase.to_owned(),
+                files,
+            }),
+            Disposition::Build => match run_build(cfg, &prep) {
+                Ok(files) => built.push(BuiltPkg {
+                    pkgbase: prep.pkgbase.to_owned(),
+                    files,
+                }),
+                Err(e) => {
+                    let msg = e.to_string();
+                    ui::error(&format!("{}: build failed: {msg}", prep.pkgbase));
+                    report.failed.insert(prep.pkgbase.to_owned(), msg);
+                }
+            },
+        }
+    }
+    built
+}
+
+/// Run `pacman -U` for one stratum's built pkgs and update `report` with the
+/// outcome. A pacman failure is atomic, so every pkgbase in this stratum is
+/// marked failed and the next stratum's dep check skips dependents.
+#[allow(clippy::too_many_arguments)]
+fn commit_stratum(
+    cfg: &Config,
+    idx: &IndexFile,
+    built: &[BuiltPkg],
+    stratum_idx: usize,
+    direct: &HashSet<&str>,
+    asdeps_override: bool,
+    transitive_marks: &mut Vec<String>,
+    report: &mut RunReport,
+) {
+    if built.is_empty() {
+        return;
+    }
+    match install_stratum(cfg, idx, built, direct, asdeps_override, transitive_marks) {
+        Ok(()) => {
+            for b in built {
+                report.installed.push(b.pkgbase.clone());
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            ui::error(&format!(
+                "stratum {} install failed: {msg}",
+                stratum_idx + 1
+            ));
+            for b in built {
+                report.failed.insert(b.pkgbase.clone(), msg.clone());
+            }
+        }
+    }
+}
+
+/// Per-pkgbase outcome aggregated across all strata, used to drive both the
+/// dep-skip logic and the final summary.
+#[derive(Default)]
+struct RunReport {
+    /// Successfully built (or reused from cache) and installed by `pacman -U`.
+    installed: Vec<String>,
+    /// makepkg or the stratum's `pacman -U` returned non-zero. Value is the
+    /// stringified error so the summary can quote it back.
+    failed: HashMap<String, String>,
+    /// User chose "skip" at the PKGBUILD review prompt.
+    skipped_user: Vec<String>,
+    /// Auto-skipped because a pkgbase earlier in the build graph failed.
+    /// Value is the immediate blocker — usually enough to debug since the
+    /// blocker itself shows up in `failed`.
+    skipped_dep: HashMap<String, String>,
+}
+
+impl RunReport {
+    fn had_failures(&self) -> bool {
+        !self.failed.is_empty() || !self.skipped_dep.is_empty()
+    }
+}
+
+/// Return the first AUR pkgbase makedep of `pkgbase` that has already failed
+/// or been skipped. `None` means `pkgbase` is safe to build.
+fn blocking_dep<'a>(
+    pkgbase: &str,
+    make_edges: &'a HashMap<String, Vec<String>>,
+    report: &RunReport,
+) -> Option<&'a str> {
+    let deps = make_edges.get(pkgbase)?;
+    for dep in deps {
+        if report.failed.contains_key(dep)
+            || report.skipped_dep.contains_key(dep)
+            || report.skipped_user.iter().any(|s| s == dep)
+        {
+            return Some(dep.as_str());
+        }
+    }
+    None
+}
+
+/// Print a per-pkgbase outcome summary at the end of a multi-pkgbase run.
+/// Skips itself for the trivial single-pkgbase happy path where the failure
+/// message above already says everything.
+fn print_final_summary(report: &RunReport) {
+    let total = report.installed.len()
+        + report.failed.len()
+        + report.skipped_user.len()
+        + report.skipped_dep.len();
+    if total < 2 {
+        return;
+    }
+    ui::info("build summary");
+    if !report.installed.is_empty() {
+        ui::note(&format!(
+            "installed ({}): {}",
+            report.installed.len(),
+            report.installed.join(" ")
+        ));
+    }
+    for pb in &report.skipped_user {
+        ui::note(&format!("skipped {pb} (user)"));
+    }
+    let dep_sorted: BTreeMap<&String, &String> = report.skipped_dep.iter().collect();
+    for (pb, blocker) in dep_sorted {
+        ui::warn(&format!("skipped {pb} (blocked by {blocker})"));
+    }
+    let failed_sorted: BTreeMap<&String, &String> = report.failed.iter().collect();
+    for (pb, msg) in failed_sorted {
+        ui::error(&format!("failed {pb}: {msg}"));
+    }
 }
 
 /// One pkgbase's prepared state, produced in phase 1 and consumed in phase 2.
@@ -464,6 +622,7 @@ fn install_stratum(
     ui::step(&format!("installing {total} built package(s) with pacman"));
 
     let mut files: Vec<PathBuf> = Vec::new();
+    let mut pending_marks: Vec<String> = Vec::new();
     for b in built {
         // Look up the index entry to know which pkgnames belong to this
         // pkgbase (split packages have multiple names sharing one pkgbase).
@@ -477,7 +636,7 @@ fn install_stratum(
             let pkgname = install::extract_pkgname(f).unwrap_or_default();
             let is_direct = !asdeps_override && direct.contains(pkgname.as_str());
             if !is_direct {
-                transitive_marks.push(pkgname);
+                pending_marks.push(pkgname);
             }
         }
     }
@@ -492,6 +651,10 @@ fn install_stratum(
         args.push(p.to_string_lossy().into_owned());
     }
     invoke::exec_pacman(cfg, &args)?;
+    // Only record install-reason flips after pacman -U succeeds — a failed
+    // transaction never installed these pkgs, so a later `pacman -D --asdeps`
+    // would error on them.
+    transitive_marks.extend(pending_marks);
     Ok(())
 }
 
@@ -595,5 +758,39 @@ mod tests {
         assert!(is_vcs_pkg("baz-bzr"));
         assert!(!is_vcs_pkg("neovim"));
         assert!(!is_vcs_pkg("git-lfs"));
+    }
+
+    /// `blocking_dep` is the resilience gate: it answers "should I skip
+    /// this pkgbase because something upstream already failed?". A miss
+    /// (None) means safe-to-build; a hit returns the *immediate* blocker
+    /// from `make_edges`, even when the original failure is two strata
+    /// back — the transitive case bottoms out because the intermediate
+    /// pkgbase landed in `skipped_dep` when it was processed.
+    #[test]
+    fn blocking_dep_propagates_through_skipped_dep_chain() {
+        let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+        edges.insert("b".into(), vec!["a".into()]);
+        edges.insert("c".into(), vec!["b".into()]);
+        let mut report = RunReport::default();
+
+        // a failed two strata back; b skipped because of it; now check c.
+        report.failed.insert("a".into(), "boom".into());
+        report.skipped_dep.insert("b".into(), "a".into());
+
+        assert_eq!(blocking_dep("b", &edges, &report), Some("a"));
+        assert_eq!(blocking_dep("c", &edges, &report), Some("b"));
+        // A pkgbase with no edges at all is always safe.
+        assert_eq!(blocking_dep("standalone", &edges, &report), None);
+    }
+
+    /// User-initiated skips block dependents identically to failures —
+    /// the dep wouldn't be in localdb either way.
+    #[test]
+    fn blocking_dep_treats_user_skip_as_blocker() {
+        let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+        edges.insert("b".into(), vec!["a".into()]);
+        let mut report = RunReport::default();
+        report.skipped_user.push("a".into());
+        assert_eq!(blocking_dep("b", &edges, &report), Some("a"));
     }
 }
