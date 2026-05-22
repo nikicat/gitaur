@@ -85,12 +85,12 @@ fn picker_redraw_preserves_lines_above() {
 
     let after_scroll = screen_text(&parser);
 
-    // Submit & drain so the child exits cleanly (best-effort; we've already
-    // captured the screen state we care about).
+    // Submit & drain so the child exits cleanly.
     writer.write_all(b"\r").ok();
     drop(writer);
     pump_for(&mut parser, &rx, Duration::from_secs(2));
     let _ = child.wait();
+    let after_submit = screen_text(&parser);
 
     for i in 1..=SENTINEL_COUNT {
         let needle = format!("SENTINEL-{i:02}");
@@ -101,6 +101,17 @@ fn picker_redraw_preserves_lines_above() {
              regression is back.\n\n--- screen ---\n{after_scroll}\n--- end ---"
         );
     }
+
+    // After Enter, dialoguer's `.report(false)` should leave no comma-joined
+    // list of selected items behind — that re-print just duplicated the
+    // table the user already confirmed. dialoguer joins items with `, `;
+    // the `picker_e2e` echo prints `picked-repo=a,b,c` without spaces, so
+    // `, extra ` only appears in the report.
+    assert!(
+        !after_submit.contains(", extra "),
+        "dialoguer printed its post-interaction report (`.report(false)` lost?).\n\
+         \n--- screen ---\n{after_submit}\n--- end ---"
+    );
 }
 
 fn ensure_example_built() -> PathBuf {

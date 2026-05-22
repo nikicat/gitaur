@@ -198,6 +198,10 @@ pub fn select_upgrades(
             .with_prompt("Select upgrades to apply (space toggles, a inverts, enter confirms)")
             .items(&plain)
             .defaults(&defaults)
+            // Suppress dialoguer's post-interaction "report" line — it would
+            // re-list every selected row as a single wrapped line, duplicating
+            // the table the user just confirmed.
+            .report(false)
             .interact()
             .map_err(std::io::Error::other)?
     } else {
