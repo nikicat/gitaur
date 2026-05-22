@@ -14,6 +14,7 @@
 //! * the `by_name` collision case (commit-mono-font shape) doesn't land an
 //!   unrelated pkgbase in the build plan.
 
+use gitaur::build::Target;
 use gitaur::config::defaults::default_config;
 use gitaur::error::Result;
 use gitaur::index::build::full_build;
@@ -25,6 +26,13 @@ use gitaur::resolver::{expand_pkgbase_targets, resolve};
 use gitaur::testing::git;
 use std::path::Path;
 use tempfile::TempDir;
+
+/// Wrap bare specs as hint-less `Target`s — the integration tests exercise
+/// the `-S` argv shape where `expand_pkgbase_targets` is expected to
+/// derive any hint from the spec itself.
+fn ts(specs: &[&str]) -> Vec<Target> {
+    specs.iter().copied().map(Target::bare).collect()
+}
 
 /// Build a bare repo with one branch per (pkgbase, .SRCINFO content) tuple.
 fn build_mirror(root: &Path, branches: &[(&str, &str)]) -> std::path::PathBuf {
@@ -76,7 +84,7 @@ fn pkgbase_only_target_expands_with_pkgbase_target_and_direct_pkgnames() {
         Ok(pkgnames.to_vec())
     };
     let expanded =
-        expand_pkgbase_targets(&idx, Some(&by), &pac, &["bisq".to_string()], &mut select).unwrap();
+        expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["bisq"]), &mut select).unwrap();
     assert!(
         select_called,
         "selector must run even for single-pkgname pkgbase so callers can log/notice it",
@@ -142,7 +150,7 @@ fn split_pkgbase_partial_selection_constrains_build_pipeline() {
         &idx,
         Some(&by),
         &pac,
-        &["linux-headers-multi".to_string()],
+        &ts(&["linux-headers-multi"]),
         &mut select,
     )
     .unwrap();
@@ -223,7 +231,7 @@ fn provides_target_rewrites_to_providing_pkgname_with_selection() {
         Ok(vec![])
     };
     let expanded =
-        expand_pkgbase_targets(&idx, Some(&by), &pac, &["bisq".to_string()], &mut select).unwrap();
+        expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["bisq"]), &mut select).unwrap();
 
     assert!(
         !selector_invoked,
@@ -313,7 +321,7 @@ fn pkgname_collision_with_another_pkgbase_does_not_leak_into_plan() {
         &idx,
         Some(&by),
         &pac,
-        &["commit-mono-font".to_string()],
+        &ts(&["commit-mono-font"]),
         &mut select,
     )
     .unwrap();
@@ -377,7 +385,7 @@ fn pkgname_target_skips_selector_even_when_pkgbase_could_match() {
         Ok(n.to_vec())
     };
     let expanded =
-        expand_pkgbase_targets(&idx, Some(&by), &pac, &["cower".to_string()], &mut select).unwrap();
+        expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["cower"]), &mut select).unwrap();
     assert_eq!(expanded.targets, vec!["cower".to_string()]);
     assert_eq!(calls, 0, "selector must not run on pkgname hits");
 }

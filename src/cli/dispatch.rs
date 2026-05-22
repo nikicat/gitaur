@@ -89,22 +89,19 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
             }
             run_repo_upgrade(cfg, &sel)?;
             if !sel.aur.is_empty() {
-                // PkgUpgrade carries name + old_ver but the install pipeline
-                // only needs the typed pkgname — the counterpart helper
-                // re-looks up the installed version (the pacman localdb is the
-                // source of truth, not the picker's snapshot, in case some
-                // other tool reshuffled state between -Sy and -S). Picker
-                // structure ends at this boundary.
-                // cmd_install takes raw `Vec<String>` targets (the same shape
-                // it gets from direct `-S foo` argv); downgrade each typed
-                // `PkgName` here via `into_inner` so the explicit boundary
-                // stays visible.
-                let names: Vec<String> = sel
+                // PkgUpgrade.name is the typed foreign pkgname the picker
+                // matched against the AUR index — that *is* the counterpart
+                // hint we want `prepare_one` to use when classifying which
+                // installed pkg this build will displace. Wrap each row as
+                // a `Target` with an explicit hint so the intent travels
+                // through expand → resolve → prepare instead of being
+                // re-inferred from the spec string.
+                let targets: Vec<build::Target> = sel
                     .aur
                     .iter()
-                    .map(|p| p.name.clone().into_inner())
+                    .map(|p| build::Target::with_hint(p.name.clone().into_inner(), p.name.clone()))
                     .collect();
-                let code = build::cmd_install(cfg, &names, noconfirm, false, true)?;
+                let code = build::cmd_install(cfg, &targets, noconfirm, false, true)?;
                 if code != 0 {
                     return Ok(code);
                 }
@@ -117,7 +114,15 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
         // least one build failure or dep-block — the summary already
         // explains what happened, so we just propagate the exit code so
         // shells / `||` chains see the failure.
-        return build::cmd_install(cfg, &f.positional, noconfirm, asdeps, false);
+        // Direct `-S` argv has no per-target hint — expand will derive one
+        // from the spec when it rewrites (pkgname / provides paths).
+        let targets: Vec<build::Target> = f
+            .positional
+            .iter()
+            .cloned()
+            .map(build::Target::bare)
+            .collect();
+        return build::cmd_install(cfg, &targets, noconfirm, asdeps, false);
     } else if !upgrade && !refresh {
         return Err(Error::other("no targets specified"));
     }

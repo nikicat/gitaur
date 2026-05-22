@@ -222,6 +222,91 @@ impl PacmanIndex {
     /// Returns `None` when nothing in the entry matches an installed pkg —
     /// the caller renders this as a fresh install.
     pub fn counterpart<'a>(&'a self, entry: &'a IndexEntry) -> Option<InstalledCounterpart<'a>> {
+        self.counterpart_with_hint(entry, None)
+    }
+
+    /// Like [`Self::counterpart`] but biased by a user-supplied `hint` —
+    /// the pkgname the user typed (or the picker handed us) that they think
+    /// they have installed.
+    ///
+    /// When `hint` is present and matches an installed pkgname covered by
+    /// the entry's pkgnames / replaces / provides, the lookup returns that
+    /// match directly (with the appropriate provenance), short-circuiting
+    /// the unhinted "first hit wins" walk. This fixes the dotnet-runtime
+    /// regression: a pkgbase with multiple `provides=` virtuals
+    /// (`aspnet-runtime`, `dotnet-runtime-7.0`, …) where more than one is
+    /// installed would otherwise pick the first one in declaration order,
+    /// not the one the user actually asked about.
+    ///
+    /// When `hint` is `None` or doesn't match anything in the entry, falls
+    /// through to the unhinted walk — semantics preserved for callers that
+    /// don't have a hint.
+    pub fn counterpart_with_hint<'a>(
+        &'a self,
+        entry: &'a IndexEntry,
+        hint: Option<&PkgName>,
+    ) -> Option<InstalledCounterpart<'a>> {
+        if let Some(hint) = hint {
+            if let Some(c) = self.counterpart_for_hint(entry, hint) {
+                return Some(c);
+            }
+        }
+        self.counterpart_unhinted(entry)
+    }
+
+    /// Single-hint probe: if `hint` is installed AND the entry references it
+    /// (as pkgname, replaces, or provides), return that match. Skipped when
+    /// the hint isn't installed — there's no counterpart to anchor on, so
+    /// fall back to the unhinted walk.
+    fn counterpart_for_hint<'a>(
+        &'a self,
+        entry: &'a IndexEntry,
+        hint: &PkgName,
+    ) -> Option<InstalledCounterpart<'a>> {
+        let (stored_name, version) = self.installed.get_key_value(hint)?;
+        if entry.pkgnames.iter().any(|p| p.name == *stored_name) {
+            return Some(InstalledCounterpart {
+                pkgname: stored_name,
+                version,
+                via: MatchedVia::Pkgname,
+            });
+        }
+        if entry
+            .replaces
+            .iter()
+            .any(|r| strip_version_constraint(r) == stored_name.0)
+        {
+            return Some(InstalledCounterpart {
+                pkgname: stored_name,
+                version,
+                via: MatchedVia::Replaces,
+            });
+        }
+        let in_scoped_provides = entry
+            .pkgnames
+            .iter()
+            .flat_map(|p| &p.provides)
+            .any(|prov| strip_version_constraint(prov) == stored_name.0);
+        let in_pkgbase_provides = entry
+            .provides
+            .iter()
+            .any(|prov| strip_version_constraint(prov) == stored_name.0);
+        if in_scoped_provides || in_pkgbase_provides {
+            return Some(InstalledCounterpart {
+                pkgname: stored_name,
+                version,
+                via: MatchedVia::Provides,
+            });
+        }
+        None
+    }
+
+    /// The original unhinted walk — extracted so the hinted path can fall
+    /// back to it.
+    fn counterpart_unhinted<'a>(
+        &'a self,
+        entry: &'a IndexEntry,
+    ) -> Option<InstalledCounterpart<'a>> {
         // 1. Direct pkgname match. `installed.get_key_value` lets us
         //    return a reference to the typed PkgName the localdb owns
         //    rather than allocating a fresh one.
@@ -517,5 +602,108 @@ mod tests {
         let e = entry("foo", &[("foo", &["scoped"])], &[], &["toplevel"]);
         let c = idx.counterpart(&e).expect("scoped is installed");
         assert_eq!(c.pkgname, "scoped");
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // counterpart_with_hint() — the dotnet-runtime regression cluster.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Two virtuals are installed; pkgbase declares both. Without a hint the
+    /// first-declared provides wins. With a hint pointing at the second one,
+    /// the lookup returns *that* one — the user's intent overrides
+    /// declaration order.
+    #[test]
+    fn hint_steers_provides_match_to_user_intent() {
+        let mut idx = PacmanIndex::default();
+        idx.installed
+            .insert("aspnet-runtime".into(), "10.0-1".into());
+        idx.installed
+            .insert("dotnet-runtime-7.0".into(), "7.0.20-1".into());
+        // entry's `provides` declares aspnet-runtime first; without a hint
+        // counterpart() picks that.
+        let e = entry(
+            "dotnet-core-7.0-bin",
+            &[(
+                "dotnet-core-7.0-bin",
+                &["aspnet-runtime", "dotnet-runtime-7.0"],
+            )],
+            &[],
+            &[],
+        );
+        let unhinted = idx.counterpart(&e).unwrap();
+        assert_eq!(unhinted.pkgname, "aspnet-runtime");
+        let hint = PkgName::from("dotnet-runtime-7.0");
+        let hinted = idx.counterpart_with_hint(&e, Some(&hint)).unwrap();
+        assert_eq!(hinted.pkgname, "dotnet-runtime-7.0");
+        assert_eq!(hinted.via, MatchedVia::Provides);
+    }
+
+    /// Hint matches the canonical pkgname — provenance must be Pkgname,
+    /// not Provides, even if the entry *also* declares a provides line for
+    /// the same name (rare but real).
+    #[test]
+    fn hint_prefers_pkgname_provenance_over_provides() {
+        let mut idx = PacmanIndex::default();
+        idx.installed.insert("foo".into(), "1-1".into());
+        // entry's pkgname is foo, AND it provides foo (a self-referential
+        // provides=, which AUR doesn't reject).
+        let e = entry("foo", &[("foo", &["foo"])], &[], &[]);
+        let hint = PkgName::from("foo");
+        let c = idx.counterpart_with_hint(&e, Some(&hint)).unwrap();
+        assert_eq!(c.via, MatchedVia::Pkgname);
+    }
+
+    /// Hint matches a `replaces=` declaration. The pkgname rename case —
+    /// user has the old name installed, AUR pkgbase declares it as replaced
+    /// by the new pkgname.
+    #[test]
+    fn hint_returns_replaces_provenance() {
+        let mut idx = PacmanIndex::default();
+        idx.installed.insert("old-foo".into(), "0.9-1".into());
+        let e = entry("foo-ng", &[("foo-ng", &[])], &["old-foo"], &[]);
+        let hint = PkgName::from("old-foo");
+        let c = idx.counterpart_with_hint(&e, Some(&hint)).unwrap();
+        assert_eq!(c.pkgname, "old-foo");
+        assert_eq!(c.via, MatchedVia::Replaces);
+    }
+
+    /// Hint is installed but the entry doesn't reference it (not a pkgname,
+    /// not in replaces, not in provides). Fall back to the unhinted walk —
+    /// otherwise a stale hint could silently nullify a real counterpart match.
+    #[test]
+    fn unmatched_hint_falls_back_to_unhinted_walk() {
+        let mut idx = PacmanIndex::default();
+        idx.installed.insert("unrelated".into(), "1-1".into());
+        idx.installed.insert("real-target".into(), "2-1".into());
+        let e = entry("foo", &[("foo", &["real-target"])], &[], &[]);
+        let stale = PkgName::from("unrelated");
+        let c = idx.counterpart_with_hint(&e, Some(&stale)).unwrap();
+        assert_eq!(c.pkgname, "real-target");
+        assert_eq!(c.via, MatchedVia::Provides);
+    }
+
+    /// Hint is not installed. Same fallback path — we only honour the hint
+    /// when it identifies a real localdb entry to anchor on.
+    #[test]
+    fn non_installed_hint_falls_back_to_unhinted_walk() {
+        let mut idx = PacmanIndex::default();
+        idx.installed.insert("real-target".into(), "2-1".into());
+        let e = entry("foo", &[("foo", &["real-target"])], &[], &[]);
+        let missing = PkgName::from("never-installed");
+        let c = idx.counterpart_with_hint(&e, Some(&missing)).unwrap();
+        assert_eq!(c.pkgname, "real-target");
+    }
+
+    /// Hint with an explicit None — same behaviour as plain `counterpart()`.
+    #[test]
+    fn none_hint_matches_unhinted_counterpart() {
+        let mut idx = PacmanIndex::default();
+        idx.installed.insert("foo".into(), "1-1".into());
+        let e = entry("foo", &[("foo", &[])], &[], &[]);
+        assert_eq!(
+            idx.counterpart_with_hint(&e, None)
+                .map(|c| c.pkgname.0.clone()),
+            idx.counterpart(&e).map(|c| c.pkgname.0.clone()),
+        );
     }
 }

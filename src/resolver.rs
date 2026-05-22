@@ -56,6 +56,16 @@ pub struct Plan {
     /// listed pkgnames are fed into the final `pacman -U`. Pkgbases absent
     /// from the map default to "install everything".
     pub pkgname_selections: HashMap<PkgBase, Vec<PkgName>>,
+    /// pkgbase → user's intended counterpart pkgname (see
+    /// [`crate::build::Target::hint`]). Populated by
+    /// [`expand_pkgbase_targets`] for any target rewritten via the
+    /// pkgname / provides path, and by `-Syu` for picker-supplied hints
+    /// on pkgbase targets. `prepare_one` feeds the hint to
+    /// [`crate::pacman::alpm_db::PacmanIndex::counterpart_with_hint`] so
+    /// review labels and diff-base lookups land on the installed pkg the
+    /// user actually meant, not the first one that happens to match the
+    /// pkgbase's provides list.
+    pub counterpart_hints: HashMap<PkgBase, PkgName>,
 }
 
 impl Plan {

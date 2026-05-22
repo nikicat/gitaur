@@ -37,6 +37,51 @@ struct BuiltPkg {
     files: Vec<PathBuf>,
 }
 
+/// One install target paired with the user's intent for counterpart resolution.
+///
+/// `spec` is the freeform user-typed string (pkgname / pkgbase / virtual /
+/// `name>=ver`); `hint` is the pkgname the user thinks they have installed —
+/// the one [`PacmanIndex::counterpart_with_hint`] should bias the lookup
+/// toward. Two callers populate it:
+///
+///   * **`-S <name>`**: `hint = None`. [`resolver::expand_pkgbase_targets`]
+///     fills the hint in when it rewrites (e.g. `-S dotnet-runtime-7.0`
+///     rewrites to pkgbase `dotnet-core-7.0-bin` with `hint =
+///     PkgName("dotnet-runtime-7.0")`) — the rewritten spec lost the user's
+///     original wording, so the hint preserves it.
+///   * **`-Syu`**: `hint = Some(name)`. The picker hands us the foreign
+///     pkgname that's already installed; that *is* the counterpart, and
+///     anchoring the hint here keeps the picker's intent across the round-
+///     trip through `cmd_install` without depending on heuristics.
+///
+/// Hints are keyed by pkgbase in [`Plan::counterpart_hints`] after expansion,
+/// so `prepare_one` can look one up regardless of which input path produced it.
+#[derive(Debug, Clone)]
+pub struct Target {
+    pub spec: String,
+    pub hint: Option<PkgName>,
+}
+
+impl Target {
+    /// Construct a target with no explicit hint — the resolver may infer one
+    /// from `spec` when rewriting.
+    pub fn bare(spec: impl Into<String>) -> Self {
+        Self {
+            spec: spec.into(),
+            hint: None,
+        }
+    }
+
+    /// Construct a target with an explicit hint — used by `-Syu` where the
+    /// picker already knows which installed pkgname triggered the upgrade.
+    pub fn with_hint(spec: impl Into<String>, hint: PkgName) -> Self {
+        Self {
+            spec: spec.into(),
+            hint: Some(hint),
+        }
+    }
+}
+
 /// Entry point for `gitaur -S <targets>`.
 ///
 /// Loads the pacman snapshot and (optionally) the AUR index in parallel, then
@@ -49,7 +94,7 @@ struct BuiltPkg {
 #[instrument(skip(cfg))]
 pub fn cmd_install(
     cfg: &Config,
-    targets: &[String],
+    targets: &[Target],
     noconfirm: bool,
     asdeps: bool,
     already_confirmed: bool,
@@ -102,6 +147,7 @@ pub fn cmd_install(
     // an unclassified user target for the install-reason check."
     plan.direct_targets
         .extend(expanded.direct_pkgnames.into_iter().map(PkgTarget::from));
+    plan.counterpart_hints = expanded.counterpart_hints;
 
     print::plan(&plan, idx, &pac);
 
@@ -204,8 +250,9 @@ fn run_aur_pipeline(
             // to the selection so `install_stratum`'s `pacman -U` skips
             // the rest.
             let selection = plan.pkgname_selections.get(pkgbase).map(Vec::as_slice);
+            let hint = plan.counterpart_hints.get(pkgbase);
             row.push(prepare_one(
-                &mirror, idx, pac, pkgbase, selection, noconfirm,
+                &mirror, idx, pac, pkgbase, selection, hint, noconfirm,
             )?);
         }
         prep_strata.push(row);
@@ -405,13 +452,14 @@ enum Disposition {
     Skipped,
 }
 
-#[instrument(skip(mirror, idx, pac, selection), fields(pkgbase = %pkgbase))]
+#[instrument(skip(mirror, idx, pac, selection, hint), fields(pkgbase = %pkgbase))]
 fn prepare_one<'a>(
     mirror: &MirrorRepo,
     idx: &'a IndexFile,
     pac: &PacmanIndex,
     pkgbase: &'a PkgBase,
     selection: Option<&'a [PkgName]>,
+    hint: Option<&PkgName>,
     noconfirm: bool,
 ) -> Result<Prep<'a>> {
     let entry = idx
@@ -461,8 +509,9 @@ fn prepare_one<'a>(
 
     // What the user has installed that this pkgbase will displace. Looks
     // through pkgname → replaces → provides so renames and split pkgs label
-    // correctly; see `PacmanIndex::counterpart` for the resolution order.
-    let counterpart = pac.counterpart(entry);
+    // correctly; see `PacmanIndex::counterpart_with_hint` for the resolution
+    // order and how `hint` overrides the "first-hit" default.
+    let counterpart = pac.counterpart_with_hint(entry, hint);
     let disposition = match review::review(
         mirror,
         pkgbase,
