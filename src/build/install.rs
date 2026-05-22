@@ -5,6 +5,7 @@
 
 use crate::error::{Error, Result};
 use crate::names::PkgName;
+use crate::version::Ver;
 use glob::glob;
 use std::path::{Path, PathBuf};
 
@@ -37,10 +38,11 @@ pub fn extract_pkgname(path: &Path) -> Option<PkgName> {
 
 /// True iff `path`'s filename is `<pkgname>-<version>-<arch>.pkg.tar.{zst,xz}`
 /// — i.e. an artifact this exact `(pkgname, version)` would produce.
-/// `version` is the pacman-style `[epoch:]pkgver-pkgrel` string; this match
-/// is what powers the build idempotency check. `pkgname` is the typed
+/// `version` is the pacman-style `[epoch:]pkgver-pkgrel`, accepted as
+/// `&Ver` so callers can pass the typed `Version` directly. This match is
+/// what powers the build idempotency check. `pkgname` is the typed
 /// `PkgName` (matched against the filename prefix via `Display`).
-pub fn matches_pkg(path: &Path, pkgname: &PkgName, version: &str) -> bool {
+pub fn matches_pkg(path: &Path, pkgname: &PkgName, version: &Ver) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
@@ -57,7 +59,7 @@ pub fn matches_pkg(path: &Path, pkgname: &PkgName, version: &str) -> bool {
     else {
         return false;
     };
-    let Some(after_ver) = rest.strip_prefix(version).and_then(|r| r.strip_prefix('-')) else {
+    let Some(after_ver) = version.strip_filename_segment(rest) else {
         return false;
     };
     // What's left is `<arch>.pkg.tar.{zst,xz}`; arch must not be empty and
@@ -100,40 +102,45 @@ mod tests {
         PkgName::new(s)
     }
 
+    /// `&Ver` literal helper. Mirrors `pn` for terse test call sites.
+    fn v(s: &str) -> &Ver {
+        Ver::new(s)
+    }
+
     #[test]
     fn matches_pkg_exact() {
         let p = Path::new("/x/cower-17-2-x86_64.pkg.tar.zst");
-        assert!(matches_pkg(p, &pn("cower"), "17-2"));
-        assert!(!matches_pkg(p, &pn("cower"), "17-1"));
-        assert!(!matches_pkg(p, &pn("cower"), "18-2"));
-        assert!(!matches_pkg(p, &pn("cower-bin"), "17-2"));
+        assert!(matches_pkg(p, &pn("cower"), v("17-2")));
+        assert!(!matches_pkg(p, &pn("cower"), v("17-1")));
+        assert!(!matches_pkg(p, &pn("cower"), v("18-2")));
+        assert!(!matches_pkg(p, &pn("cower-bin"), v("17-2")));
     }
 
     #[test]
     fn matches_pkg_with_epoch() {
         let p = Path::new("/x/foo-2:1.0-1-x86_64.pkg.tar.zst");
-        assert!(matches_pkg(p, &pn("foo"), "2:1.0-1"));
-        assert!(!matches_pkg(p, &pn("foo"), "1.0-1"));
+        assert!(matches_pkg(p, &pn("foo"), v("2:1.0-1")));
+        assert!(!matches_pkg(p, &pn("foo"), v("1.0-1")));
     }
 
     #[test]
     fn matches_pkg_split_pkgname() {
         let p = Path::new("/x/mingw-w64-gcc-libs-13.2.0-1-x86_64.pkg.tar.zst");
-        assert!(matches_pkg(p, &pn("mingw-w64-gcc-libs"), "13.2.0-1"));
+        assert!(matches_pkg(p, &pn("mingw-w64-gcc-libs"), v("13.2.0-1")));
         // Wrong pkgname: matches as prefix but arch slot would contain a '-'.
-        assert!(!matches_pkg(p, &pn("mingw-w64-gcc"), "libs-13.2.0"));
+        assert!(!matches_pkg(p, &pn("mingw-w64-gcc"), v("libs-13.2.0")));
     }
 
     #[test]
     fn matches_pkg_xz_suffix() {
         let p = Path::new("/x/foo-1.0-1-any.pkg.tar.xz");
-        assert!(matches_pkg(p, &pn("foo"), "1.0-1"));
+        assert!(matches_pkg(p, &pn("foo"), v("1.0-1")));
     }
 
     #[test]
     fn matches_pkg_rejects_wrong_suffix() {
         let p = Path::new("/x/foo-1.0-1-any.pkg.tar.gz");
-        assert!(!matches_pkg(p, &pn("foo"), "1.0-1"));
+        assert!(!matches_pkg(p, &pn("foo"), v("1.0-1")));
     }
 
     #[test]

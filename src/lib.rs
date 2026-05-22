@@ -14,6 +14,7 @@ pub mod pacman;
 pub mod paths;
 pub mod resolver;
 pub mod ui;
+pub mod version;
 
 #[doc(hidden)]
 pub mod testing;

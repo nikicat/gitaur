@@ -114,7 +114,11 @@ pub fn upgrade_table(plan: &[PkgUpgrade]) {
 /// review labelling — without it, asking to install a pkgbase whose entry
 /// declares many `provides=` (e.g. .NET's shared `aspnet-runtime` virtual)
 /// would have to guess which installed pkg is the one the user meant.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+// No `Eq` — `PkgUpgrade.old_ver` / `new_ver` are `Version`, whose `PartialEq`
+// is vercmp (not bytes-equal), and so doesn't satisfy `Eq`'s reflexivity
+// guarantee in the bytes-distinct-but-vercmp-equal corner case. `Vec<_>` /
+// HashMap usage doesn't rely on `Eq` here.
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct UpgradeSelection {
     pub repo: Vec<PkgName>,
     pub repo_skipped: Vec<PkgName>,
@@ -298,8 +302,10 @@ fn render_row(u: &PkgUpgrade, repo_w: usize, name_w: usize, old_w: usize, colore
     }
     let kind = verdiff::classify_bump(&u.old_ver, &u.new_ver);
     let cut = verdiff::common_prefix_at_boundary(&u.old_ver, &u.new_ver);
-    let (old_pre, old_suf) = u.old_ver.split_at(cut);
-    let (new_pre, new_suf) = u.new_ver.split_at(cut);
+    // Byte-level prefix/suffix split for the dim/bright color split — pure
+    // UI concern, so `as_str()` is the explicit downgrade boundary.
+    let (old_pre, old_suf) = u.old_ver.as_str().split_at(cut);
+    let (new_pre, new_suf) = u.new_ver.as_str().split_at(cut);
     // Pad after splitting so trailing spaces ride with the (dim) prefix.
     let old_pad = " ".repeat(old_w.saturating_sub(u.old_ver.len()));
     let repo_pad = " ".repeat(repo_w.saturating_sub(u.repo.len()));

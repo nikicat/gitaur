@@ -57,7 +57,15 @@ pub(super) fn plan(plan: &Plan, idx: &IndexFile, pac: &PacmanIndex) {
 fn rows_for_repo(names: &[String], pac: &PacmanIndex) -> Vec<(String, String)> {
     names
         .iter()
-        .map(|n| (n.clone(), pac.sync_version(n).unwrap_or("").to_string()))
+        .map(|n| {
+            // `sync_version` returns `Option<&Ver>` post-Phase B; `Ver::as_str`
+            // is the explicit text-rendering boundary for the table cell.
+            let ver = pac
+                .sync_version(n)
+                .map(|v| v.as_str().to_owned())
+                .unwrap_or_default();
+            (n.clone(), ver)
+        })
         .collect()
 }
 
@@ -68,12 +76,15 @@ fn rows_for_aur(pkgbases: &[PkgBase], idx: &IndexFile) -> Vec<(String, String)> 
     pkgbases
         .iter()
         .map(|pb| {
+            // Surrender the typed `Version` to a `String` at the table-cell
+            // boundary via `into_inner` — not via `Display`/`to_string`.
             let ver = idx
                 .entries
                 .iter()
                 .find(|e| e.pkgbase == *pb)
                 .map(IndexEntry::version)
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into_inner();
             (pb.to_string(), ver)
         })
         .collect()

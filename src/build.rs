@@ -19,6 +19,7 @@ use crate::pacman::invoke;
 use crate::paths;
 use crate::resolver::{self, Plan};
 use crate::ui;
+use crate::version::Version;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tracing::{debug, info, instrument, warn};
@@ -437,7 +438,7 @@ fn blocking_dep<'a>(
 struct Prep<'a> {
     pkgbase: &'a PkgBase,
     wt: mirror::worktree::Worktree,
-    new_ver: String,
+    new_ver: Version,
     selection: Option<&'a [PkgName]>,
     disposition: Disposition,
 }

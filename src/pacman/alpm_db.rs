@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 use crate::index::schema::IndexEntry;
 use crate::index::secondary::strip_version_constraint;
 use crate::names::PkgName;
+use crate::version::{Ver, Version};
 use alpm::Alpm;
 use std::collections::HashMap;
 use tracing::{debug, instrument};
@@ -19,13 +20,19 @@ use tracing::{debug, instrument};
 ///
 /// `pkgname` is the localdb pkgname (typed [`PkgName`]); `version` is the
 /// pacman-recorded `pkgver-pkgrel` of that pkg (never the virtual version
-/// from a `provides=name=X` suffix); `via` describes how the AUR entry
-/// matched it. Lifetimes: `pkgname` borrows from the [`IndexEntry`],
-/// `version` borrows from the [`PacmanIndex`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// from a `provides=name=X` suffix), typed [`Ver`] so vercmp comparisons
+/// stay correct; `via` describes how the AUR entry matched it. Lifetimes:
+/// `pkgname` borrows from the [`IndexEntry`], `version` borrows from the
+/// [`PacmanIndex`].
+///
+/// No `Eq` — `Ver`'s `PartialEq` is vercmp, which doesn't satisfy `Eq`'s
+/// reflexivity guarantee in the bytes-distinct-but-vercmp-equal corner
+/// case. The struct is compared by `==` only in tests, which use
+/// `PartialEq`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InstalledCounterpart<'a> {
     pub pkgname: &'a PkgName,
-    pub version: &'a str,
+    pub version: &'a Ver,
     pub via: MatchedVia,
 }
 
@@ -66,9 +73,9 @@ pub fn open() -> Result<Alpm> {
 #[derive(Debug, Default)]
 pub struct PacmanIndex {
     /// pkgname → installed version (from localdb). Keys are typed
-    /// `PkgName`; values stay `String` until the deferred Version newtype
-    /// refactor lands (see `names.rs`'s Phase B TODO).
-    pub installed: HashMap<PkgName, String>,
+    /// `PkgName`; values are typed `Version` so `<` / `==` against a sync
+    /// version automatically uses vercmp.
+    pub installed: HashMap<PkgName, Version>,
     /// virtual provide name → installed pkgnames declaring it. Used to mark
     /// a dependency as already-satisfied — if any provider is installed,
     /// `pacman -S --needed` would no-op, so the plan must drop it instead
@@ -77,7 +84,7 @@ pub struct PacmanIndex {
     pub installed_providers: HashMap<String, Vec<PkgName>>,
     /// pkgname → version available in some sync repo. Repo precedence is
     /// pacman's: the first DB declared in `pacman.conf` wins on duplicates.
-    pub sync_versions: HashMap<PkgName, String>,
+    pub sync_versions: HashMap<PkgName, Version>,
     /// virtual provide name → sync-repo pkgnames declaring it. When a
     /// dependency is a virtual name we pick a concrete provider so the plan
     /// shows the package pacman would actually install, with its version.
@@ -91,11 +98,13 @@ impl PacmanIndex {
     /// typed identity used by the rest of the crate.
     #[instrument(skip(alpm))]
     pub fn build(alpm: &Alpm) -> Self {
-        let mut installed: HashMap<PkgName, String> = HashMap::new();
+        let mut installed: HashMap<PkgName, Version> = HashMap::new();
         let mut installed_providers: HashMap<String, Vec<PkgName>> = HashMap::new();
         for p in alpm.localdb().pkgs() {
             let name = PkgName::new(p.name());
-            installed.insert(name.clone(), p.version().to_string());
+            // `From<&alpm::Ver> for Version` reads the bytes directly via
+            // `alpm::Ver::as_str()` — not through `Display::to_string`.
+            installed.insert(name.clone(), Version::from(p.version()));
             for prov in p.provides() {
                 installed_providers
                     .entry(prov.name().to_string())
@@ -103,7 +112,7 @@ impl PacmanIndex {
                     .push(name.clone());
             }
         }
-        let mut sync_versions: HashMap<PkgName, String> = HashMap::new();
+        let mut sync_versions: HashMap<PkgName, Version> = HashMap::new();
         let mut sync_providers: HashMap<String, Vec<PkgName>> = HashMap::new();
         for db in alpm.syncdbs() {
             for p in db.pkgs() {
@@ -112,7 +121,7 @@ impl PacmanIndex {
                 // matching pacman's own repo precedence.
                 sync_versions
                     .entry(name.clone())
-                    .or_insert_with(|| p.version().to_string());
+                    .or_insert_with(|| Version::from(p.version()));
                 for prov in p.provides() {
                     sync_providers
                         .entry(prov.name().to_string())
@@ -140,8 +149,9 @@ impl PacmanIndex {
     /// arrives as `&str` because lookups originate from many sources
     /// (CLI args, .SRCINFO deps, `provides` strings) — `Borrow<str>` on
     /// the typed key makes the lookup work without a temporary `PkgName`.
-    pub fn installed_version(&self, name: &str) -> Option<&str> {
-        self.installed.get(name).map(String::as_str)
+    /// Returns `&Ver` so the caller can compare via vercmp.
+    pub fn installed_version(&self, name: &str) -> Option<&Ver> {
+        self.installed.get(name).map(|v| v.as_ver())
     }
 
     /// Already installed locally?
@@ -158,8 +168,8 @@ impl PacmanIndex {
     /// pkgname in any syncdb. Matches by-name only — virtual `provides` aren't
     /// versioned (their version, if any, lives on the providing pkg) so a
     /// provides hit deliberately returns `None`.
-    pub fn sync_version(&self, name: &str) -> Option<&str> {
-        self.sync_versions.get(name).map(String::as_str)
+    pub fn sync_version(&self, name: &str) -> Option<&Ver> {
+        self.sync_versions.get(name).map(|v| v.as_ver())
     }
 
     /// Resolve a (possibly virtual) name to the concrete pkgname pacman would
@@ -360,13 +370,13 @@ impl PacmanIndex {
         //    and pkgbase-level provides, preserving declaration order.
         //    De-dup by stored pkgname (a name appearing both scoped and at
         //    pkgbase-level is still one installed candidate).
-        let mut provides_matches: Vec<(&PkgName, &str)> = Vec::new();
+        let mut provides_matches: Vec<(&PkgName, &Ver)> = Vec::new();
         let scoped_provs = entry.pkgnames.iter().flat_map(|p| &p.provides);
         for prov in scoped_provs.chain(entry.provides.iter()) {
             let name = strip_version_constraint(prov);
             if let Some((stored_name, version)) = self.installed.get_key_value(name) {
                 if !provides_matches.iter().any(|(n, _)| *n == stored_name) {
-                    provides_matches.push((stored_name, version));
+                    provides_matches.push((stored_name, version.as_ver()));
                 }
             }
         }
@@ -393,9 +403,9 @@ impl PacmanIndex {
     }
 
     /// pkgnames installed locally but not present in any syncdb (foreign).
-    /// Result is a typed `(PkgName, version)` list — the version string
-    /// stays raw until the deferred Version newtype refactor lands.
-    pub fn foreign(&self) -> Vec<(PkgName, String)> {
+    /// Returns owned typed `(PkgName, Version)` pairs so the caller can
+    /// take its time without holding a borrow into the index.
+    pub fn foreign(&self) -> Vec<(PkgName, Version)> {
         self.installed
             .iter()
             .filter(|(name, _)| !self.sync_versions.contains_key::<PkgName>(name))
@@ -446,9 +456,9 @@ mod tests {
         assert!(idx.in_sync("firefox"));
         assert!(idx.in_sync("java-runtime"));
         assert!(!idx.in_sync("nonexistent"));
-        assert_eq!(idx.installed_version("vim"), Some("9.0-1"));
+        assert_eq!(idx.installed_version("vim"), Some(Ver::new("9.0-1")));
         assert_eq!(idx.installed_version("firefox"), None);
-        assert_eq!(idx.sync_version("firefox"), Some("110.0-1"));
+        assert_eq!(idx.sync_version("firefox"), Some(Ver::new("110.0-1")));
         // Provides-only names carry no version of their own — only the
         // providing pkgname does.
         assert_eq!(idx.sync_version("java-runtime"), None);
@@ -462,7 +472,10 @@ mod tests {
         idx.sync_versions.insert("vim".into(), "9.0-1".into());
 
         let mut foreign = idx.foreign();
-        foreign.sort();
+        // Sort by pkgname only — `Version` has no `Ord` (vercmp is
+        // PartialOrd; bytes-distinct + vercmp-equal corner case breaks
+        // total order assumptions).
+        foreign.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(foreign, vec![("paru-bin".into(), "2.0.0-1".into())]);
     }
 

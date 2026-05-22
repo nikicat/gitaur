@@ -7,7 +7,6 @@ use crate::index::secondary::Secondary;
 use crate::index::{self, IndexFile};
 use crate::pacman::alpm_db::{self, PacmanIndex};
 use crate::pacman::invoke::{self, PkgUpgrade};
-use crate::pacman::vercmp;
 use crate::paths;
 use crate::ui;
 use tracing::{instrument, warn};
@@ -72,7 +71,9 @@ fn aur_upgrades(
             continue;
         }
         let aur_ver = entry.version();
-        let need = (devel && is_vcs) || vercmp::is_outdated(&installed_ver, &aur_ver);
+        // Typed vercmp via `Ver::is_outdated` — `<` and `==` on `Ver` invoke
+        // libalpm's vercmp under the hood.
+        let need = (devel && is_vcs) || installed_ver.is_outdated(&aur_ver);
         if need {
             out.push(PkgUpgrade {
                 repo: invoke::REPO_AUR.into(),

@@ -15,6 +15,7 @@ use crate::mirror::MirrorRepo;
 use crate::names::PkgBase;
 use crate::pacman::alpm_db::{InstalledCounterpart, MatchedVia};
 use crate::ui;
+use crate::version::Ver;
 use dialoguer::Select;
 use gix::ObjectId;
 use std::path::Path;
@@ -52,7 +53,7 @@ pub enum Outcome {
 pub fn review(
     mirror: &MirrorRepo,
     pkgbase: &PkgBase,
-    new_ver: &str,
+    new_ver: &Ver,
     counterpart: Option<&InstalledCounterpart<'_>>,
     wt: &Worktree,
     noconfirm: bool,
@@ -66,7 +67,7 @@ pub fn review(
         // case is grep-distinguishable from a present-but-empty one.
         info!(
             %pkgbase,
-            new_ver,
+            %new_ver,
             installed = ?counterpart.map(|c| c.pkgname),
             installed_version = ?counterpart.map(|c| c.version),
             via = ?counterpart.map(|c| c.via),
@@ -111,7 +112,7 @@ pub fn review(
 fn show(
     mirror: &MirrorRepo,
     pkgbase: &PkgBase,
-    new_ver: &str,
+    new_ver: &Ver,
     counterpart: Option<&InstalledCounterpart<'_>>,
     wt: &Worktree,
 ) -> Result<Option<ObjectId>> {
@@ -157,7 +158,7 @@ fn show(
 /// a transition, not a reinstall, and showing it as a diff is more honest.
 fn header(
     pkgbase: &PkgBase,
-    new_ver: &str,
+    new_ver: &Ver,
     counterpart: Option<&InstalledCounterpart<'_>>,
 ) -> String {
     let Some(c) = counterpart else {
@@ -184,9 +185,9 @@ fn header(
 /// table — pkgname rename inside the same pkgbase). If the walk misses, we
 /// fall back to full PKGBUILD with a provenance-aware note.
 fn upgrade_base_version<'a>(
-    new_ver: &str,
+    new_ver: &Ver,
     counterpart: Option<&'a InstalledCounterpart<'_>>,
-) -> Option<&'a str> {
+) -> Option<&'a Ver> {
     let c = counterpart?;
     match c.via {
         MatchedVia::Pkgname if c.version == new_ver => None,
@@ -304,7 +305,7 @@ fn menu_items(has_diff: bool) -> Vec<&'static str> {
 pub fn find_installed_commit(
     mirror: &MirrorRepo,
     head_oid: ObjectId,
-    installed_ver: &str,
+    installed_ver: &Ver,
 ) -> Result<Option<ObjectId>> {
     let head = mirror
         .repo
@@ -343,6 +344,7 @@ mod tests {
     };
     use crate::names::{PkgBase, PkgName};
     use crate::pacman::alpm_db::{InstalledCounterpart, MatchedVia};
+    use crate::version::Ver;
     use gix::hash::Kind;
     use gix::ObjectId;
     use std::path::Path;
@@ -353,7 +355,7 @@ mod tests {
     /// borrowing into itself. One `let f = fx(...)` per test, then `f.cp()`.
     struct Fixture {
         pkgname: PkgName,
-        version: String,
+        version: crate::version::Version,
         via: MatchedVia,
     }
 
@@ -361,7 +363,7 @@ mod tests {
         fn cp(&self) -> InstalledCounterpart<'_> {
             InstalledCounterpart {
                 pkgname: &self.pkgname,
-                version: &self.version,
+                version: self.version.as_ver(),
                 via: self.via,
             }
         }
@@ -370,7 +372,7 @@ mod tests {
     fn fx(pkgname: &str, version: &str, via: MatchedVia) -> Fixture {
         Fixture {
             pkgname: PkgName::from(pkgname),
-            version: version.to_owned(),
+            version: crate::version::Version::from(version),
             via,
         }
     }
@@ -378,6 +380,12 @@ mod tests {
     /// Pkgbase literal helper for the `header` / `fallback_note` signature.
     fn pb(s: &str) -> PkgBase {
         PkgBase::from(s)
+    }
+
+    /// `&Ver` literal helper for the `header`/`upgrade_base_version`/...
+    /// signatures — `v("1.0-1")` reads tersely at the test call site.
+    fn v(s: &str) -> &Ver {
+        Ver::new(s)
     }
 
     fn args_of(cmd: &std::process::Command) -> Vec<String> {
@@ -465,14 +473,14 @@ mod tests {
 
     #[test]
     fn header_install_when_no_counterpart() {
-        assert_eq!(header(&pb("foo"), "1.0-1", None), "install: foo 1.0-1");
+        assert_eq!(header(&pb("foo"), v("1.0-1"), None), "install: foo 1.0-1");
     }
 
     #[test]
     fn header_reinstall_when_canonical_pkgname_at_same_version() {
         let f = fx("foo", "1.0-1", MatchedVia::Pkgname);
         assert_eq!(
-            header(&pb("foo"), "1.0-1", Some(&f.cp())),
+            header(&pb("foo"), v("1.0-1"), Some(&f.cp())),
             "reinstall: foo 1.0-1"
         );
     }
@@ -481,7 +489,7 @@ mod tests {
     fn header_upgrade_canonical_pkgname() {
         let f = fx("foo", "1.0-1", MatchedVia::Pkgname);
         assert_eq!(
-            header(&pb("foo"), "1.1-1", Some(&f.cp())),
+            header(&pb("foo"), v("1.1-1"), Some(&f.cp())),
             "upgrade: foo 1.0-1 → 1.1-1"
         );
     }
@@ -493,7 +501,7 @@ mod tests {
     fn header_upgrade_split_sibling_no_annotation() {
         let f = fx("bisq-cli", "1.9-1", MatchedVia::Pkgname);
         assert_eq!(
-            header(&pb("bisq"), "2.0-1", Some(&f.cp())),
+            header(&pb("bisq"), v("2.0-1"), Some(&f.cp())),
             "upgrade: bisq 1.9-1 → 2.0-1"
         );
     }
@@ -502,7 +510,7 @@ mod tests {
     fn header_upgrade_via_replaces_annotates() {
         let f = fx("old-foo", "0.9-1", MatchedVia::Replaces);
         assert_eq!(
-            header(&pb("foo-ng"), "1.0-1", Some(&f.cp())),
+            header(&pb("foo-ng"), v("1.0-1"), Some(&f.cp())),
             "upgrade: foo-ng 0.9-1 → 1.0-1  [replaces old-foo]"
         );
     }
@@ -511,7 +519,7 @@ mod tests {
     fn header_upgrade_via_provides_annotates() {
         let f = fx("dotnet-runtime-7.0", "7.0.15-1", MatchedVia::Provides);
         assert_eq!(
-            header(&pb("dotnet-core-7.0-bin"), "7.0.20-2", Some(&f.cp())),
+            header(&pb("dotnet-core-7.0-bin"), v("7.0.20-2"), Some(&f.cp())),
             "upgrade: dotnet-core-7.0-bin 7.0.15-1 → 7.0.20-2  [provides dotnet-runtime-7.0]"
         );
     }
@@ -522,7 +530,7 @@ mod tests {
     fn header_upgrade_via_provides_omits_annotation_when_name_equals_pkgbase() {
         let f = fx("foo", "1.0-1", MatchedVia::Provides);
         assert_eq!(
-            header(&pb("foo"), "1.1-1", Some(&f.cp())),
+            header(&pb("foo"), v("1.1-1"), Some(&f.cp())),
             "upgrade: foo 1.0-1 → 1.1-1"
         );
     }
@@ -535,7 +543,7 @@ mod tests {
     fn header_does_not_call_provides_transition_a_reinstall() {
         let f = fx("old-foo", "1.0-1", MatchedVia::Provides);
         assert_eq!(
-            header(&pb("foo-ng"), "1.0-1", Some(&f.cp())),
+            header(&pb("foo-ng"), v("1.0-1"), Some(&f.cp())),
             "upgrade: foo-ng 1.0-1 → 1.0-1  [provides old-foo]"
         );
     }
@@ -546,19 +554,22 @@ mod tests {
 
     #[test]
     fn upgrade_base_none_when_no_counterpart() {
-        assert_eq!(upgrade_base_version("1.0-1", None), None);
+        assert_eq!(upgrade_base_version(v("1.0-1"), None), None);
     }
 
     #[test]
     fn upgrade_base_none_for_canonical_reinstall() {
         let f = fx("foo", "1.0-1", MatchedVia::Pkgname);
-        assert_eq!(upgrade_base_version("1.0-1", Some(&f.cp())), None);
+        assert_eq!(upgrade_base_version(v("1.0-1"), Some(&f.cp())), None);
     }
 
     #[test]
     fn upgrade_base_some_for_canonical_upgrade() {
         let f = fx("foo", "1.0-1", MatchedVia::Pkgname);
-        assert_eq!(upgrade_base_version("1.1-1", Some(&f.cp())), Some("1.0-1"));
+        assert_eq!(
+            upgrade_base_version(v("1.1-1"), Some(&f.cp())),
+            Some(v("1.0-1"))
+        );
     }
 
     /// Even at equal version, a provides/replaces match should attempt a
@@ -566,7 +577,10 @@ mod tests {
     #[test]
     fn upgrade_base_some_for_provides_even_at_same_version() {
         let f = fx("old", "1.0-1", MatchedVia::Provides);
-        assert_eq!(upgrade_base_version("1.0-1", Some(&f.cp())), Some("1.0-1"));
+        assert_eq!(
+            upgrade_base_version(v("1.0-1"), Some(&f.cp())),
+            Some(v("1.0-1"))
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────

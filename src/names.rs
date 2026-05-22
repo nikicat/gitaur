@@ -28,14 +28,9 @@
 //!   * **`PartialEq<&str>` / `PartialEq<String>` are kept** for tests and
 //!     for literal-equality assertions (`assert_eq!(e.pkgbase, "foo")`).
 //!
-//! **TODO (Phase B): typed `Version`.** Pacman version strings have their
-//! own grammar (`[epoch:]pkgver-pkgrel`) compared via `vercmp` — not plain
-//! text. We currently pass raw `String` everywhere (`IndexEntry.pkgver`,
-//! `PkgUpgrade.{old,new}_ver`, `InstalledCounterpart.version`,
-//! `vercmp::vercmp(&str, &str)`). A `Version` newtype with `is_outdated`
-//! / `compare` methods would prevent accidentally feeding plain strings
-//! to vercmp and put comparison logic on the type. Deferred so the
-//! current PkgName/PkgBase/PkgTarget refactor has a clean boundary.
+//! Pacman version strings live in [`crate::version::Version`] / `Ver` —
+//! the type rules there are intentionally different (`Deref<Target=Ver>`,
+//! `<` and `==` are vercmp), so the module is separate.
 //!
 //! Boundaries that deliberately stay `String` / `&str`:
 //!   * The user's typed CLI / picker target — could be any kind of name

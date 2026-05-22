@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::names::PkgName;
 use crate::pacman::alpm_db;
-use crate::pacman::vercmp;
+use crate::version::Version;
 use std::process::Command;
 use tracing::{debug, info, instrument};
 
@@ -17,12 +17,12 @@ pub const REPO_AUR: &str = "aur";
 /// `repo` is the pacman sync-DB name (`core`, `extra`, `multilib`, …) for
 /// repo upgrades, or [`REPO_AUR`] for AUR upgrades. It drives both grouping
 /// in the upgrade table and the source column shown to the user.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PkgUpgrade {
     pub repo: String,
     pub name: PkgName,
-    pub old_ver: String,
-    pub new_ver: String,
+    pub old_ver: Version,
+    pub new_ver: Version,
 }
 
 /// Walk alpm directly for upgradable repo packages — no shell-out, no parser.
@@ -40,9 +40,12 @@ pub fn query_repo_upgrades() -> Result<Vec<PkgUpgrade>> {
             let Ok(spkg) = db.pkg(ipkg.name()) else {
                 continue;
             };
-            let installed = ipkg.version().to_string();
-            let avail = spkg.version().to_string();
-            if vercmp::is_outdated(&installed, &avail) {
+            // `ipkg.version()` / `spkg.version()` return `&alpm::Ver`; the
+            // `From<&alpm::Ver> for Version` impl reads the bytes directly
+            // via `Ver::as_str()` — no `Display`/`to_string()` round trip.
+            let installed = Version::from(ipkg.version());
+            let avail = Version::from(spkg.version());
+            if installed.is_outdated(&avail) {
                 upgrades.push(PkgUpgrade {
                     repo: db.name().to_string(),
                     name: PkgName::new(ipkg.name()),

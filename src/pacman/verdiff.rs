@@ -3,8 +3,10 @@
 //! Arch versions follow `[epoch:]pkgver-pkgrel`, where pkgver is arbitrary
 //! upstream text. The `semver` crate would reject most real-world pkgvers
 //! (`20240101`, `1.0pre1`, `1_0`, `r123.abc`), so we do our own parsing.
-//! Pure version ordering still lives in [`super::vercmp`] — this module is
-//! about *how* two versions differ, for the upgrade-table UI.
+//! Pure version ordering lives on [`Ver`]'s `PartialOrd` impl — this
+//! module is about *how* two versions differ, for the upgrade-table UI.
+
+use crate::version::Ver;
 
 /// Granularity of a version bump — drives upgrade-table colorization and
 /// row ordering.
@@ -47,9 +49,9 @@ fn split_ver(v: &str) -> (Option<&str>, &str, Option<&str>) {
 /// Compares epoch first, then pkgver split on `.`, then pkgrel. The first
 /// differing layer wins, so `1.0-1 → 1.0-2` is [`BumpKind::PkgRel`] even
 /// though pkgrel sits after pkgver in the version string.
-pub fn classify_bump(old: &str, new: &str) -> BumpKind {
-    let (o_ep, o_pv, o_pr) = split_ver(old);
-    let (n_ep, n_pv, n_pr) = split_ver(new);
+pub fn classify_bump(old: &Ver, new: &Ver) -> BumpKind {
+    let (o_ep, o_pv, o_pr) = split_ver(old.as_str());
+    let (n_ep, n_pv, n_pr) = split_ver(new.as_str());
 
     if o_ep != n_ep {
         return BumpKind::Epoch;
@@ -80,10 +82,10 @@ pub fn classify_bump(old: &str, new: &str) -> BumpKind {
 /// remembering the most recent separator while still inside the common run;
 /// when a divergence is hit, back up to that separator so we don't split
 /// mid-component. Returns the byte index where the diverging suffix begins.
-pub fn common_prefix_at_boundary(old: &str, new: &str) -> usize {
+pub fn common_prefix_at_boundary(old: &Ver, new: &Ver) -> usize {
     let mut last_boundary = 0;
     let mut byte_pos = 0;
-    for (a, b) in old.chars().zip(new.chars()) {
+    for (a, b) in old.as_str().chars().zip(new.as_str().chars()) {
         if a != b {
             return last_boundary;
         }
@@ -101,25 +103,31 @@ pub fn common_prefix_at_boundary(old: &str, new: &str) -> usize {
 mod tests {
     use super::*;
 
+    /// Test-only literal helper. `Ver::new("…")` reads tersely at the
+    /// assertion call site; one `v(...)` per arg keeps the line short.
+    fn v(s: &str) -> &Ver {
+        Ver::new(s)
+    }
+
     #[test]
     fn classify_bump_layers() {
-        assert_eq!(classify_bump("1.0-1", "1.0-2"), BumpKind::PkgRel);
-        assert_eq!(classify_bump("1.0.0-1", "1.0.1-1"), BumpKind::Patch);
-        assert_eq!(classify_bump("1.0-1", "1.1-1"), BumpKind::Minor);
-        assert_eq!(classify_bump("1.0-1", "2.0-1"), BumpKind::Major);
-        assert_eq!(classify_bump("1:1.0-1", "2:1.0-1"), BumpKind::Epoch);
-        assert_eq!(classify_bump("1.0-1", "1.0-1"), BumpKind::Other);
+        assert_eq!(classify_bump(v("1.0-1"), v("1.0-2")), BumpKind::PkgRel);
+        assert_eq!(classify_bump(v("1.0.0-1"), v("1.0.1-1")), BumpKind::Patch);
+        assert_eq!(classify_bump(v("1.0-1"), v("1.1-1")), BumpKind::Minor);
+        assert_eq!(classify_bump(v("1.0-1"), v("2.0-1")), BumpKind::Major);
+        assert_eq!(classify_bump(v("1:1.0-1"), v("2:1.0-1")), BumpKind::Epoch);
+        assert_eq!(classify_bump(v("1.0-1"), v("1.0-1")), BumpKind::Other);
     }
 
     #[test]
     fn classify_bump_handles_trailing_component() {
-        assert_eq!(classify_bump("1.2-1", "1.2.1-1"), BumpKind::Patch);
+        assert_eq!(classify_bump(v("1.2-1"), v("1.2.1-1")), BumpKind::Patch);
     }
 
     #[test]
     fn classify_bump_first_layer_wins() {
         // pkgrel also changed, but the pkgver bump is what we report.
-        assert_eq!(classify_bump("1.0-3", "1.1-1"), BumpKind::Minor);
+        assert_eq!(classify_bump(v("1.0-3"), v("1.1-1")), BumpKind::Minor);
     }
 
     /// `BumpKind`'s derived `Ord` is load-bearing: `upgrade_table` sorts
@@ -150,8 +158,10 @@ mod tests {
     }
 
     /// Helper: byte index → suffix of `new`. Reads more naturally in tests.
+    /// Inputs are `&str` literals; wrap once before calling the typed API
+    /// and slice the original `new` by the returned byte position.
     fn suffix_of<'a>(old: &str, new: &'a str) -> &'a str {
-        &new[common_prefix_at_boundary(old, new)..]
+        &new[common_prefix_at_boundary(Ver::new(old), Ver::new(new))..]
     }
 
     #[test]

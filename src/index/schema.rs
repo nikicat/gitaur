@@ -1,6 +1,7 @@
 //! On-disk index schema. Persisted via `rkyv 0.8` zero-copy archive.
 
 use crate::names::{PkgBase, PkgName};
+use crate::version::Version;
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// One pkgname's metadata inside a pkgbase. Split-package PKGBUILDs override
@@ -90,16 +91,18 @@ impl IndexEntry {
         )
     }
 
-    /// Pacman-style `[epoch:]pkgver-pkgrel` string. Empty `epoch` is treated
-    /// the same as no epoch — matches what `version_string` used to produce.
-    pub fn version(&self) -> String {
+    /// Pacman-style `[epoch:]pkgver-pkgrel` combined version. Returned as
+    /// the typed [`Version`] so callers get vercmp on `<` / `==` by default.
+    /// Empty `epoch` is treated the same as no epoch — matches what the
+    /// raw `version_string` helper used to produce.
+    pub fn version(&self) -> Version {
         let epoch = self
             .epoch
             .as_deref()
             .filter(|s| !s.is_empty())
             .map(|s| format!("{s}:"))
             .unwrap_or_default();
-        format!("{epoch}{}-{}", self.pkgver, self.pkgrel)
+        Version::new(format!("{epoch}{}-{}", self.pkgver, self.pkgrel))
     }
 }
 

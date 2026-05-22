@@ -6,6 +6,7 @@
 use gitaur::build::review;
 use gitaur::mirror::MirrorRepo;
 use gitaur::testing::{git, git_stdout};
+use gitaur::version::Ver;
 use gix::ObjectId;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -14,7 +15,11 @@ use tempfile::TempDir;
 /// (oldest → newest), with one commit per entry. Each commit's `.SRCINFO`
 /// declares the entry's `(pkgver, pkgrel[, epoch])`. Returns `(bare path,
 /// commit OIDs in order)`.
-fn build_history(root: &Path, pkgbase: &str, versions: &[Version<'_>]) -> (PathBuf, Vec<ObjectId>) {
+fn build_history(
+    root: &Path,
+    pkgbase: &str,
+    versions: &[SrcinfoFixture<'_>],
+) -> (PathBuf, Vec<ObjectId>) {
     let src = root.join("src");
     let bare = root.join("bare");
     std::fs::create_dir_all(&src).unwrap();
@@ -53,13 +58,13 @@ fn build_history(root: &Path, pkgbase: &str, versions: &[Version<'_>]) -> (PathB
     (bare, oids)
 }
 
-struct Version<'a> {
+struct SrcinfoFixture<'a> {
     pkgver: &'a str,
     pkgrel: &'a str,
     epoch: Option<&'a str>,
 }
 
-impl<'a> Version<'a> {
+impl<'a> SrcinfoFixture<'a> {
     const fn new(pkgver: &'a str, pkgrel: &'a str) -> Self {
         Self {
             pkgver,
@@ -96,15 +101,15 @@ fn finds_middle_commit_for_installed_version() {
         dir.path(),
         "foo",
         &[
-            Version::new("1.0", "1"),
-            Version::new("1.1", "1"),
-            Version::new("1.2", "1"),
+            SrcinfoFixture::new("1.0", "1"),
+            SrcinfoFixture::new("1.1", "1"),
+            SrcinfoFixture::new("1.2", "1"),
         ],
     );
     let mirror = MirrorRepo::open(&bare).unwrap();
     let head = oids[2];
 
-    let found = review::find_installed_commit(&mirror, head, "1.1-1").unwrap();
+    let found = review::find_installed_commit(&mirror, head, Ver::new("1.1-1")).unwrap();
     assert_eq!(found, Some(oids[1]));
 }
 
@@ -115,15 +120,15 @@ fn finds_oldest_commit_for_installed_version() {
         dir.path(),
         "foo",
         &[
-            Version::new("1.0", "1"),
-            Version::new("1.1", "1"),
-            Version::new("1.2", "1"),
+            SrcinfoFixture::new("1.0", "1"),
+            SrcinfoFixture::new("1.1", "1"),
+            SrcinfoFixture::new("1.2", "1"),
         ],
     );
     let mirror = MirrorRepo::open(&bare).unwrap();
     let head = oids[2];
 
-    let found = review::find_installed_commit(&mirror, head, "1.0-1").unwrap();
+    let found = review::find_installed_commit(&mirror, head, Ver::new("1.0-1")).unwrap();
     assert_eq!(found, Some(oids[0]));
 }
 
@@ -133,12 +138,15 @@ fn returns_none_when_version_not_in_history() {
     let (bare, oids) = build_history(
         dir.path(),
         "foo",
-        &[Version::new("1.0", "1"), Version::new("1.1", "1")],
+        &[
+            SrcinfoFixture::new("1.0", "1"),
+            SrcinfoFixture::new("1.1", "1"),
+        ],
     );
     let mirror = MirrorRepo::open(&bare).unwrap();
     let head = oids[1];
 
-    let found = review::find_installed_commit(&mirror, head, "9.9-9").unwrap();
+    let found = review::find_installed_commit(&mirror, head, Ver::new("9.9-9")).unwrap();
     assert_eq!(found, None);
 }
 
@@ -152,14 +160,14 @@ fn matches_version_with_epoch_prefix() {
         dir.path(),
         "foo",
         &[
-            Version::with_epoch("0.1", "1", "1"),
-            Version::with_epoch("0.1", "1", "2"),
+            SrcinfoFixture::with_epoch("0.1", "1", "1"),
+            SrcinfoFixture::with_epoch("0.1", "1", "2"),
         ],
     );
     let mirror = MirrorRepo::open(&bare).unwrap();
     let head = oids[1];
 
-    let found = review::find_installed_commit(&mirror, head, "1:0.1-1").unwrap();
+    let found = review::find_installed_commit(&mirror, head, Ver::new("1:0.1-1")).unwrap();
     assert_eq!(found, Some(oids[0]));
 }
 
@@ -172,11 +180,14 @@ fn picks_head_when_already_at_installed_version() {
     let (bare, oids) = build_history(
         dir.path(),
         "foo",
-        &[Version::new("1.0", "1"), Version::new("1.1", "1")],
+        &[
+            SrcinfoFixture::new("1.0", "1"),
+            SrcinfoFixture::new("1.1", "1"),
+        ],
     );
     let mirror = MirrorRepo::open(&bare).unwrap();
     let head = oids[1];
 
-    let found = review::find_installed_commit(&mirror, head, "1.1-1").unwrap();
+    let found = review::find_installed_commit(&mirror, head, Ver::new("1.1-1")).unwrap();
     assert_eq!(found, Some(oids[1]));
 }
