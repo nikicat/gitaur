@@ -11,7 +11,7 @@ pub fn last_line(data: &[u8]) -> Option<String> {
     s.split(['\r', '\n'])
         .map(str::trim)
         .rfind(|l| !l.is_empty())
-        .map(std::string::ToString::to_string)
+        .map(str::to_owned)
 }
 
 #[cfg(test)]

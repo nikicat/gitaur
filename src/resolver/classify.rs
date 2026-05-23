@@ -3,9 +3,10 @@
 use crate::index::secondary::Secondary;
 use crate::pacman::alpm_db::PacmanIndex;
 
-/// Where a given dep name lives, with the **concrete** pkgname pacman would
-/// act on. Virtual `provides` (`cargo`, `libalpm.so`, …) get resolved to
-/// their provider here so the plan never displays a fake "package".
+/// Where a given dep name lives, with the **concrete** pkgname pacman would act on.
+///
+/// Virtual `provides` (`cargo`, `libalpm.so`, …) get resolved to their
+/// provider here so the plan never displays a fake "package".
 ///
 /// Resolution order (pacman wins when both have the pkg):
 ///   1. local pacman DB (by name or installed `provides`)  → Installed

@@ -26,9 +26,11 @@ use crate::pacman::alpm_db::PacmanIndex;
 use std::collections::HashMap;
 use tracing::{debug, instrument};
 
-/// Selector callback: given a pkgbase and its full pkgname list, return the
-/// subset to install as explicit. Boxed via `&mut dyn` at call sites so the
-/// signature stays one line and so test/UI variants compose without generics.
+/// Selector callback: pick the subset of pkgnames to install as explicit.
+///
+/// Given a pkgbase and its full pkgname list, returns which ones the user
+/// wants. Boxed via `&mut dyn` at call sites so the signature stays one
+/// line and so test/UI variants compose without generics.
 pub type PkgnameSelector<'a> = dyn FnMut(&PkgBase, &[PkgName]) -> Result<Vec<PkgName>> + 'a;
 
 /// Outcome of [`expand_pkgbase_targets`].
@@ -163,7 +165,7 @@ struct TargetDecision {
 }
 
 impl TargetDecision {
-    fn passthrough(spec: String) -> Self {
+    const fn passthrough(spec: String) -> Self {
         Self {
             spec,
             selection: None,
@@ -521,7 +523,7 @@ mod tests {
             expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["bisq"]), &mut select_all).unwrap();
         assert_eq!(
             r.targets,
-            vec!["bisq".to_string()],
+            vec!["bisq".to_owned()],
             "resolve target is pkgbase"
         );
         assert_eq!(
@@ -544,7 +546,7 @@ mod tests {
         let (idx, by, pac) = fixture();
         let r =
             expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["paru"]), &mut select_all).unwrap();
-        assert_eq!(r.targets, vec!["paru-bin".to_string()]);
+        assert_eq!(r.targets, vec!["paru-bin".to_owned()]);
         assert_eq!(r.direct_pkgnames, vec![PkgName::from("paru-bin")]);
         assert!(
             r.selections.is_empty(),
@@ -557,7 +559,7 @@ mod tests {
         let (idx, by, pac) = fixture();
         let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["firefox"]), &mut select_all)
             .unwrap();
-        assert_eq!(r.targets, vec!["firefox".to_string()]);
+        assert_eq!(r.targets, vec!["firefox".to_owned()]);
         assert!(r.direct_pkgnames.is_empty());
     }
 
@@ -576,7 +578,7 @@ mod tests {
             &mut select_all,
         )
         .unwrap();
-        assert_eq!(r.targets, vec!["bisq-single".to_string()]);
+        assert_eq!(r.targets, vec!["bisq-single".to_owned()]);
         assert_eq!(
             r.direct_pkgnames,
             vec![PkgName::from("bisq-desktop-single")]
@@ -590,7 +592,7 @@ mod tests {
         let (idx, by, pac) = fixture();
         let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["split-pkg"]), &mut select_all)
             .unwrap();
-        assert_eq!(r.targets, vec!["split-pkg".to_string()]);
+        assert_eq!(r.targets, vec!["split-pkg".to_owned()]);
         assert_eq!(
             r.direct_pkgnames,
             vec![
@@ -613,7 +615,7 @@ mod tests {
         };
         let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["split-pkg"]), &mut select)
             .unwrap();
-        assert_eq!(r.targets, vec!["split-pkg".to_string()]);
+        assert_eq!(r.targets, vec!["split-pkg".to_owned()]);
         assert_eq!(
             r.direct_pkgnames,
             vec![PkgName::from("split-a"), PkgName::from("split-c")],
@@ -637,7 +639,7 @@ mod tests {
         };
         let r =
             expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["cower"]), &mut select).unwrap();
-        assert_eq!(r.targets, vec!["cower".to_string()]);
+        assert_eq!(r.targets, vec!["cower".to_owned()]);
         assert_eq!(calls, 0, "selector must not be invoked on pkgname hits");
     }
 
@@ -651,7 +653,7 @@ mod tests {
         let r =
             expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["cower>=1.2"]), &mut select_all)
                 .unwrap();
-        assert_eq!(r.targets, vec!["cower>=1.2".to_string()]);
+        assert_eq!(r.targets, vec!["cower>=1.2".to_owned()]);
     }
 
     #[test]
@@ -709,7 +711,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             r.targets,
-            vec!["commit-mono-font".to_string()],
+            vec!["commit-mono-font".to_owned()],
             "must pass the pkgbase string, NOT the pkgnames — by_name would alias to the wrong entry",
         );
         // Both pkgnames still flow through `direct_pkgnames` so
@@ -733,7 +735,7 @@ mod tests {
         let (idx, by, pac) = fixture();
         let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["bisq-cli"]), &mut select_all)
             .unwrap();
-        assert_eq!(r.targets, vec!["bisq".to_string()]);
+        assert_eq!(r.targets, vec!["bisq".to_owned()]);
         assert_eq!(r.direct_pkgnames, vec![PkgName::from("bisq-cli")]);
         assert_eq!(
             r.selections.get("bisq"),
@@ -781,7 +783,7 @@ mod tests {
             &mut select_all,
         )
         .unwrap();
-        assert_eq!(r.targets, vec!["test-split".to_string()]);
+        assert_eq!(r.targets, vec!["test-split".to_owned()]);
         assert_eq!(
             r.direct_pkgnames,
             vec![PkgName::from("test-split-extras")],
@@ -806,7 +808,7 @@ mod tests {
         let (idx, by, pac) = fixture();
         let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["cower"]), &mut select_all)
             .unwrap();
-        assert_eq!(r.targets, vec!["cower".to_string()]);
+        assert_eq!(r.targets, vec!["cower".to_owned()]);
         assert!(r.selections.is_empty());
         assert!(r.direct_pkgnames.is_empty());
     }
@@ -825,15 +827,15 @@ mod tests {
             &mut select_all,
         )
         .unwrap();
-        assert_eq!(r.targets, vec!["bisq".to_string(), "bisq".to_string()]);
+        assert_eq!(r.targets, vec!["bisq".to_owned(), "bisq".to_owned()]);
         let mut dp = r.direct_pkgnames.clone();
         dp.sort();
-        assert_eq!(dp, vec!["bisq-cli".to_string(), "bisq-daemon".to_string()],);
+        assert_eq!(dp, vec!["bisq-cli".to_owned(), "bisq-daemon".to_owned()],);
         let mut sel = r.selections.get("bisq").cloned().unwrap_or_default();
         sel.sort();
         assert_eq!(
             sel,
-            vec!["bisq-cli".to_string(), "bisq-daemon".to_string()],
+            vec!["bisq-cli".to_owned(), "bisq-daemon".to_owned()],
             "multiple pkgname targets must accumulate into the same pkgbase selection",
         );
     }
@@ -843,7 +845,7 @@ mod tests {
         let (idx, _by, pac) = fixture();
         let r = expand_pkgbase_targets(&idx, None, &pac, &ts(&["bisq-single"]), &mut select_all)
             .unwrap();
-        assert_eq!(r.targets, vec!["bisq-single".to_string()]);
+        assert_eq!(r.targets, vec!["bisq-single".to_owned()]);
         assert!(r.selections.is_empty());
     }
 
@@ -961,7 +963,7 @@ mod tests {
         // Spec passed through unchanged — `pac.is_installed("paru")` is
         // true, so expand did NOT rewrite to the pkgbase string. Resolver
         // routes via `by_provides` in `resolve_target_source`.
-        assert_eq!(r.targets, vec!["paru".to_string()]);
+        assert_eq!(r.targets, vec!["paru".to_owned()]);
         // The crucial bit: hint IS recorded despite the passthrough, so
         // `prepare_one` can pass it to `counterpart_with_hint`.
         assert_eq!(
@@ -993,7 +995,7 @@ mod tests {
         let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["bisq-cli"]), &mut select_all)
             .unwrap();
         // Shortcut fired — spec passes through unchanged.
-        assert_eq!(r.targets, vec!["bisq-cli".to_string()]);
+        assert_eq!(r.targets, vec!["bisq-cli".to_owned()]);
         // The crucial bit: selection IS recorded against the pkgbase.
         // Without this, install_stratum installs all three siblings.
         assert_eq!(
@@ -1017,7 +1019,7 @@ mod tests {
         pac.installed.insert("cower".into(), "1.0-1".into());
         let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["cower"]), &mut select_all)
             .unwrap();
-        assert_eq!(r.targets, vec!["cower".to_string()]);
+        assert_eq!(r.targets, vec!["cower".to_owned()]);
         assert!(
             r.selections.is_empty(),
             "single-pkgname pkgbase has no real subset to record",

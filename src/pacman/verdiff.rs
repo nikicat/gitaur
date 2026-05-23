@@ -76,12 +76,14 @@ pub fn classify_bump(old: &Ver, new: &Ver) -> BumpKind {
     BumpKind::Other
 }
 
-/// Find the longest common prefix of `old` and `new` that ends at a
-/// non-alphanumeric boundary — i.e. a version-component separator. Same
-/// mechanic paru uses (`src/upgrade.rs::get_version_diff`): walk char-by-char,
-/// remembering the most recent separator while still inside the common run;
-/// when a divergence is hit, back up to that separator so we don't split
-/// mid-component. Returns the byte index where the diverging suffix begins.
+/// Byte index where the diverging suffix of `new` (relative to `old`) begins,
+/// rounded back to the nearest version-component separator.
+///
+/// I.e. the longest common prefix that ends at a non-alphanumeric boundary.
+/// Same mechanic paru uses (`src/upgrade.rs::get_version_diff`): walk
+/// char-by-char, remembering the most recent separator while still inside
+/// the common run; when a divergence is hit, back up to that separator so
+/// we don't split mid-component.
 pub fn common_prefix_at_boundary(old: &Ver, new: &Ver) -> usize {
     let mut last_boundary = 0;
     let mut byte_pos = 0;

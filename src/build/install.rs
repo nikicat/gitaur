@@ -36,12 +36,13 @@ pub fn extract_pkgname(path: &Path) -> Option<PkgName> {
     Some(PkgName::new(name_parts.join("-")))
 }
 
-/// True iff `path`'s filename is `<pkgname>-<version>-<arch>.pkg.tar.{zst,xz}`
-/// — i.e. an artifact this exact `(pkgname, version)` would produce.
-/// `version` is the pacman-style `[epoch:]pkgver-pkgrel`, accepted as
-/// `&Ver` so callers can pass the typed `Version` directly. This match is
-/// what powers the build idempotency check. `pkgname` is the typed
-/// `PkgName` (matched against the filename prefix via `Display`).
+/// True iff `path` is an artifact this exact `(pkgname, version)` would produce.
+///
+/// Match is on the filename `<pkgname>-<version>-<arch>.pkg.tar.{zst,xz}`.
+/// `version` is the pacman-style `[epoch:]pkgver-pkgrel`, accepted as `&Ver`
+/// so callers can pass the typed `Version` directly; `pkgname` is the typed
+/// `PkgName` (matched against the filename prefix via `Display`). This is
+/// what powers the build idempotency check.
 pub fn matches_pkg(path: &Path, pkgname: &PkgName, version: &Ver) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;

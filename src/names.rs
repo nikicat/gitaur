@@ -1,7 +1,8 @@
-//! Typed wrappers around the two name-shaped strings that gitaur conflates
-//! at its peril: [`PkgName`] (a pacman pkgname — what `pacman -Q` reports)
-//! and [`PkgBase`] (an AUR pkgbase — a branch name on the mirror, the
-//! makepkg unit).
+//! Typed wrappers for [`PkgName`] and [`PkgBase`].
+//!
+//! The two name-shaped strings gitaur conflates at its peril: `PkgName` is
+//! a pacman pkgname (what `pacman -Q` reports), `PkgBase` is an AUR pkgbase
+//! (a branch name on the mirror, the makepkg unit).
 //!
 //! For non-split pkgs the two lexical strings are identical (`foo`'s
 //! pkgbase is also `foo`), which is exactly when accidental cross-passing
@@ -65,9 +66,10 @@ pub struct PkgName(pub String);
 #[rkyv(compare(PartialEq, PartialOrd))]
 pub struct PkgBase(pub String);
 
-/// A user-typed install target. Pre-classification: could be any of
-/// pkgname / pkgbase / virtual provides name / `repo/pkg` / versioned
-/// dep expression (`foo>=1.2`). Only once
+/// A user-typed install target — unclassified.
+///
+/// Could be any of pkgname / pkgbase / virtual provides name / `repo/pkg`
+/// / versioned dep expression (`foo>=1.2`). Only once
 /// [`crate::resolver::pkgbase_expand`] resolves it do we know which kind
 /// it is — at which point it's reborn as a `PkgBase` (rewritten) or kept
 /// as a `String` passthrough for the resolver.
@@ -79,13 +81,14 @@ pub struct PkgBase(pub String);
 #[derive(Debug, Clone, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PkgTarget(pub String);
 
-/// A virtual name declared in an AUR pkg's `provides=` array. **Not** a
-/// pkgname — it's a "this package satisfies the name X" claim, and
-/// multiple pkgs can declare the same virtual. Distinct from [`PkgName`]
-/// at the type level because their semantic origins differ even when
-/// they share lexical shape: a `dotnet-runtime-7.0` `PkgName` is the
-/// thing pacman has installed under that name; a `dotnet-runtime-7.0`
-/// `VirtualName` is what AUR pkg `dotnet-core-7.0-bin` claims to
+/// A virtual name declared in an AUR pkg's `provides=` array — **not** a pkgname.
+///
+/// It's a "this package satisfies the name X" claim, and multiple pkgs can
+/// declare the same virtual. Distinct from [`PkgName`] at the type level
+/// because their semantic origins differ even when they share lexical
+/// shape: a `dotnet-runtime-7.0` `PkgName` is the thing pacman has
+/// installed under that name; a `dotnet-runtime-7.0` `VirtualName` is what
+/// AUR pkg `dotnet-core-7.0-bin` claims to
 /// satisfy. The cross-domain bridge between the two — "is this `PkgName`
 /// lexically the same as some pkg's `VirtualName`?" — lives in
 /// [`crate::index::secondary::Secondary::classify_foreign`].
@@ -104,10 +107,10 @@ macro_rules! impl_name_wrapper {
             pub fn into_inner(self) -> String {
                 self.0
             }
-            pub fn is_empty(&self) -> bool {
+            pub const fn is_empty(&self) -> bool {
                 self.0.is_empty()
             }
-            pub fn len(&self) -> usize {
+            pub const fn len(&self) -> usize {
                 self.0.len()
             }
             /// Match the wrapped name against a compiled regex. Routing
@@ -249,10 +252,12 @@ impl PkgName {
     }
 }
 
-/// Membership checks across the typed name domains. Each method names the
-/// semantic claim ("does this set of user-typed targets contain this
-/// pkgname?") and encapsulates the single `Borrow<str>` cast it requires
-/// — keeps the cross-domain string-match away from generic call sites.
+/// Membership checks across the typed name domains.
+///
+/// Each method names the semantic claim ("does this set of user-typed
+/// targets contain this pkgname?") and encapsulates the single
+/// `Borrow<str>` cast it requires — keeps the cross-domain string-match
+/// away from generic call sites.
 pub trait PkgTargetSetExt {
     /// True iff some [`PkgTarget`] in `self` is lexically the same string
     /// as `pkgname`. The cross-domain string-match claim: "did the user

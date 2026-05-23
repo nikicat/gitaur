@@ -79,7 +79,7 @@ impl Version {
         Ver::new(&self.0)
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 }
@@ -94,27 +94,27 @@ impl Ver {
     /// API for a `#[repr(transparent)]` newtype around an unsized type:
     /// without it, `&Ver` would be unconstructable.
     #[allow(unsafe_code)]
-    pub fn new(s: &str) -> &Ver {
+    pub const fn new(s: &str) -> &Self {
         // SAFETY: `Ver` is `#[repr(transparent)]` over `str`, so `*const str`
         // and `*const Ver` point to the same bytes with the same metadata.
         // No `Drop`, no fields beyond the `str`, no inner mutability.
-        unsafe { &*(std::ptr::from_ref::<str>(s) as *const Ver) }
+        unsafe { &*(std::ptr::from_ref::<str>(s) as *const Self) }
     }
 
     /// Raw underlying text. Use for serialisation / Display-equivalent
     /// rendering; comparisons should go through `==` / `<` to invoke vercmp.
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         &self.0
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Byte length of the underlying text. Used by the upgrade table for
     /// column-width math; not a domain operation. Same justification as
     /// `PkgBase::len` — it's a pure UI concern.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.0.len()
     }
 
@@ -122,7 +122,7 @@ impl Ver {
     /// common "needs upgrade?" question; equivalent to `self < newer` but
     /// reads more naturally at call sites that don't immediately suggest
     /// a comparison.
-    pub fn is_outdated(&self, newer: &Ver) -> bool {
+    pub fn is_outdated(&self, newer: &Self) -> bool {
         self < newer
     }
 
@@ -211,25 +211,25 @@ impl fmt::Display for Ver {
 // trait dispatch on the RHS.
 
 impl PartialEq for Ver {
-    fn eq(&self, other: &Ver) -> bool {
+    fn eq(&self, other: &Self) -> bool {
         vercmp(self, other) == Ordering::Equal
     }
 }
 
 impl PartialOrd for Ver {
-    fn partial_cmp(&self, other: &Ver) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(vercmp(self, other))
     }
 }
 
 impl PartialEq for Version {
-    fn eq(&self, other: &Version) -> bool {
+    fn eq(&self, other: &Self) -> bool {
         self.as_ver() == other.as_ver()
     }
 }
 
 impl PartialOrd for Version {
-    fn partial_cmp(&self, other: &Version) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.as_ver().partial_cmp(other.as_ver())
     }
 }
@@ -288,13 +288,13 @@ impl PartialEq<str> for Version {
 
 impl PartialEq<&str> for Ver {
     fn eq(&self, other: &&str) -> bool {
-        self == Ver::new(other)
+        self == Self::new(other)
     }
 }
 
 impl PartialEq<str> for Ver {
     fn eq(&self, other: &str) -> bool {
-        self == Ver::new(other)
+        self == Self::new(other)
     }
 }
 

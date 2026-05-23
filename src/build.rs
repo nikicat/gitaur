@@ -183,7 +183,7 @@ pub fn cmd_install(
 fn install_repo_phase(cfg: &Config, plan: &Plan, asdeps: bool) -> Result<()> {
     if !plan.direct_repo.is_empty() {
         ui::info("installing repo packages");
-        let mut args = vec!["-S".to_string(), "--needed".into(), "--noconfirm".into()];
+        let mut args = vec!["-S".to_owned(), "--needed".into(), "--noconfirm".into()];
         if asdeps {
             args.push("--asdeps".into());
         }
@@ -193,7 +193,7 @@ fn install_repo_phase(cfg: &Config, plan: &Plan, asdeps: bool) -> Result<()> {
     if !plan.transitive_repo.is_empty() {
         ui::info("installing repo dependencies");
         let mut args = vec![
-            "-S".to_string(),
+            "-S".to_owned(),
             "--needed".into(),
             "--noconfirm".into(),
             "--asdeps".into(),
@@ -289,7 +289,7 @@ fn run_aur_pipeline(
     }
 
     if !asdeps && !transitive_marks.is_empty() {
-        let mut args = vec!["-D".to_string(), "--asdeps".into()];
+        let mut args = vec!["-D".to_owned(), "--asdeps".into()];
         // pacman argv is `Vec<String>` — downgrade typed `PkgName`s at
         // this single boundary.
         args.extend(transitive_marks.into_iter().map(PkgName::into_inner));
@@ -631,7 +631,7 @@ fn install_stratum(
 
     // Always `--noconfirm`: gitaur's plan+confirm at the top of `cmd_install`
     // is the single user gate; pacman shouldn't ask again.
-    let mut args = vec!["-U".to_string(), "--needed".into(), "--noconfirm".into()];
+    let mut args = vec!["-U".to_owned(), "--needed".into(), "--noconfirm".into()];
     if asdeps_override {
         args.push("--asdeps".into());
     }
@@ -646,10 +646,11 @@ fn install_stratum(
     Ok(())
 }
 
-/// Entry point for `-Sc` / `-Scc`. The depth of pacman's own cache cleanup is
-/// already encoded in `argv`; gitaur just wipes its per-pkgbase worktrees
-/// (idempotency cache lives entirely inside them as the produced
-/// `.pkg.tar.{zst,xz}` files).
+/// Entry point for `-Sc` / `-Scc`.
+///
+/// The depth of pacman's own cache cleanup is already encoded in `argv`;
+/// gitaur just wipes its per-pkgbase worktrees (idempotency cache lives
+/// entirely inside them as the produced `.pkg.tar.{zst,xz}` files).
 #[instrument(skip(cfg, argv))]
 pub fn cmd_clean(cfg: &Config, argv: &[String]) -> Result<u8> {
     invoke::exec_pacman(cfg, argv)?;
@@ -660,7 +661,7 @@ pub fn cmd_clean(cfg: &Config, argv: &[String]) -> Result<u8> {
         if let Err(e) = std::fs::remove_dir_all(&pkgs_root) {
             warn!(error = %e, "could not remove pkgs dir");
         }
-        let _ = std::fs::create_dir_all(&pkgs_root);
+        std::fs::create_dir_all(&pkgs_root).ok();
     }
     Ok(0)
 }

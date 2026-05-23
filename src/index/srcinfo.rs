@@ -223,13 +223,13 @@ pkgname = bisq-daemon
         assert_eq!(e.pkgver, "17");
         assert_eq!(e.pkgrel, "2");
         assert_eq!(names(&e), vec!["cower"]);
-        assert!(e.depends.contains(&"pacman".to_string()));
-        assert!(e.depends.contains(&"curl".to_string()));
+        assert!(e.depends.contains(&"pacman".to_owned()));
+        assert!(e.depends.contains(&"curl".to_owned()));
         // Pkgbase-level provides land on the entry, not on the pkgname.
-        assert!(e.provides.contains(&"cower".to_string()));
+        assert!(e.provides.contains(&"cower".to_owned()));
         assert!(e.pkgnames[0].provides.is_empty());
-        assert!(e.conflicts.contains(&"cower-git".to_string()));
-        assert!(e.arch.contains(&"x86_64".to_string()));
+        assert!(e.conflicts.contains(&"cower-git".to_owned()));
+        assert!(e.arch.contains(&"x86_64".to_owned()));
     }
 
     #[test]
@@ -245,8 +245,8 @@ pkgname = bisq-daemon
             ]
         );
         // Pkgbase-level + pkgname-level depends are both collected.
-        assert!(e.depends.contains(&"mingw-w64-crt".to_string()));
-        assert!(e.depends.contains(&"mingw-w64-winpthreads".to_string()));
+        assert!(e.depends.contains(&"mingw-w64-crt".to_owned()));
+        assert!(e.depends.contains(&"mingw-w64-winpthreads".to_owned()));
     }
 
     #[test]
@@ -260,7 +260,7 @@ pkgname = bisq-daemon
             e.provides.is_empty(),
             "no pkgbase-level provides → e.provides must be empty",
         );
-        assert_eq!(e.pkgnames[0].provides, vec!["bisq".to_string()]);
+        assert_eq!(e.pkgnames[0].provides, vec!["bisq".to_owned()]);
         assert!(e.pkgnames[1].provides.is_empty());
         assert!(e.pkgnames[2].provides.is_empty());
         // all_provides() unions both buckets, regardless of attribution.
@@ -277,7 +277,7 @@ pkgname = bisq-daemon
         // the same lookup either way.
         let s = "pkgbase = foo\npkgver = 1\npkgrel = 1\nprovides = bar\npkgname = foo\npkgname = foo-extras\n";
         let e = parse(s).unwrap();
-        assert_eq!(e.provides, vec!["bar".to_string()]);
+        assert_eq!(e.provides, vec!["bar".to_owned()]);
         for p in &e.pkgnames {
             assert!(p.provides.is_empty());
         }
@@ -290,8 +290,8 @@ pkgname = bisq-daemon
         // arch-folding bypassed the per-section routing.
         let s = "pkgbase = foo\npkgver = 1\npkgrel = 1\npkgname = foo\ndepends_x86_64 = libfoo\nprovides_aarch64 = bar\n";
         let e = parse(s).unwrap();
-        assert!(e.depends.contains(&"libfoo".to_string()));
-        assert_eq!(e.pkgnames[0].provides, vec!["bar".to_string()]);
+        assert!(e.depends.contains(&"libfoo".to_owned()));
+        assert_eq!(e.pkgnames[0].provides, vec!["bar".to_owned()]);
         assert!(e.provides.is_empty());
     }
 

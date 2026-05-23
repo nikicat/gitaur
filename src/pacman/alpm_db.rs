@@ -14,9 +14,10 @@ use alpm::Alpm;
 use std::collections::HashMap;
 use tracing::{debug, instrument};
 
-/// "What does the user currently have installed that this AUR entry will
-/// displace?" — resolved across pkgname, `replaces`, and `provides`, with
-/// provenance preserved so callers can render the right label.
+/// What the user currently has installed that this AUR entry will displace.
+///
+/// Resolved across pkgname, `replaces`, and `provides`, with provenance
+/// preserved so callers can render the right label.
 ///
 /// `pkgname` is the localdb pkgname (typed [`PkgName`]); `version` is the
 /// pacman-recorded `pkgver-pkgrel` of that pkg (never the virtual version
@@ -107,7 +108,7 @@ impl PacmanIndex {
             installed.insert(name.clone(), Version::from(p.version()));
             for prov in p.provides() {
                 installed_providers
-                    .entry(prov.name().to_string())
+                    .entry(prov.name().to_owned())
                     .or_default()
                     .push(name.clone());
             }
@@ -124,7 +125,7 @@ impl PacmanIndex {
                     .or_insert_with(|| Version::from(p.version()));
                 for prov in p.provides() {
                     sync_providers
-                        .entry(prov.name().to_string())
+                        .entry(prov.name().to_owned())
                         .or_default()
                         .push(name.clone());
                 }

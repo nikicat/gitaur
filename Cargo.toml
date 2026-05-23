@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "yay-like AUR helper backed by the github.com/archlinux/aur mirror"
 license = "MIT"
+repository = "https://github.com/nikicat/gitaur"
+keywords = ["aur", "archlinux", "pacman", "package-manager"]
+categories = ["command-line-utilities"]
 
 [lib]
 name = "gitaur"
@@ -66,11 +69,24 @@ codegen-units = 1
 
 [lints.rust]
 unsafe_code = "deny"
+# Catch `pub` items that aren't actually reachable from the crate root —
+# pushes toward `pub(crate)` where wider visibility was unintentional.
+unreachable_pub = "warn"
+# Pairs with clippy::absolute_paths: flag redundant `crate::`/`self::` prefixes
+# on items already in scope via `use`.
+unused_qualifications = "warn"
+# Discarding a `Drop` type with `let _ =` usually means a forgotten guard,
+# lock, or file handle. Explicit `drop(x)` for the rare intentional case.
+let_underscore_drop = "warn"
 
 [lints.clippy]
 # Baseline groups.
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+# Pre-promoted lints — usually high-signal additions over pedantic.
+nursery = { level = "warn", priority = -1 }
+# Cargo.toml hygiene: duplicate deps, missing metadata fields.
+cargo = { level = "warn", priority = -1 }
 # Catch the specific issues feedback has flagged before.
 absolute_paths = "warn"          # forces `use` over `crate::a::b::c` chains
 needless_pass_by_value = "warn"
@@ -78,6 +94,19 @@ redundant_clone = "warn"
 explicit_iter_loop = "warn"
 explicit_into_iter_loop = "warn"
 unused_async = "warn"
+# Restriction picks — never want stray instances of these in committed code.
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+mem_forget = "warn"
+let_underscore_must_use = "warn"
+# Force `Arc::clone(&x)` over `x.clone()` so each Arc-ref bump is visible at
+# the call site — reinforces the "no Arc without real sharing" rule.
+clone_on_ref_ptr = "warn"
+# Consistent `to_owned` over `to_string` for `&str` → `String`.
+str_to_string = "warn"
+# Enforce the modern `foo.rs` + `foo/` layout (already in use) over `mod.rs`.
+mod_module_files = "warn"
 # Common pedantic noise we don't care about in a CLI.
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
@@ -87,3 +116,10 @@ return_self_not_must_use = "allow"
 struct_excessive_bools = "allow"
 # Don't fight the `_` underscore-bound naming when we're documenting params.
 similar_names = "allow"
+# Nursery lints that flag legitimate patterns in a CLI / would force `#[allow]`
+# sprinkles throughout the code without a real quality gain.
+option_if_let_else = "allow"  # rewrite-only, often less readable
+or_fun_call = "allow"         # false-positives on cheap functions
+redundant_pub_crate = "allow" # `pub(crate)` style preference
+# Pinning all transitive crate versions is rarely worth the churn for a CLI.
+multiple_crate_versions = "allow"

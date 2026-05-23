@@ -63,7 +63,7 @@ impl Config {
             return Ok(Self::default());
         }
         let text = std::fs::read_to_string(&path)?;
-        let cfg: Config = toml::from_str(&text)?;
+        let cfg: Self = toml::from_str(&text)?;
         Ok(cfg)
     }
 

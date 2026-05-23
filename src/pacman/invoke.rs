@@ -47,7 +47,7 @@ pub fn query_repo_upgrades() -> Result<Vec<PkgUpgrade>> {
             let avail = Version::from(spkg.version());
             if installed.is_outdated(&avail) {
                 upgrades.push(PkgUpgrade {
-                    repo: db.name().to_string(),
+                    repo: db.name().to_owned(),
                     name: PkgName::new(ipkg.name()),
                     old_ver: installed,
                     new_ver: avail,
@@ -84,7 +84,7 @@ pub fn exec_pacman(cfg: &Config, argv: &[String]) -> Result<u8> {
 }
 
 fn with_pacman(argv: &[String]) -> Vec<String> {
-    let mut v = vec!["pacman".to_string()];
+    let mut v = vec!["pacman".to_owned()];
     v.extend_from_slice(argv);
     v
 }

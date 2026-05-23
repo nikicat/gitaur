@@ -32,7 +32,7 @@ pub fn incremental_update(
             .refname
             .strip_prefix("refs/heads/")
             .unwrap_or(&u.refname)
-            .to_string();
+            .to_owned();
 
         // Ref deleted: drop the entry if we had one. `by_base`'s `Borrow<str>`
         // impl lets us look up by the raw branch name without allocating a

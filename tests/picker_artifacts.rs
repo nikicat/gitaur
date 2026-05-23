@@ -89,7 +89,7 @@ fn picker_redraw_preserves_lines_above() {
     writer.write_all(b"\r").ok();
     drop(writer);
     pump_for(&mut parser, &rx, Duration::from_secs(2));
-    let _ = child.wait();
+    child.wait().ok();
     let after_submit = screen_text(&parser);
 
     for i in 1..=SENTINEL_COUNT {
@@ -150,7 +150,7 @@ fn spawn_reader_thread(mut reader: Box<dyn Read + Send>) -> mpsc::Receiver<Vec<u
             match reader.read(&mut buf) {
                 Ok(n) if n > 0 => {
                     if let Some(f) = sink.as_mut() {
-                        let _ = std::io::Write::write_all(f, &buf[..n]);
+                        Write::write_all(f, &buf[..n]).ok();
                     }
                     if tx.send(buf[..n].to_vec()).is_err() {
                         break;

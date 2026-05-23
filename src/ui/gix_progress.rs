@@ -54,7 +54,7 @@ struct Shared {
 /// matching, no heuristic.
 fn unit_is_bytes(unit: &Unit) -> bool {
     let mut s = String::new();
-    let _ = unit.as_display_value().display_unit(&mut s, 0);
+    unit.as_display_value().display_unit(&mut s, 0).ok();
     s.is_empty()
 }
 
@@ -77,7 +77,8 @@ impl GixProgress {
 
     /// Clear all live bars. Intended for end-of-clone cleanup.
     pub fn finish(&self) {
-        if let Some(pb) = self.leaf.lock().unwrap().take() {
+        let taken = self.leaf.lock().unwrap().take();
+        if let Some(pb) = taken {
             pb.finish_and_clear();
         }
         self.shared.summary.finish_and_clear();
@@ -116,7 +117,7 @@ impl GixProgress {
             return;
         }
         let name = if self.own_name.is_empty() {
-            "phase".to_string()
+            "phase".to_owned()
         } else {
             self.own_name.clone()
         };
@@ -150,7 +151,8 @@ impl GixProgress {
 
 impl Drop for GixProgress {
     fn drop(&mut self) {
-        if let Some(pb) = self.leaf.lock().unwrap().take() {
+        let taken = self.leaf.lock().unwrap().take();
+        if let Some(pb) = taken {
             pb.finish_and_clear();
         }
     }
@@ -227,7 +229,7 @@ fn leaf_is_muted(name: &str) -> bool {
 fn summary_with_hint(name: &str) -> String {
     match phase_hint(name) {
         Some(hint) => format!("{name} {}", dim(format!("— {hint}"))),
-        None => name.to_string(),
+        None => name.to_owned(),
     }
 }
 
@@ -321,7 +323,7 @@ impl GixProgressTrait for GixProgress {
         self.set_summary(summary_with_hint(&name));
         self.own_name.clone_from(&name);
         if let Some(pb) = self.lock_leaf().as_ref() {
-            pb.set_prefix(leaf_label(&name).to_string());
+            pb.set_prefix(leaf_label(&name).to_owned());
         }
     }
 

@@ -43,7 +43,7 @@ static COLOR: OnceLock<ColorMode> = OnceLock::new();
 
 /// Install the process-wide color mode. First caller wins.
 pub fn set_color(mode: ColorMode) {
-    let _ = COLOR.set(mode);
+    COLOR.set(mode).ok();
 }
 
 pub fn color_on() -> bool {
@@ -99,12 +99,13 @@ pub fn note(msg: &str) {
     }
 }
 
-/// Render `text` as supporting/secondary UI text — mid-gray (color 244)
-/// italic. Reads clearly without competing with the bright primary text.
-/// Use for hint annotations, last-built timestamps, anything the eye should
-/// *not* lock onto.
+/// Render `text` as supporting/secondary UI text — mid-gray (color 244) italic.
+///
+/// Reads clearly without competing with the bright primary text. Use for
+/// hint annotations, last-built timestamps, anything the eye should *not*
+/// lock onto.
 pub fn dim(text: impl AsRef<str>) -> console::StyledObject<String> {
-    style(text.as_ref().to_string()).color256(244).italic()
+    style(text.as_ref().to_owned()).color256(244).italic()
 }
 
 #[cfg(test)]

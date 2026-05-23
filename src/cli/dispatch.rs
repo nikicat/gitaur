@@ -48,7 +48,7 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
         // every gitaur-owned flag (with its doc comment) plus the operations
         // section from `after_help`. No reason to maintain a separate copy.
         use clap::CommandFactory;
-        let _ = Cli::command().print_help();
+        Cli::command().print_help().ok();
         println!();
         return Ok(0);
     }

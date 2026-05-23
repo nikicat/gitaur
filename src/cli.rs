@@ -1,8 +1,10 @@
-//! Top-level CLI entry. Pre-scans argv for the pacman operation letter; if
-//! it's an operation gitaur doesn't own (`Q`/`R`/`T`/`D`/`F`/`U`), we skip
-//! clap entirely and forward raw to `pacman` so unknown pacman short flags
-//! aren't rejected. Otherwise clap parses our gitaur-owned flags + supplies
-//! auto-generated `--help`/`--version`.
+//! Top-level CLI entry.
+//!
+//! Pre-scans argv for the pacman operation letter; if it's an operation
+//! gitaur doesn't own (`Q`/`R`/`T`/`D`/`F`/`U`), we skip clap entirely and
+//! forward raw to `pacman` so unknown pacman short flags aren't rejected.
+//! Otherwise clap parses our gitaur-owned flags + supplies auto-generated
+//! `--help`/`--version`.
 
 use crate::config::Config;
 use crate::error::Result;
@@ -145,7 +147,7 @@ mod tests {
     use super::*;
 
     fn argv(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| (*s).to_string()).collect()
+        parts.iter().map(|s| (*s).to_owned()).collect()
     }
 
     #[test]

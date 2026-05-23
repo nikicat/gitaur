@@ -129,7 +129,7 @@ pub fn resolve(
 
     let direct_set: HashSet<String> = targets
         .iter()
-        .map(|t| secondary::strip_version_constraint(t).to_string())
+        .map(|t| secondary::strip_version_constraint(t).to_owned())
         .collect();
     for t in targets {
         // Widen the raw CLI/picker string into a typed `PkgTarget` — the
@@ -139,7 +139,7 @@ pub fn resolve(
 
     let mut queue: Vec<(String, bool)> = targets.iter().map(|t| (t.clone(), true)).collect();
     while let Some((target, is_direct)) = queue.pop() {
-        let bare = secondary::strip_version_constraint(&target).to_string();
+        let bare = secondary::strip_version_constraint(&target).to_owned();
         let source = resolve_target_source(by, pac, &bare, is_direct);
         match source {
             Source::Installed(concrete) => {
@@ -171,14 +171,14 @@ pub fn resolve(
                 let runtime: Vec<String> = entry
                     .depends
                     .iter()
-                    .map(|d| secondary::strip_version_constraint(d).to_string())
+                    .map(|d| secondary::strip_version_constraint(d).to_owned())
                     .filter(|s| !s.is_empty())
                     .collect();
                 let build_time: Vec<String> = entry
                     .makedepends
                     .iter()
                     .chain(entry.checkdepends.iter())
-                    .map(|d| secondary::strip_version_constraint(d).to_string())
+                    .map(|d| secondary::strip_version_constraint(d).to_owned())
                     .filter(|s| !s.is_empty())
                     .collect();
                 let all: Vec<String> = runtime.iter().chain(build_time.iter()).cloned().collect();
@@ -201,7 +201,7 @@ pub fn resolve(
 
     // Cycle check over the full dep graph — fails fast if `depends` forms a
     // cycle even when makedepends alone would be acyclic.
-    let _ = topo::sort(&all_edges, &visited_aur)?;
+    topo::sort(&all_edges, &visited_aur)?;
 
     // Rewrite make_edges entries from pkgnames → AUR pkgbases. Drop entries
     // pointing at repo/installed targets (irrelevant for build ordering).
@@ -321,7 +321,7 @@ mod tests {
             pac.sync_versions.insert((*n).into(), "1.0-1".into());
         }
         let cfg = default_config();
-        let targets: Vec<String> = targets.iter().map(|s| (*s).to_string()).collect();
+        let targets: Vec<String> = targets.iter().map(|s| (*s).to_owned()).collect();
         resolve(&cfg, &idx, Some(&by), &pac, &targets)
     }
 
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn pure_repo_target_lands_in_direct_repo() {
         let plan = run(&["foo"], vec![], &["foo"]).unwrap();
-        assert_eq!(plan.direct_repo, vec!["foo".to_string()]);
+        assert_eq!(plan.direct_repo, vec!["foo".to_owned()]);
         assert!(plan.transitive_repo.is_empty());
         assert!(plan.aur_strata.is_empty());
     }
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn version_constraint_on_repo_target_strips() {
         let plan = run(&["foo>=1.2"], vec![], &["foo"]).unwrap();
-        assert_eq!(plan.direct_repo, vec!["foo".to_string()]);
+        assert_eq!(plan.direct_repo, vec!["foo".to_owned()]);
     }
 
     #[test]
@@ -355,14 +355,14 @@ mod tests {
     #[test]
     fn aur_with_no_deps_single_stratum() {
         let plan = run(&["a"], vec![entry("a", &[], &[])], &[]).unwrap();
-        assert_eq!(plan.aur_strata, vec![vec!["a".to_string()]]);
+        assert_eq!(plan.aur_strata, vec![vec!["a".to_owned()]]);
     }
 
     #[test]
     fn aur_with_repo_makedep_pulls_transitive_repo() {
         let plan = run(&["a"], vec![entry("a", &[], &["bash"])], &["bash"]).unwrap();
-        assert_eq!(plan.aur_strata, vec![vec!["a".to_string()]]);
-        assert_eq!(plan.transitive_repo, vec!["bash".to_string()]);
+        assert_eq!(plan.aur_strata, vec![vec!["a".to_owned()]]);
+        assert_eq!(plan.transitive_repo, vec!["bash".to_owned()]);
         assert!(plan.direct_repo.is_empty());
     }
 
@@ -380,7 +380,7 @@ mod tests {
         assert_eq!(plan.aur_strata.len(), 1);
         let mut s0 = plan.aur_strata[0].clone();
         s0.sort();
-        assert_eq!(s0, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(s0, vec!["a".to_owned(), "b".to_owned()]);
     }
 
     #[test]
@@ -394,7 +394,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             plan.aur_strata,
-            vec![vec!["b".to_string()], vec!["a".to_string()]]
+            vec![vec!["b".to_owned()], vec!["a".to_owned()]]
         );
     }
 
@@ -414,9 +414,9 @@ mod tests {
         assert_eq!(
             plan.aur_strata,
             vec![
-                vec!["c".to_string()],
-                vec!["b".to_string()],
-                vec!["a".to_string()],
+                vec!["c".to_owned()],
+                vec!["b".to_owned()],
+                vec!["a".to_owned()],
             ]
         );
     }
@@ -436,11 +436,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.aur_strata.len(), 3);
-        assert_eq!(plan.aur_strata[0], vec!["a".to_string()]);
+        assert_eq!(plan.aur_strata[0], vec!["a".to_owned()]);
         let mut mid = plan.aur_strata[1].clone();
         mid.sort();
-        assert_eq!(mid, vec!["b".to_string(), "c".to_string()]);
-        assert_eq!(plan.aur_strata[2], vec!["d".to_string()]);
+        assert_eq!(mid, vec!["b".to_owned(), "c".to_owned()]);
+        assert_eq!(plan.aur_strata[2], vec!["d".to_owned()]);
     }
 
     #[test]
@@ -457,7 +457,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             plan.aur_strata,
-            vec![vec!["b".to_string()], vec!["a".to_string()]]
+            vec![vec!["b".to_owned()], vec!["a".to_owned()]]
         );
     }
 
@@ -477,7 +477,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             plan.aur_strata,
-            vec![vec!["helper-pkg".to_string()], vec!["client".to_string()]]
+            vec![vec!["helper-pkg".to_owned()], vec!["client".to_owned()]]
         );
     }
 
@@ -499,7 +499,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.aur_strata.len(), 1);
-        assert_eq!(plan.aur_strata[0], vec!["helper-pkg".to_string()]);
+        assert_eq!(plan.aur_strata[0], vec!["helper-pkg".to_owned()]);
     }
 
     // ---- direct/transitive partitioning ---------------------------------
@@ -509,7 +509,7 @@ mod tests {
         // foo is a repo pkg and also a makedep of an AUR pkg a. User asked
         // for foo explicitly → direct_repo (not transitive_repo).
         let plan = run(&["foo", "a"], vec![entry("a", &[], &["foo"])], &["foo"]).unwrap();
-        assert_eq!(plan.direct_repo, vec!["foo".to_string()]);
+        assert_eq!(plan.direct_repo, vec!["foo".to_owned()]);
         assert!(plan.transitive_repo.is_empty());
     }
 
@@ -517,7 +517,7 @@ mod tests {
     fn unsolicited_repo_dep_is_transitive() {
         let plan = run(&["a"], vec![entry("a", &[], &["foo"])], &["foo"]).unwrap();
         assert!(plan.direct_repo.is_empty());
-        assert_eq!(plan.transitive_repo, vec!["foo".to_string()]);
+        assert_eq!(plan.transitive_repo, vec!["foo".to_owned()]);
     }
 
     // ---- provides resolution: the `paru` regression --------------------
@@ -541,12 +541,12 @@ mod tests {
         pac.sync_providers
             .insert("libalpm.so".into(), vec!["pacman".into()]);
         let cfg = default_config();
-        let plan = resolve(&cfg, &idx, Some(&by), &pac, &["paru".to_string()]).unwrap();
+        let plan = resolve(&cfg, &idx, Some(&by), &pac, &["paru".to_owned()]).unwrap();
 
-        assert_eq!(plan.aur_strata, vec![vec!["paru".to_string()]]);
+        assert_eq!(plan.aur_strata, vec![vec!["paru".to_owned()]]);
         let mut t = plan.transitive_repo.clone();
         t.sort();
-        assert_eq!(t, vec!["pacman".to_string(), "rust".to_string()]);
+        assert_eq!(t, vec!["pacman".to_owned(), "rust".to_owned()]);
         assert!(plan.direct_repo.is_empty());
     }
 
@@ -569,9 +569,9 @@ mod tests {
         pac.sync_providers
             .insert("cargo".into(), vec!["rust".into()]);
         let cfg = default_config();
-        let plan = resolve(&cfg, &idx, Some(&by), &pac, &["paru".to_string()]).unwrap();
+        let plan = resolve(&cfg, &idx, Some(&by), &pac, &["paru".to_owned()]).unwrap();
 
-        assert_eq!(plan.aur_strata, vec![vec!["paru".to_string()]]);
+        assert_eq!(plan.aur_strata, vec![vec!["paru".to_owned()]]);
         assert!(plan.transitive_repo.is_empty());
         assert!(plan.direct_repo.is_empty());
     }
@@ -597,11 +597,11 @@ mod tests {
             &idx,
             Some(&by),
             &pac,
-            &["rust".to_string(), "paru".to_string()],
+            &["rust".to_owned(), "paru".to_owned()],
         )
         .unwrap();
 
-        assert_eq!(plan.direct_repo, vec!["rust".to_string()]);
+        assert_eq!(plan.direct_repo, vec!["rust".to_owned()]);
         assert!(
             plan.transitive_repo.is_empty(),
             "rust must not appear in both buckets, got transitive {:?}",
@@ -626,8 +626,8 @@ mod tests {
         pac.installed
             .insert("brave-bin".into(), "1:1.90.121-1".into());
         let cfg = default_config();
-        let plan = resolve(&cfg, &idx, Some(&by), &pac, &["brave-bin".to_string()]).unwrap();
-        assert_eq!(plan.aur_strata, vec![vec!["brave-bin".to_string()]]);
+        let plan = resolve(&cfg, &idx, Some(&by), &pac, &["brave-bin".to_owned()]).unwrap();
+        assert_eq!(plan.aur_strata, vec![vec!["brave-bin".to_owned()]]);
     }
 
     /// Transitive deps that are already installed must stay dropped — only
@@ -643,9 +643,9 @@ mod tests {
         let mut pac = PacmanIndex::default();
         pac.installed.insert("helper".into(), "1.0-1".into());
         let cfg = default_config();
-        let plan = resolve(&cfg, &idx, Some(&by), &pac, &["client".to_string()]).unwrap();
+        let plan = resolve(&cfg, &idx, Some(&by), &pac, &["client".to_owned()]).unwrap();
         // Only client should be in the build plan; helper stays satisfied.
-        assert_eq!(plan.aur_strata, vec![vec!["client".to_string()]]);
+        assert_eq!(plan.aur_strata, vec![vec!["client".to_owned()]]);
     }
 
     // ---- cycles ---------------------------------------------------------

@@ -92,10 +92,12 @@ where
     Ok(order)
 }
 
-/// Group nodes into Kahn-order strata: stratum 0 has nodes with no edges to
-/// other in-graph nodes; stratum N+1 has nodes whose remaining in-graph edges
-/// all point to strata `≤ N`. Returns an error containing the offending node
-/// set if `edges` contains a cycle restricted to `nodes`.
+/// Group nodes into Kahn-order strata.
+///
+/// Stratum 0 has nodes with no edges to other in-graph nodes; stratum N+1
+/// has nodes whose remaining in-graph edges all point to strata `≤ N`.
+/// Returns an error containing the offending node set if `edges` contains
+/// a cycle restricted to `nodes`.
 ///
 /// The `edges` map is interpreted the same way as in [`sort`]: `edges[a]`
 /// lists nodes that must be built **before** `a`. Edges pointing to names

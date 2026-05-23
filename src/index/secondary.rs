@@ -423,7 +423,7 @@ mod tests {
     fn search_filters_by_regex() {
         let idx = fixture();
         let s = Secondary::build(&idx);
-        let re = regex::Regex::new("mingw").unwrap();
+        let re = regex::Regex::new("ming[wx]").unwrap();
         let hits = s.search(&idx, &[re]);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].pkgbase, "mingw-w64-gcc");

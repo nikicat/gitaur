@@ -71,7 +71,7 @@ fn bootstrap_clone_lands_refs_under_refs_heads() {
         .collect();
 
     assert!(
-        heads.contains(&"pkg-a".to_string()) && heads.contains(&"pkg-b".to_string()),
+        heads.contains(&"pkg-a".to_owned()) && heads.contains(&"pkg-b".to_owned()),
         "expected pkg-a and pkg-b under refs/heads/, got: {heads:?}",
     );
     assert!(

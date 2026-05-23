@@ -91,7 +91,7 @@ fn pkgbase_only_target_expands_with_pkgbase_target_and_direct_pkgnames() {
     );
     assert_eq!(
         expanded.targets,
-        vec!["bisq".to_string()],
+        vec!["bisq".to_owned()],
         "resolver target is the pkgbase (avoids by_name aliasing)",
     );
     assert_eq!(
@@ -157,7 +157,7 @@ fn split_pkgbase_partial_selection_constrains_build_pipeline() {
 
     assert_eq!(
         expanded.targets,
-        vec!["linux-headers-multi".to_string()],
+        vec!["linux-headers-multi".to_owned()],
         "pkgbase string is what the resolver sees",
     );
     assert_eq!(
@@ -239,7 +239,7 @@ fn provides_target_rewrites_to_providing_pkgname_with_selection() {
     );
     assert_eq!(
         expanded.targets,
-        vec!["bisq".to_string()],
+        vec!["bisq".to_owned()],
         "resolver target is the pkgbase; `by_pkgbase` pins to the right entry",
     );
     assert_eq!(
@@ -328,7 +328,7 @@ fn pkgname_collision_with_another_pkgbase_does_not_leak_into_plan() {
 
     assert_eq!(
         expanded.targets,
-        vec!["commit-mono-font".to_string()],
+        vec!["commit-mono-font".to_owned()],
         "must pass the pkgbase string; pkgnames would alias to the wrong entry via by_name",
     );
     assert_eq!(
@@ -386,6 +386,6 @@ fn pkgname_target_skips_selector_even_when_pkgbase_could_match() {
     };
     let expanded =
         expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["cower"]), &mut select).unwrap();
-    assert_eq!(expanded.targets, vec!["cower".to_string()]);
+    assert_eq!(expanded.targets, vec!["cower".to_owned()]);
     assert_eq!(calls, 0, "selector must not run on pkgname hits");
 }

@@ -4,9 +4,11 @@ use crate::names::{PkgBase, PkgName};
 use crate::version::Version;
 use rkyv::{Archive, Deserialize, Serialize};
 
-/// One pkgname's metadata inside a pkgbase. Split-package PKGBUILDs override
-/// some fields per-pkgname; pkgbase-level fields on [`IndexEntry`] apply to
-/// every pkgname implicitly and are not duplicated here.
+/// One pkgname's metadata inside a pkgbase.
+///
+/// Split-package PKGBUILDs override some fields per-pkgname; pkgbase-level
+/// fields on [`IndexEntry`] apply to every pkgname implicitly and are not
+/// duplicated here.
 ///
 /// Today this only carries pkgname-scoped `provides`, because that's the one
 /// field gitaur's resolver needs to disambiguate split packages (e.g. yay-
@@ -116,7 +118,7 @@ impl IndexFile {
     pub const FORMAT_VERSION: u32 = 3;
 
     /// Empty in-memory index. Used when no on-disk file exists yet.
-    pub fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self {
             format_version: Self::FORMAT_VERSION,
             mirror_head_oid: [0u8; 20],

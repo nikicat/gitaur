@@ -11,10 +11,11 @@ use crate::paths;
 use crate::ui;
 use tracing::{instrument, warn};
 
-/// `gitaur -Qu` — show the union of pacman-repo and AUR upgrade candidates
-/// in one flat, severity-sorted table grouped by `repo` column. Read-only
-/// and unprivileged (no sudo), so safe to call both as the bare `-Qu` and
-/// as a preview before `-Syu` runs.
+/// `gitaur -Qu` — show the union of pacman-repo and AUR upgrade candidates.
+///
+/// One flat, severity-sorted table grouped by `repo` column. Read-only and
+/// unprivileged (no sudo), so safe to call both as the bare `-Qu` and as a
+/// preview before `-Syu` runs.
 #[instrument]
 pub fn cmd_query_upgrades(devel: bool) -> Result<u8> {
     ui::upgrade_table(&collect_upgrade_plan(devel)?);

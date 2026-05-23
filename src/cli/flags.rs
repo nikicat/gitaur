@@ -30,7 +30,7 @@ pub fn parse(argv: &[String]) -> PacFlags {
     let mut f = PacFlags::default();
     for a in argv {
         if let Some(rest) = a.strip_prefix("--") {
-            f.long.push(rest.to_string());
+            f.long.push(rest.to_owned());
         } else if let Some(rest) = a.strip_prefix('-') {
             let mut chars = rest.chars();
             if let Some(c) = chars.next() {
@@ -60,7 +60,7 @@ mod tests {
         assert_eq!(f.op, Some('S'));
         assert_eq!(f.op_letters, vec!['y', 'u']);
         assert!(f.has_long("noconfirm"));
-        assert_eq!(f.positional, vec!["vim".to_string()]);
+        assert_eq!(f.positional, vec!["vim".to_owned()]);
     }
 
     #[test]
@@ -68,6 +68,6 @@ mod tests {
         let f = parse(&["-S".into(), "-y".into(), "foo".into()]);
         assert!(f.has('S'));
         assert!(f.has('y'));
-        assert_eq!(f.positional, vec!["foo".to_string()]);
+        assert_eq!(f.positional, vec!["foo".to_owned()]);
     }
 }

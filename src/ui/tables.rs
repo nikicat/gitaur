@@ -104,9 +104,11 @@ pub fn upgrade_table(plan: &[PkgUpgrade]) {
     eprintln!();
 }
 
-/// User's choice from the interactive `-Syu` picker. Pkgnames split by where
-/// the caller needs them: `repo` joins `pacman -Syu`'s subset, `repo_skipped`
-/// becomes the `--ignore=` list, `aur` is the queue for `cmd_install`.
+/// User's choice from the interactive `-Syu` picker.
+///
+/// Pkgnames split by where the caller needs them: `repo` joins `pacman
+/// -Syu`'s subset, `repo_skipped` becomes the `--ignore=` list, `aur` is
+/// the queue for `cmd_install`.
 ///
 /// `aur` carries the full [`PkgUpgrade`] (not just pkgname) so the user's
 /// installed-version + intent survive the picker → install boundary. The
@@ -126,7 +128,7 @@ pub struct UpgradeSelection {
 }
 
 impl UpgradeSelection {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.repo.is_empty() && self.aur.is_empty()
     }
 }
@@ -141,7 +143,7 @@ struct UpgradePickerTheme<'a> {
 }
 
 impl<'a> UpgradePickerTheme<'a> {
-    fn new(colored: HashMap<&'a str, String>) -> Self {
+    const fn new(colored: HashMap<&'a str, String>) -> Self {
         Self { colored }
     }
 }
@@ -495,9 +497,9 @@ mod tests {
     #[test]
     fn install_table_smoke() {
         let rows = vec![
-            ("short".to_string(), "1.0-1".to_string()),
-            ("much-longer-name".to_string(), "1.2.3-4".to_string()),
-            ("provides-only".to_string(), String::new()),
+            ("short".to_owned(), "1.0-1".to_owned()),
+            ("much-longer-name".to_owned(), "1.2.3-4".to_owned()),
+            ("provides-only".to_owned(), String::new()),
         ];
         install_table("Test installs", &rows);
         install_table("Empty", &[]);
@@ -542,7 +544,7 @@ mod tests {
         let mut colored = HashMap::new();
         colored.insert(
             "extra  vim",
-            "\u{1b}[38;5;244mextra\u{1b}[0m  vim".to_string(),
+            "\u{1b}[38;5;244mextra\u{1b}[0m  vim".to_owned(),
         );
         let theme = UpgradePickerTheme::new(colored);
 

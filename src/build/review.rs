@@ -1,5 +1,6 @@
-//! PKGBUILD review UX: label by installed-vs-new (install / upgrade / reinstall),
-//! and on upgrade show a colored diff against the AUR commit whose `.SRCINFO`
+//! PKGBUILD review UX: label by install/upgrade/reinstall, then show the diff.
+//!
+//! On upgrade, the diff is colored against the AUR commit whose `.SRCINFO`
 //! declares the currently-installed version. Falls back to the full PKGBUILD
 //! on fresh installs, reinstalls, and upgrades where no historic commit
 //! matches (typical for VCS pkgbases whose `pkgver()` overrides the static
@@ -44,11 +45,13 @@ pub enum Outcome {
     Skipped,
 }
 
-/// Drive the review prompt loop for one pkgbase. `counterpart` is the
-/// pacman-localdb pkg this build will displace — `None` for a fresh install,
-/// otherwise carrying the installed pkgname, its version, and how the AUR
-/// entry referenced it (pkgname / replaces / provides). `new_ver` is the
-/// version the AUR index reports for this pkgbase.
+/// Drive the review prompt loop for one pkgbase.
+///
+/// `counterpart` is the pacman-localdb pkg this build will displace — `None`
+/// for a fresh install, otherwise carrying the installed pkgname, its
+/// version, and how the AUR entry referenced it (pkgname / replaces /
+/// provides). `new_ver` is the version the AUR index reports for this
+/// pkgbase.
 #[instrument(skip(mirror, wt), fields(pkgbase = %pkgbase))]
 pub fn review(
     mirror: &MirrorRepo,
@@ -269,7 +272,7 @@ fn fallback_note(
 /// Numeric bound to display in the `scope` prefix. `NotInLineage`
 /// callers use `walked` instead; this is only consulted for
 /// `BoundExceeded`/`Found`.
-fn history_scan_bound_for(outcome: HistorySearch) -> usize {
+const fn history_scan_bound_for(outcome: HistorySearch) -> usize {
     match outcome {
         HistorySearch::BoundExceeded { bound } => bound,
         HistorySearch::Found(_) | HistorySearch::NotInLineage { .. } => 0,
@@ -318,7 +321,7 @@ fn show_diff(
     match status.code() {
         Some(0 | 1) => Ok(()),
         Some(c) => Err(Error::other(format!("git diff exited {c}"))),
-        None => Err(Error::other("git diff terminated by signal".to_string())),
+        None => Err(Error::other("git diff terminated by signal".to_owned())),
     }
 }
 
@@ -383,9 +386,10 @@ pub enum HistorySearch {
 }
 
 /// Walk the AUR branch back from `head_oid` looking for the commit whose
-/// `.SRCINFO` declares `installed_ver`. Returns a [`HistorySearch`] tag
-/// distinguishing match / branch-exhausted / bound-hit so the caller can
-/// pick wording that's actually true.
+/// `.SRCINFO` declares `installed_ver`.
+///
+/// Returns a [`HistorySearch`] tag distinguishing match / branch-exhausted /
+/// bound-hit so the caller can pick wording that's actually true.
 ///
 /// VCS pkgbases never match here because their static pkgver is overridden
 /// by `pkgver()` at build time. Very stale installs may sit further back
@@ -820,7 +824,7 @@ mod highlight {
     /// Render PKGBUILD source. Always ends with a single `\n` so the prompt
     /// that follows lands on a fresh line; passes `false` to the terminal
     /// escaper so the theme's background never paints over the user's bg.
-    pub fn pkgbuild(text: &str) -> String {
+    pub(super) fn pkgbuild(text: &str) -> String {
         render(text, ui::color_on())
     }
 

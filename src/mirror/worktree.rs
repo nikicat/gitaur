@@ -105,12 +105,13 @@ pub fn prune(mirror: &MirrorRepo, _branch: &str, dest: &Path) -> Result<()> {
     if dest.exists() {
         force_remove(dest)?;
     }
-    let _ = run_git(&[
+    run_git(&[
         "-C".as_ref(),
         mirror.path.as_os_str(),
         "worktree".as_ref(),
         "prune".as_ref(),
-    ]);
+    ])
+    .ok();
     Ok(())
 }
 
@@ -214,10 +215,10 @@ mod tests {
     fn make_bare(dir: &Path) -> (PathBuf, gix::Repository) {
         let src = dir.join("src");
         let bare = dir.join("bare");
-        std::fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&src).unwrap();
         git(&["init", "-q", "-b", "main"], &src);
-        std::fs::write(src.join("PKGBUILD"), "pkgname=foo\n").unwrap();
-        std::fs::write(src.join("README"), "hello\n").unwrap();
+        fs::write(src.join("PKGBUILD"), "pkgname=foo\n").unwrap();
+        fs::write(src.join("README"), "hello\n").unwrap();
         git(&["add", "-A"], &src);
         git(&["commit", "-q", "-m", "init"], &src);
         git(
@@ -272,7 +273,7 @@ mod tests {
 
         // OID round-trip: the admin HEAD must point at the same commit we
         // peeled via gix.
-        let head_in_admin = std::fs::read_to_string(bare.join("worktrees/foo/HEAD")).unwrap();
+        let head_in_admin = fs::read_to_string(bare.join("worktrees/foo/HEAD")).unwrap();
         assert!(head_in_admin
             .trim_end()
             .starts_with(&wt.head_oid.to_string()));

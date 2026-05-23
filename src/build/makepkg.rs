@@ -98,10 +98,10 @@ fn tee<R: Read, W: Write>(mut reader: R, mut writer: W, log: &Mutex<File>) {
             Ok(0) | Err(_) => return,
             Ok(n) => {
                 let slice = &buf[..n];
-                let _ = writer.write_all(slice);
-                let _ = writer.flush();
+                writer.write_all(slice).ok();
+                writer.flush().ok();
                 if let Ok(mut f) = log.lock() {
-                    let _ = f.write_all(slice);
+                    f.write_all(slice).ok();
                 }
             }
         }

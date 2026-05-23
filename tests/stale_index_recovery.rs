@@ -114,7 +114,7 @@ fn cmd_refresh_rebuilds_when_existing_index_is_unreadable() {
     let bisq = idx.entries.iter().find(|e| e.pkgbase == "bisq").unwrap();
     assert_eq!(bisq.pkgnames.len(), 1);
     assert_eq!(bisq.pkgnames[0].name, "bisq-desktop");
-    assert_eq!(bisq.pkgnames[0].provides, vec!["bisq".to_string()]);
+    assert_eq!(bisq.pkgnames[0].provides, vec!["bisq".to_owned()]);
 }
 
 #[test]

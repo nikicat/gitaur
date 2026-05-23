@@ -1,6 +1,8 @@
-//! Tracing subscriber setup. A console layer (env-filter, default `warn`) plus
-//! a per-invocation file layer at `debug` written to `state_dir()/logs/`. Old
-//! log files are pruned to [`KEEP_LOGS`] most recent on every startup.
+//! Tracing subscriber setup.
+//!
+//! A console layer (env-filter, default `warn`) plus a per-invocation file
+//! layer at `debug` written to `state_dir()/logs/`. Old log files are pruned
+//! to [`KEEP_LOGS`] most recent on every startup.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -24,9 +26,10 @@ const KEEP_LOGS: usize = 10;
 const FILE_LOG_FILTER: &str =
     "debug,h2=info,hyper=info,hyper_util=info,reqwest=info,rustls=info,rustls_platform_verifier=info";
 
-/// Initialize tracing. Best-effort: console logging always works; if the log
-/// file can't be created we print a warning to stderr and continue without
-/// file logging. Returns the log file path when file logging is active.
+/// Initialize tracing. Returns the log file path when file logging is active.
+///
+/// Best-effort: console logging always works; if the log file can't be
+/// created we print a warning to stderr and continue without file logging.
 pub fn init() -> Option<PathBuf> {
     let console_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
@@ -102,7 +105,7 @@ fn prune_old_logs_in(dir: &Path, keep: usize) -> std::io::Result<()> {
         .collect();
     entries.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
     for (_, path) in entries.into_iter().skip(keep) {
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
     Ok(())
 }

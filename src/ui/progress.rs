@@ -10,9 +10,11 @@ pub(super) const SPIN_TICKS: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ";
 /// Standard cadence for `enable_steady_tick`.
 pub const TICK_PERIOD: Duration = Duration::from_millis(80);
 
-/// Enable a steady tick at the canonical cadence. Always call this **after**
-/// `MultiProgress::add(pb)` so the tick thread targets the `MultiProgress`
-/// draw target — calling it before `add` produces phantom duplicate rows.
+/// Enable a steady tick at the canonical cadence.
+///
+/// Always call this **after** `MultiProgress::add(pb)` so the tick thread
+/// targets the `MultiProgress` draw target — calling it before `add`
+/// produces phantom duplicate rows.
 pub fn tick(pb: &ProgressBar) {
     pb.enable_steady_tick(TICK_PERIOD);
 }
@@ -22,7 +24,7 @@ pub fn bar_bytes(total: u64, label: &str) -> ProgressBar {
     let pb = ProgressBar::new(total);
     pb.set_draw_target(ProgressDrawTarget::hidden());
     pb.set_style(bytes_active_style());
-    pb.set_prefix(label.to_string());
+    pb.set_prefix(label.to_owned());
     pb
 }
 
@@ -32,7 +34,7 @@ pub fn bar_bytes_streaming(label: &str) -> ProgressBar {
     let pb = ProgressBar::no_length();
     pb.set_draw_target(ProgressDrawTarget::hidden());
     pb.set_style(bytes_pending_style());
-    pb.set_prefix(label.to_string());
+    pb.set_prefix(label.to_owned());
     pb
 }
 
@@ -80,7 +82,7 @@ pub fn bar_count(total: u64, label: &str) -> ProgressBar {
         pb.set_style(count_active_style());
         pb
     };
-    pb.set_prefix(label.to_string());
+    pb.set_prefix(label.to_owned());
     pb
 }
 
@@ -110,9 +112,10 @@ fn count_active_style() -> ProgressStyle {
     .progress_chars("##-")
 }
 
-/// Spinner with a fixed label, an elapsed-time indicator, and a streaming
-/// `wide_msg` body. Used for the libgit2 sideband channel (server-side
-/// `remote: Counting objects...` etc.) and other long-running phases.
+/// Spinner with a fixed label, elapsed-time indicator, and streaming `wide_msg` body.
+///
+/// Used for the libgit2 sideband channel (server-side `remote: Counting
+/// objects...` etc.) and other long-running phases.
 ///
 /// Caller should `mp.add(pb)` then `ui::tick(&pb)` so the spinner animates.
 pub fn bar_sideband(label: &str) -> ProgressBar {
@@ -123,7 +126,7 @@ pub fn bar_sideband(label: &str) -> ProgressBar {
             .unwrap()
             .tick_chars(SPIN_TICKS),
     );
-    pb.set_prefix(label.to_string());
+    pb.set_prefix(label.to_owned());
     pb
 }
 
