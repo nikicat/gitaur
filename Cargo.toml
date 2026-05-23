@@ -137,6 +137,11 @@ empty_enum_variants_with_brackets = "warn" # `Foo()` over `Foo`
 empty_structs_with_brackets = "warn"
 infinite_loop = "warn"                     # `loop {}` with no exit
 exit = "warn"                              # `std::process::exit` bypasses Drop
+# Style / hygiene additions cleared by the matching commit.
+shadow_same = "warn"            # `let x = x;` rebind-noop
+use_debug = "warn"              # `{:?}` in user-facing output
+unneeded_field_pattern = "warn" # all fields `_` → use `..`
+needless_raw_strings = "warn"   # `r"…"` without escapes
 # TODO: lints that match the project's style but are noisy today. Re-probe
 # (`cargo clippy ... -W clippy::<lint>`) periodically and adopt once the
 # count is fixable in one sitting.

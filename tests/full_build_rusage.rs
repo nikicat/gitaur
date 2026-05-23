@@ -118,7 +118,7 @@ fn full_build_does_not_mmap_per_branch() {
 
     eprintln!("=== full_build over {N_BRANCHES} branches ===");
     eprintln!("entries:               {}", idx.entries.len());
-    eprintln!("wall:                  {elapsed:?}");
+    eprintln!("wall:                  {:.3}s", elapsed.as_secs_f64());
     eprintln!("user time (µs):        {utime_us}");
     eprintln!("system time (µs):      {stime_us}");
     eprintln!("minor page faults:     {minflt}");

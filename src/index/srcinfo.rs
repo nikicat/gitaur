@@ -159,7 +159,7 @@ mod tests {
     use super::*;
     use crate::names::PkgName;
 
-    const COWER: &str = r"
+    const COWER: &str = "
 pkgbase = cower
 	pkgdesc = A simple AUR agent with a pretentious name
 	pkgver = 17
@@ -177,7 +177,7 @@ pkgbase = cower
 pkgname = cower
 ";
 
-    const SPLIT: &str = r"
+    const SPLIT: &str = "
 pkgbase = mingw-w64-gcc
 	pkgver = 13.2.0
 	pkgrel = 1
@@ -196,7 +196,7 @@ pkgname = mingw-w64-gcc-fortran
     /// 3-way split where one pkgname declares `provides`. Mirrors the real
     /// AUR `bisq` entry, which is the regression target for per-pkgname
     /// provides attribution.
-    const BISQ: &str = r"
+    const BISQ: &str = "
 pkgbase = bisq
 	pkgver = 1.9.22
 	pkgrel = 2

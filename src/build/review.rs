@@ -230,7 +230,7 @@ fn fallback_note(
     };
     let coda = match outcome {
         HistorySearch::Found(_) => "",
-        HistorySearch::NotInLineage { walked: _ } => {
+        HistorySearch::NotInLineage { .. } => {
             // Branch fully walked; bumping won't help. Most common cause for
             // provides-tier mismatches: install came from a different source
             // (former extra/community repo, a renamed pkgbase, a different
@@ -244,7 +244,7 @@ fn fallback_note(
                 }
             }
         }
-        HistorySearch::BoundExceeded { bound: _ } => {
+        HistorySearch::BoundExceeded { .. } => {
             " — raise `review_history_scan_max` in config.toml if the install \
              predates the search bound"
         }

@@ -57,7 +57,7 @@ pub fn full_build(cfg: &Config, mirror: &MirrorRepo) -> Result<IndexFile> {
     // replace this with a per-iter `gix::open(&path)`: it reparses config +
     // scans refs per branch and dominates wall time (see WORKER_REPO_OPENS).
     let repo_source = Mutex::new(mirror.repo.clone());
-    let entries: Vec<IndexEntry> = pool.install(|| {
+    let mut entries: Vec<IndexEntry> = pool.install(|| {
         refs.par_iter()
             .map_init(
                 || repo_source.lock().expect("repo_source poisoned").clone(),
@@ -82,7 +82,6 @@ pub fn full_build(cfg: &Config, mirror: &MirrorRepo) -> Result<IndexFile> {
     });
 
     pb.finish_with_message("done");
-    let mut entries = entries;
     entries.sort_by(|a, b| a.pkgbase.cmp(&b.pkgbase));
 
     let mirror_head = head_oid(&mirror.repo).unwrap_or([0u8; 20]);
