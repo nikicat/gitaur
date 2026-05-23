@@ -3,14 +3,14 @@
 # pattern (source lib.sh; bootstrap; reset_state; gitaur …; assert_*).
 #
 # PKGBUILD-driven cases:
-#   - epoch_dominates_version.sh         (test-epoch vs older installed)
 #   - provides_virtual_resolves.sh       (`-S myvirt` → test-provides-virt)
 #   - install_hook_runs.sh               (post_install scriptlet)
-#   - vcs_pkg_skipped_without_devel.sh   (test-vcs-git ignored by -Syu)
-#   - vcs_pkg_picked_up_with_devel.sh    (--devel forces rebuild)
 #   - cycle_in_aur_deps_errors.sh        (test-cycle-a ↔ test-cycle-b)
 #   - split_pkg_with_intra_dep.sh        (transitive within split)
 #   - split_pkg_partial_install.sh       (`-S test-split-core` alone)
+#   (graduated to smoke: epoch_dominates_version → smoke/40,
+#    vcs_pkg_skipped_without_devel → smoke/41,
+#    vcs_pkg_picked_up_with_devel → smoke/42)
 #
 # Resolver / planner:
 #   - dep_constraint_versioned.sh        (`depends=('foo>=2')`)
@@ -20,10 +20,10 @@
 #   - asdeps_overrides_direct.sh         (`-S --asdeps` even for direct)
 #
 # State / idempotency:
-#   - rebuild_cached_skips.sh            (.pkg.tar.zst at exact ver → no makepkg)
 #   - rebuild_after_artifact_deleted.sh  (cached .pkg.tar.zst removed → rebuild)
 #   - declined_install_keeps_artifacts.sh
 #   - sc_clears_worktrees.sh             (-Sc)
+#   (graduated to smoke: rebuild_cached_skips → smoke/43)
 #
 # Refresh:
 #   - sy_incremental_fetch.sh            (delta only)

@@ -1,0 +1,17 @@
+# Foreign baseline for cases 6 and 9 of the counterpart-resolution matrix
+# (`docs/ARCHITECTURE.md#resolution-case-matrix`): the legacy pkgname the
+# user has installed before the maintainer reshaped their pkgbase. Models
+# the dotnet-runtime case where the legacy name was a virtual provided by
+# the prior pkgbase. Staged as a `.pkg.tar.zst` under /srv/foreign-pkgs/
+# — never published into the mock AUR, so the resolver must walk the new
+# pkgbase's pkgbase-level `provides=` to bridge.
+pkgname=test-pkgbase-provides-legacy
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: legacy half of a pkgbase-level-provides pair'
+arch=('any')
+license=('MIT')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

@@ -1,0 +1,18 @@
+# Case 11 of the counterpart-resolution matrix: the load-bearing guard that
+# `Pkgname` provenance beats `Replaces` even when the maintainer left a
+# stale `replaces=` of the pkgname they still ship. Without that priority,
+# the review screen would label this as a rename (with `[replaces …]`) and
+# `find_installed_commit` would chase the wrong history — a regression
+# bait for any future expand-side optimisation that short-circuits before
+# `prepare_one` runs the priority walk.
+pkgname=test-stale-replaces
+pkgver=2.0
+pkgrel=1
+pkgdesc='gitaur test fixture: stale replaces of own pkgname'
+arch=('any')
+license=('MIT')
+replaces=('test-stale-replaces')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

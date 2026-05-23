@@ -1,0 +1,36 @@
+# Cases 6 and 9 of the counterpart-resolution matrix
+# (`docs/ARCHITECTURE.md#resolution-case-matrix`): a split pkgbase that
+# declares `provides=` at the PKGBUILD top level (outside any
+# `package_*()` function). For split packages, makepkg --printsrcinfo
+# emits this as a `provides = …` line UNDER `pkgbase = …` and BEFORE
+# any `pkgname = …` section — which lands in `IndexEntry.provides`
+# (pkgbase-level, tier 3b in the priority hierarchy), not in any
+# `Pkgname.provides` (scoped, tier 3a).
+#
+# No existing fixture exercises that scoping. Case 5 (smoke 31) covers
+# the scoped variant via the non-split test-provides-rename-new
+# fixture, but its provides line lives inside the implicit pkgname
+# section. The end-to-end smoke for the pkgbase-level path needs this
+# split-pkg shape with no package_*-local provides=.
+#
+# Smoke 38 exercises case 6: `-S <legacy>` (the user types the foreign
+# pkg's name; expand routes via by_provides; hint = legacy).
+# Smoke 39 exercises case 9: `-S <pkgbase>` (the user types the
+# pkgbase; expand routes directly; no hint). Both must end at
+# via=Provides with the legacy pkgname as the counterpart.
+pkgbase=test-pkgbase-provides-new
+pkgname=(test-pkgbase-provides-new-a test-pkgbase-provides-new-b)
+pkgver=2.0
+pkgrel=1
+pkgdesc='gitaur test fixture: split pkgbase with pkgbase-level provides'
+arch=('any')
+license=('MIT')
+provides=('test-pkgbase-provides-legacy')
+
+package_test-pkgbase-provides-new-a() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/test-pkgbase-provides-new-a/marker"
+}
+
+package_test-pkgbase-provides-new-b() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/test-pkgbase-provides-new-b/marker"
+}

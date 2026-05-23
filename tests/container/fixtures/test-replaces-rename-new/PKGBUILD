@@ -1,0 +1,20 @@
+# New half of case 4 — explicit `replaces=` rename across pkgbases.
+# Distinct pkgname from its legacy partner, with the legacy name in
+# `replaces=` so the counterpart helper resolves the install through
+# the Replaces tier (priority 2, between Pkgname and Provides). The
+# review header must read:
+#   upgrade: test-replaces-rename-new v_old → v_new  [replaces test-replaces-rename-legacy]
+# and the fallback note flavour for the diff base must be the
+# lineage-mismatch one ("no AUR commit of P produced installed X"),
+# not the bounded-walk flavour.
+pkgname=test-replaces-rename-new
+pkgver=2.0
+pkgrel=1
+pkgdesc='gitaur test fixture: new half of a replaces-rename pair'
+arch=('any')
+license=('MIT')
+replaces=('test-replaces-rename-legacy')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

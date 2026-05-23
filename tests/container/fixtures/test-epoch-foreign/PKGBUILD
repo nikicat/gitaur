@@ -1,0 +1,17 @@
+# Foreign baseline for smoke 40. pkgname=test-epoch (intentionally
+# matches the AUR fixture's pkgname) at pkgver=0.1 with NO epoch, so
+# the AUR fixture's `epoch=2` version dominates via libalpm vercmp.
+# Staged as a `.pkg.tar.zst` under /srv/foreign-pkgs/ — the AUR fixture
+# is never built into a tarball at image-bake time, so the file
+# `test-epoch-0.1-1-any.pkg.tar.zst` is unambiguously the foreign one
+# and `install_foreign test-epoch` picks it up.
+pkgname=test-epoch
+pkgver=0.1
+pkgrel=1
+pkgdesc='gitaur test fixture: non-epoch baseline for epoch-dominates upgrade'
+arch=('any')
+license=('MIT')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

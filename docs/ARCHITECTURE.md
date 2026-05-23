@@ -405,23 +405,25 @@ Notation:
   the pkg).
 - *canonical* = installed via gitaur, so its pkgbase is in the AUR mirror
   and pkgname = the canonical AUR name.
-- "—" in Smoke = correct in code (unit-tested in `alpm_db::tests` and
-  `resolver::pkgbase_expand::tests`) but no end-to-end fixture yet.
+- "—" in Smoke would mean correct in code (unit-tested in
+  `alpm_db::tests` and `resolver::pkgbase_expand::tests`) but no
+  end-to-end fixture yet. Every row currently has a Smoke entry — keep
+  it that way when adding new behaviour.
 
 | #   | User's localdb                                          | `P` declares                                 | Command + hint origin                | Provenance               | Review header                                          | Smoke |
 | --- | ------------------------------------------------------- | -------------------------------------------- | ------------------------------------ | ------------------------ | ------------------------------------------------------ | ----- |
 | 1   | nothing                                                 | `pkgname = P`                                | `-S P` · hint none                   | `None`                   | `install: P v_new`                                     | 03    |
 | 2   | `P @ v_new` (canonical)                                 | `pkgname = P`                                | `-S P` · hint = P                    | `Pkgname` (v == v_new)   | `reinstall: P v_new`                                   | 02    |
 | 3   | `P @ v_old` (canonical)                                 | `pkgname = P`                                | `-S P` · hint = P                    | `Pkgname`                | `upgrade: P v_old → v_new`                             | many  |
-| 4   | `X @ v_old` (foreign), P ≠ X                            | `replaces = (X)`, pkgname = Q                | `-S Q` · hint derived (Q)            | `Replaces`               | `upgrade: P v_old → v_new  [replaces X]`               | —     |
+| 4   | `X @ v_old` (foreign), P ≠ X                            | `replaces = (X)`, pkgname = Q                | `-S Q` · hint derived (Q)            | `Replaces`               | `upgrade: P v_old → v_new  [replaces X]`               | 36    |
 | 5   | `X @ v_old` (foreign), P ≠ X                            | `pkgname = Q`, Q has `provides = (X)`        | `-S X` · hint derived (X via provides) | `Provides` (scoped)    | `upgrade: P v_old → v_new  [provides X]`               | 31    |
-| 6   | `X @ v_old` (foreign), P ≠ X                            | pkgbase-level `provides = (X)`               | `-S X` · hint derived (X via provides) | `Provides` (pkgbase)   | `upgrade: P v_old → v_new  [provides X]`               | —     |
-| 7   | `X @ v_old` (foreign), only X installed                 | `provides = (X, Y)`                          | `-S X` · hint derived (X)            | `Provides` (single hit)  | `upgrade: P v_old → v_new  [provides X]`               | —     |
+| 6   | `X @ v_old` (foreign), P ≠ X                            | pkgbase-level `provides = (X)`               | `-S X` · hint derived (X via provides) | `Provides` (pkgbase)   | `upgrade: P v_old → v_new  [provides X]`               | 38    |
+| 7   | `X @ v_old` (foreign), only X installed                 | `provides = (X, Y)`                          | `-S X` · hint derived (X)            | `Provides` (single hit)  | `upgrade: P v_old → v_new  [provides X]`               | 37    |
 | 8a  | `X @ v_alt`, `Y @ v_old` both foreign                   | `provides = (X, Y)` (X first)                | `-S Y` · hint = Y                    | `Provides` (hint → Y)    | `upgrade: P v_old → v_new  [provides Y]`               | 32    |
 | 8b  | `X @ v_new`, `Y @ v_old` both foreign                   | `provides = (X, Y)` (X first)                | `-Syu` picker row → hint = Y         | `Provides` (hint → Y)    | `upgrade: P v_old → v_new  [provides Y]`               | 33    |
-| 9   | `X @ v_old` (foreign)                                   | pkgbase-level `provides = (X)`               | `-S P` · hint none (user typed pkgbase) | `Provides` (pkgbase)  | `upgrade: P v_old → v_new  [provides X]`               | —     |
+| 9   | `X @ v_old` (foreign)                                   | pkgbase-level `provides = (X)`               | `-S P` · hint none (user typed pkgbase) | `Provides` (pkgbase)  | `upgrade: P v_old → v_new  [provides X]`               | 39    |
 | 10  | one sibling X of split P (canonical)                    | split `P` with pkgnames X, Y, Z              | `-S X` · hint = X                    | `Pkgname` (X)            | `upgrade: P v_old → v_new`                             | 06    |
-| 11  | `X @ v_old` (canonical, P = X)                          | pkgname = X **and** `replaces = (X)` (stale) | `-S X` · hint = X                    | `Pkgname` beats stale Replaces | `upgrade: P v_old → v_new` (no `[replaces …]`)   | —     |
+| 11  | `X @ v_old` (canonical, P = X)                          | pkgname = X **and** `replaces = (X)` (stale) | `-S X` · hint = X                    | `Pkgname` beats stale Replaces | `upgrade: P v_old → v_new` (no `[replaces …]`)   | 35    |
 | 12  | virtual V installed (canonical)                         | split P, Q declares `provides = (V)` (scoped) | `-S V` · hint derived (V)           | `Provides` (scoped, single sibling) | `upgrade: P v_old → v_new  [provides V]`    | 24    |
 
 Rules the matrix encodes:
@@ -444,21 +446,6 @@ Rules the matrix encodes:
 - **`-Syu` is the only place a hint comes from outside the spec string**
   (case 8b): the picker carries `PkgUpgrade.name`, which `cmd_install`
   wraps as `Target::with_hint(spec, name)`.
-
-Gaps worth filling (no end-to-end smoke yet, listed so the matrix can
-graduate to "every row has a Smoke entry"):
-
-- **Case 4**: `replaces=` rename across pkgbases. Maintainer renamed a
-  pkg and declared `replaces=` in the new PKGBUILD; user still has the
-  old one.
-- **Cases 6 / 7 / 9**: pkgbase-level `provides=` paths. The scoped variant
-  (case 5) is well-pinned by test 31; the pkgbase-level equivalent shares
-  most code but no fixture exercises the `.SRCINFO` `provides` line that
-  lives outside any `pkgname =` block.
-- **Case 11**: the Pkgname-beats-stale-Replaces guard. Unit-tested in
-  `alpm_db::tests`; a container fixture would catch end-to-end regressions
-  (e.g. a future expand-side optimisation that short-circuits before
-  prepare_one runs the priority walk).
 
 The matrix is intentionally scoped to *counterpart resolution* (the
 `prepare_one` → `counterpart_with_hint` decision). Sibling concerns like

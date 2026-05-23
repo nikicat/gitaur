@@ -1,0 +1,17 @@
+# Foreign baseline for case 4 of the counterpart-resolution matrix
+# (`docs/ARCHITECTURE.md#resolution-case-matrix`): the legacy pkgname the
+# user has installed before the maintainer renamed the pkgbase. Staged
+# as a `.pkg.tar.zst` under /srv/foreign-pkgs/ — never published into
+# the mock AUR, so the resolver sees it as a foreign install with no
+# direct AUR mapping. The partner fixture `test-replaces-rename-new`
+# carries `replaces=('test-replaces-rename-legacy')` to bridge them.
+pkgname=test-replaces-rename-legacy
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: legacy half of a replaces-rename pair'
+arch=('any')
+license=('MIT')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}
