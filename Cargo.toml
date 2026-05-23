@@ -110,6 +110,43 @@ clone_on_ref_ptr = "warn"
 str_to_string = "warn"
 # Enforce the modern `foo.rs` + `foo/` layout (already in use) over `mod.rs`.
 mod_module_files = "warn"
+# Error-handling discipline — keep error provenance and don't paper over
+# fallible paths with panic.
+try_err = "warn"            # forbids `Err(e)?` antipattern
+map_err_ignore = "warn"     # `.map_err(|_| _)` drops error context
+unwrap_in_result = "warn"   # unwrap inside a Result-returning fn
+panic_in_result_fn = "warn" # same idea for panic!
+# Code-hygiene picks: each one corresponds to a roll-your-own pattern that
+# has a cleaner stdlib idiom.
+manual_assert = "warn"                   # `if !x { panic!() }` → `assert!`
+if_then_some_else_none = "warn"          # → `bool::then(...)`
+format_push_string = "warn"              # `s.push_str(&format!(…))` → `write!`
+pathbuf_init_then_push = "warn"
+verbose_file_reads = "warn"              # `read_to_string` over manual loops
+unnecessary_self_imports = "warn"        # `use foo::{self}` is just `use foo`
+rest_pat_in_fully_bound_structs = "warn" # superfluous `..` in struct patterns
+redundant_type_annotations = "warn"
+as_underscore = "warn"                   # opaque `x as _` casts
+string_add = "warn"                      # `s + &t` chain
+# Type / API hazards — concurrency footguns and stray-bracket noise.
+mutex_atomic = "warn"                      # `Mutex<bool>` → `AtomicBool`
+rc_buffer = "warn"                         # `Rc<String>` → `Rc<str>`
+rc_mutex = "warn"                          # `Rc<Mutex<_>>` (use Arc if shared)
+assertions_on_constants = "warn"           # `assert!(true)` etc.
+empty_enum_variants_with_brackets = "warn" # `Foo()` over `Foo`
+empty_structs_with_brackets = "warn"
+infinite_loop = "warn"                     # `loop {}` with no exit
+exit = "warn"                              # `std::process::exit` bypasses Drop
+# TODO: lints that match the project's style but are noisy today. Re-probe
+# (`cargo clippy ... -W clippy::<lint>`) periodically and adopt once the
+# count is fixable in one sitting.
+# - unwrap_used (271): mostly tests; would need test-only #[allow] or
+#   migrating production unwraps to .expect("invariant").
+# - expect_used (44): we use .expect("…") for documented invariants;
+#   migration path is unclear.
+# - print_stdout (22), print_stderr (34): scope to `ui::` once that module
+#   is the only printing surface — currently bin/lib both call println!.
+# - question_mark_used (165): silly lint; skip.
 # Common pedantic noise we don't care about in a CLI. Hit counts measured
 # (2026-05) so we know what each allow is actually suppressing: drop any whose
 # count goes to zero on a refactor, and reconsider any that grow large.
