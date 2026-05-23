@@ -49,13 +49,15 @@ glob = "0.3"
 syntect = { version = "5.3", default-features = false, features = [
   "default-fancy",
 ] }
+# makepkg drops colour when stdout isn't a TTY (`[[ -t 2 ]]` check). We spawn it
+# under a pty so the build output stays coloured while we still tee it into
+# `<worktree>/build.log`. Also used by `tests/picker_artifacts.rs` to drive the
+# picker under a real terminal.
+portable-pty = "0.9"
 
 [dev-dependencies]
 tempfile = "3"
 nix = { version = "0.31", features = ["resource"] }
-# Drive `examples/picker_e2e` under a real PTY and assert against the parsed
-# screen grid in `tests/picker_artifacts.rs`.
-portable-pty = "0.9"
 vt100 = "0.16"
 
 [profile.release]

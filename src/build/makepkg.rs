@@ -1,16 +1,28 @@
-//! Spawn `makepkg` with deterministic PKGDEST/SRCDEST/BUILDDIR placement.
+//! Spawn `makepkg` under a pty so its `[[ -t 2 ]]` colour check passes.
 //!
-//! makepkg's stdout/stderr is tee'd: live bytes still flow to the terminal so
-//! the user sees the build progress, and a verbatim copy is captured to
-//! `<worktree>/build.log` for post-mortem debugging when a build fails inside
-//! a multi-pkgbase run.
+//! Under plain pipes makepkg goes monochrome — same gate as `ls`, `grep`, etc.
+//! With a pty the child sees a terminal on stdout/stderr and emits the usual
+//! coloured "==>" headers and curl progress bars. The bytes from the pty
+//! master are tee'd live to the user's stdout and to `<worktree>/build.log`
+//! for post-mortem debugging.
+//!
+//! Under a pty stdout and stderr merge into one stream — the same way the
+//! user would see them running makepkg by hand. tracing output continues to
+//! go to the parent's real stderr.
+//!
+//! stdin is not forwarded: the default args include `-d --noconfirm --needed`
+//! and sudo for `pacman -U` is consolidated outside this function (see
+//! `feedback_defer_consolidate_sudo`), so makepkg shouldn't read stdin during
+//! a build. If something ever does (e.g. a PGP key prompt), it will hang
+//! visibly rather than silently — surface for a future fix.
 
 use crate::config::Config;
 use crate::error::{Error, Result};
+use console::Term;
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
 use tracing::{debug, info, instrument};
@@ -30,32 +42,43 @@ pub fn run(cfg: &Config, worktree: &Path) -> Result<PathBuf> {
     let log_path = worktree.join("build.log");
     let log_file = File::create(&log_path)?;
 
-    let mut cmd = Command::new(&cfg.makepkg_path);
-    cmd.current_dir(worktree)
-        .env("PKGDEST", worktree)
-        .env("SRCDEST", worktree.join("src-cache"))
-        .env("BUILDDIR", worktree)
-        .args(&cfg.makepkg_args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    debug!(args = ?cfg.makepkg_args, cwd = %worktree.display(), log = %log_path.display(), "spawning makepkg");
+    let pty = native_pty_system()
+        .openpty(pty_size())
+        .map_err(|e| Error::Build(format!("openpty: {e}")))?;
 
-    let mut child = cmd.spawn()?;
-    let stdout = child.stdout.take().expect("piped");
-    let stderr = child.stderr.take().expect("piped");
+    let mut cmd = CommandBuilder::new(&cfg.makepkg_path);
+    cmd.cwd(worktree);
+    cmd.env("PKGDEST", worktree);
+    cmd.env("SRCDEST", worktree.join("src-cache"));
+    cmd.env("BUILDDIR", worktree);
+    for arg in &cfg.makepkg_args {
+        cmd.arg(arg);
+    }
+    debug!(args = ?cfg.makepkg_args, cwd = %worktree.display(), log = %log_path.display(), "spawning makepkg under pty");
 
-    // Scoped threads so both pumps complete before the function returns and
-    // the log file drop closes cleanly. No Arc: `&Mutex<File>` is enough
-    // when we borrow it on the parent stack.
+    let mut child = pty
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| Error::Build(format!("spawn makepkg: {e}")))?;
+    // Drop our slave handle so master reads see EOF the instant the child
+    // (the only other holder of the slave fds) exits.
+    drop(pty.slave);
+
+    let reader = pty
+        .master
+        .try_clone_reader()
+        .map_err(|e| Error::Build(format!("pty reader: {e}")))?;
+
     let log = Mutex::new(log_file);
     thread::scope(|s| {
-        s.spawn(|| tee(stdout, std::io::stdout(), &log));
-        s.spawn(|| tee(stderr, std::io::stderr(), &log));
+        s.spawn(|| tee(reader, std::io::stdout(), &log));
     });
 
-    let status = child.wait()?;
+    let status = child
+        .wait()
+        .map_err(|e| Error::Build(format!("wait makepkg: {e}")))?;
     if !status.success() {
-        let code = status.code().unwrap_or(1);
+        let code = status.exit_code();
         return Err(Error::Build(format!(
             "makepkg exited with status {code} (log: {})",
             log_path.display(),
@@ -65,9 +88,9 @@ pub fn run(cfg: &Config, worktree: &Path) -> Result<PathBuf> {
     Ok(log_path)
 }
 
-/// Pump bytes from `reader` to both `writer` (terminal) and the shared log
-/// file. Read in raw chunks rather than by line so `\r`-terminated progress
-/// bars (curl, wget) reach the terminal as makepkg writes them.
+/// Pump bytes from the pty master to the user's terminal and the build log.
+/// Read in raw chunks rather than by line so ANSI colour sequences and
+/// `\r`-terminated progress bars (curl, wget) reach the terminal byte-for-byte.
 fn tee<R: Read, W: Write>(mut reader: R, mut writer: W, log: &Mutex<File>) {
     let mut buf = [0u8; 8192];
     loop {
@@ -82,5 +105,18 @@ fn tee<R: Read, W: Write>(mut reader: R, mut writer: W, log: &Mutex<File>) {
                 }
             }
         }
+    }
+}
+
+/// Match the parent terminal size so progress bars and `==>` separators
+/// wrap the way the user expects. Falls back to a sensible default when
+/// stdout isn't a terminal (e.g. output redirected to a file).
+fn pty_size() -> PtySize {
+    let (rows, cols) = Term::stdout().size();
+    PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
     }
 }
