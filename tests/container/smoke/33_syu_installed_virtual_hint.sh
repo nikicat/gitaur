@@ -69,8 +69,8 @@ grep -qF 'via=Some(Provides)' <<<"$trace_line" || {
 # The crucial assertion: counterpart is test-syu-hint-older (what the
 # user actually saw in the picker and selected), NOT test-syu-hint-newer
 # (the declaration-order winner under the unhinted walk).
-grep -qF 'installed=Some("test-syu-hint-older")' <<<"$trace_line" || {
-    echo "expected installed=Some(\"test-syu-hint-older\") — hint failed to reach counterpart" >&2
+grep -qF 'installed=Some(PkgName("test-syu-hint-older"))' <<<"$trace_line" || {
+    echo "expected installed=Some(PkgName(\"test-syu-hint-older\")) — hint failed to reach counterpart" >&2
     echo "  got: $trace_line" >&2
     _dump >&2
     exit 1
@@ -80,7 +80,7 @@ grep -qF 'installed=Some("test-syu-hint-older")' <<<"$trace_line" || {
 # as the resolved counterpart. Without the fix, the trace shows
 # test-syu-hint-newer (first declared, installed). Make that an outright
 # failure rather than relying only on the positive assertion above.
-if grep -qF 'installed=Some("test-syu-hint-newer")' <<<"$trace_line"; then
+if grep -qF 'installed=Some(PkgName("test-syu-hint-newer"))' <<<"$trace_line"; then
     echo "REGRESSION: counterpart resolved to test-syu-hint-newer (the first-declared" >&2
     echo "  installed provides). The hint plumbing didn't reach prepare_one. Trace:" >&2
     echo "  $trace_line" >&2

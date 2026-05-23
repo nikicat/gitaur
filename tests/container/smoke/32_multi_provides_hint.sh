@@ -64,8 +64,8 @@ grep -qF 'via=Some(Provides)' <<<"$trace_line" || {
 
 # The crucial assertion: counterpart is legacy-b (what the user typed),
 # NOT legacy-a (declaration-order winner under the unhinted walk).
-grep -qF 'installed=Some("test-multi-provides-legacy-b")' <<<"$trace_line" || {
-    echo "expected installed=Some(\"test-multi-provides-legacy-b\") — hint failed to steer counterpart" >&2
+grep -qF 'installed=Some(PkgName("test-multi-provides-legacy-b"))' <<<"$trace_line" || {
+    echo "expected installed=Some(PkgName(\"test-multi-provides-legacy-b\")) — hint failed to steer counterpart" >&2
     echo "  got: $trace_line" >&2
     _dump >&2
     exit 1

@@ -39,8 +39,9 @@ strip_ansi() { sed 's/\x1b\[[0-9;]*m//g' "$1"; }
 #   * via = Provides (not Pkgname, not None — Pkgname would mean we matched
 #     test-provides-rename-new in the localdb, which it isn't; None would
 #     mean we missed the legacy install entirely, which is the bug).
-#   * installed = Some("test-provides-rename-legacy") — the legacy pkgname
-#     is what the counterpart helper resolved.
+#   * installed = Some(PkgName("test-provides-rename-legacy")) — the legacy
+#     pkgname is what the counterpart helper resolved. (PkgName is a typed
+#     newtype with its own Debug impl, which the trace emits verbatim.)
 trace_line=$(strip_ansi "$LAST_STDERR" | grep 'auto-proceeding.*test-provides-rename-new' | head -1 || true)
 [[ -n "$trace_line" ]] || {
     echo "missing auto-proceeding trace for test-provides-rename-new" >&2
@@ -55,8 +56,8 @@ grep -qF 'via=Some(Provides)' <<<"$trace_line" || {
     _dump >&2
     exit 1
 }
-grep -qF 'installed=Some("test-provides-rename-legacy")' <<<"$trace_line" || {
-    echo "expected installed=Some(\"test-provides-rename-legacy\") in trace, got: $trace_line" >&2
+grep -qF 'installed=Some(PkgName("test-provides-rename-legacy"))' <<<"$trace_line" || {
+    echo "expected installed=Some(PkgName(\"test-provides-rename-legacy\")) in trace, got: $trace_line" >&2
     _dump >&2
     exit 1
 }
