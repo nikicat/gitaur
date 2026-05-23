@@ -53,12 +53,13 @@ src/
 │   ├── classify.rs  installed / repo / aur(idx) / missing
 │   └── topo.rs      sort (flat) + strata (Kahn layered)
 │
-├── build/           the install pipeline
-│   ├── mod.rs       cmd_install + cmd_sysupgrade + cmd_clean
-│   ├── makepkg.rs   spawn makepkg with PKGDEST/SRCDEST/BUILDDIR pinned
+├── build.rs         the install pipeline entry: cmd_install + cmd_clean
+├── build/
+│   ├── makepkg.rs   spawn makepkg under a pty (preserves colour) with PKGDEST/SRCDEST/BUILDDIR pinned
 │   ├── install.rs   .pkg.tar.zst discovery + pkgname extraction
 │   ├── review.rs    PKGBUILD diff review prompt
-│   └── state_db.rs  SQLite: last-built commit_oid per pkgbase
+│   ├── print.rs     review-table + install-summary rendering
+│   └── upgrade.rs   collect_upgrade_plan: foreign-localdb × AUR index walk
 │
 ├── pacman/          everything that wraps pacman / libalpm
 │   ├── alpm_db.rs   open Alpm + PacmanIndex snapshot (sync DBs)
@@ -386,6 +387,85 @@ make future bugs of this shape visible in the trace:
 
 Neither warning changes behaviour: the picked counterpart is unchanged.
 They exist so the trace tells the truth about a heuristic-driven choice.
+
+#### Resolution case matrix
+
+The provenance hierarchy + header table + hint plumbing above are the
+mechanics; the matrix below is the *enumeration* — every distinct shape
+`(user's localdb state, new pkgbase's declarations)` the resolver routes,
+the provenance it returns, the review header it produces, and which test
+(if any) pins the cell. New behaviour belongs in a new row; new tests
+fill the "Smoke" column.
+
+Notation:
+- `P` is the new AUR pkgbase being built. `Q` is one of its pkgnames.
+- `X`, `Y`, `V` are pkgnames the user has installed; `v_old < v_new`.
+- *foreign* = in pacman's localdb but absent from every sync DB. Models
+  the dotnet-runtime case (installed via a prior source no longer shipping
+  the pkg).
+- *canonical* = installed via gitaur, so its pkgbase is in the AUR mirror
+  and pkgname = the canonical AUR name.
+- "—" in Smoke = correct in code (unit-tested in `alpm_db::tests` and
+  `resolver::pkgbase_expand::tests`) but no end-to-end fixture yet.
+
+| #   | User's localdb                                          | `P` declares                                 | Command + hint origin                | Provenance               | Review header                                          | Smoke |
+| --- | ------------------------------------------------------- | -------------------------------------------- | ------------------------------------ | ------------------------ | ------------------------------------------------------ | ----- |
+| 1   | nothing                                                 | `pkgname = P`                                | `-S P` · hint none                   | `None`                   | `install: P v_new`                                     | 03    |
+| 2   | `P @ v_new` (canonical)                                 | `pkgname = P`                                | `-S P` · hint = P                    | `Pkgname` (v == v_new)   | `reinstall: P v_new`                                   | 02    |
+| 3   | `P @ v_old` (canonical)                                 | `pkgname = P`                                | `-S P` · hint = P                    | `Pkgname`                | `upgrade: P v_old → v_new`                             | many  |
+| 4   | `X @ v_old` (foreign), P ≠ X                            | `replaces = (X)`, pkgname = Q                | `-S Q` · hint derived (Q)            | `Replaces`               | `upgrade: P v_old → v_new  [replaces X]`               | —     |
+| 5   | `X @ v_old` (foreign), P ≠ X                            | `pkgname = Q`, Q has `provides = (X)`        | `-S X` · hint derived (X via provides) | `Provides` (scoped)    | `upgrade: P v_old → v_new  [provides X]`               | 31    |
+| 6   | `X @ v_old` (foreign), P ≠ X                            | pkgbase-level `provides = (X)`               | `-S X` · hint derived (X via provides) | `Provides` (pkgbase)   | `upgrade: P v_old → v_new  [provides X]`               | —     |
+| 7   | `X @ v_old` (foreign), only X installed                 | `provides = (X, Y)`                          | `-S X` · hint derived (X)            | `Provides` (single hit)  | `upgrade: P v_old → v_new  [provides X]`               | —     |
+| 8a  | `X @ v_alt`, `Y @ v_old` both foreign                   | `provides = (X, Y)` (X first)                | `-S Y` · hint = Y                    | `Provides` (hint → Y)    | `upgrade: P v_old → v_new  [provides Y]`               | 32    |
+| 8b  | `X @ v_new`, `Y @ v_old` both foreign                   | `provides = (X, Y)` (X first)                | `-Syu` picker row → hint = Y         | `Provides` (hint → Y)    | `upgrade: P v_old → v_new  [provides Y]`               | 33    |
+| 9   | `X @ v_old` (foreign)                                   | pkgbase-level `provides = (X)`               | `-S P` · hint none (user typed pkgbase) | `Provides` (pkgbase)  | `upgrade: P v_old → v_new  [provides X]`               | —     |
+| 10  | one sibling X of split P (canonical)                    | split `P` with pkgnames X, Y, Z              | `-S X` · hint = X                    | `Pkgname` (X)            | `upgrade: P v_old → v_new`                             | 06    |
+| 11  | `X @ v_old` (canonical, P = X)                          | pkgname = X **and** `replaces = (X)` (stale) | `-S X` · hint = X                    | `Pkgname` beats stale Replaces | `upgrade: P v_old → v_new` (no `[replaces …]`)   | —     |
+| 12  | virtual V installed (canonical)                         | split P, Q declares `provides = (V)` (scoped) | `-S V` · hint derived (V)           | `Provides` (scoped, single sibling) | `upgrade: P v_old → v_new  [provides V]`    | 24    |
+
+Rules the matrix encodes:
+
+- **Pkgname > Replaces > Provides**. Case 11 is the load-bearing guard
+  on Pkgname-vs-Replaces: a maintainer's stale `replaces=` of a pkgname
+  they still ship must not hide the literal Pkgname match (would
+  otherwise mislabel an upgrade as a rename and chase the wrong
+  history).
+- **Scoped Provides > pkgbase-level Provides** within the Provides tier
+  (3a > 3b in the priority table). Lets the matrix collapse split-pkg
+  scoped provides (case 12) and pkgbase-level provides (cases 6, 7, 9)
+  to the same `via=Provides` provenance without losing attribution.
+- **Hint overrides declaration order in Provides, never overrides a
+  higher-tier match**. A stale or unmatched hint falls back to the
+  unhinted walk — it cannot null a real Pkgname / Replaces win.
+- **Same version is "reinstall" only for Pkgname provenance** (case 2).
+  Same version under Replaces / Provides is still a cross-identity
+  upgrade transition and shows as `upgrade:` plus the `[…]` annotation.
+- **`-Syu` is the only place a hint comes from outside the spec string**
+  (case 8b): the picker carries `PkgUpgrade.name`, which `cmd_install`
+  wraps as `Target::with_hint(spec, name)`.
+
+Gaps worth filling (no end-to-end smoke yet, listed so the matrix can
+graduate to "every row has a Smoke entry"):
+
+- **Case 4**: `replaces=` rename across pkgbases. Maintainer renamed a
+  pkg and declared `replaces=` in the new PKGBUILD; user still has the
+  old one.
+- **Cases 6 / 7 / 9**: pkgbase-level `provides=` paths. The scoped variant
+  (case 5) is well-pinned by test 31; the pkgbase-level equivalent shares
+  most code but no fixture exercises the `.SRCINFO` `provides` line that
+  lives outside any `pkgname =` block.
+- **Case 11**: the Pkgname-beats-stale-Replaces guard. Unit-tested in
+  `alpm_db::tests`; a container fixture would catch end-to-end regressions
+  (e.g. a future expand-side optimisation that short-circuits before
+  prepare_one runs the priority walk).
+
+The matrix is intentionally scoped to *counterpart resolution* (the
+`prepare_one` → `counterpart_with_hint` decision). Sibling concerns like
+expand-side pkgbase pinning when a pkgname collides across two pkgbases
+(test 25) and the pacman-fast-path that bypasses AUR entirely for
+sync-repo names (test 11) live one layer up in the resolver and don't
+change the cells above.
 
 ### Why per-worker `gix::Repository` clones in `full_build`?
 

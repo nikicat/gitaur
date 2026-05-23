@@ -263,8 +263,10 @@ wrong-API trap (`pkgver < pkgver` is meaningless).
 ## Pointers for further reading
 
 - [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — the design doc for gitaur's
-  internals, including the counterpart resolution table and the
-  build-pipeline walkthrough.
+  internals, including the counterpart resolution table, the
+  [resolution case matrix](ARCHITECTURE.md#resolution-case-matrix) (every
+  installed-state × pkgbase-declares shape with its test pointer), and
+  the build-pipeline walkthrough.
 - [`src/names.rs`](../src/names.rs) and [`src/version.rs`](../src/version.rs)
   — the typed-identity refactor commentary.
 - [`tests/container/smoke/`](../tests/container/smoke/) — end-to-end

@@ -90,12 +90,22 @@ A fixture is a single directory under `fixtures/` with:
 
 - `PKGBUILD` — required.
 - `<name>.install` — optional install hook.
-- `repo` — optional, one word: `aur` (default) or `official`.
+- `repo` — optional, one word: `aur` (default), `official`, or `foreign`.
 
 `official` fixtures get built once at image build time and registered
 into `/srv/local-repo` (a real pacman sync DB). `aur` fixtures get
 published as a `refs/heads/<pkgbase>` branch in `/srv/mock-aur` (a bare
 git repo that mimics `github.com/archlinux/aur`'s layout exactly).
+`foreign` fixtures are built once and the `.pkg.tar.zst` staged under
+`/srv/foreign-pkgs/`; they are **not** registered in any sync repo and
+**not** mirrored into the AUR. A test seeds them with `install_foreign
+<pkgbase>` (a `lib.sh` helper that wraps `sudo pacman -U`) to create the
+foreign-install state — in pacman's localdb but absent from every
+source — that the resolver's `by_provides` walk is designed for. Without
+this class, a test targeting that path would route through `by_name`
+instead and silently skip the hint plumbing under test (see
+[`ARCHITECTURE.md`'s resolution case matrix](ARCHITECTURE.md#resolution-case-matrix),
+row 8a).
 
 Three design rules:
 
@@ -154,6 +164,7 @@ assert_pkg_installed <name>
 assert_pkg_not_installed <name>
 assert_pkg_explicit <name>    # pacman Install Reason = Explicitly installed
 assert_pkg_asdep <name>       # pacman Install Reason = as a dependency
+install_foreign <pkgbase>     # sudo pacman -U /srv/foreign-pkgs/<pkgbase>-*.pkg.tar.zst
 reset_state                   # wipe ~/.local/state/gitaur between phases
 ```
 
