@@ -13,6 +13,7 @@ pub mod names;
 pub mod pacman;
 pub mod paths;
 pub mod resolver;
+pub mod runopts;
 pub mod ui;
 pub mod version;
 

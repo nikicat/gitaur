@@ -4,6 +4,8 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::names::PkgName;
 use crate::pacman::alpm_db;
+use crate::runopts;
+use crate::ui;
 use crate::version::Version;
 use std::process::Command;
 use tracing::{debug, info, instrument};
@@ -64,6 +66,13 @@ pub fn query_repo_upgrades() -> Result<Vec<PkgUpgrade>> {
 }
 
 /// Exec `pacman` with `argv`, prepending the privilege escalator when needed.
+///
+/// When escalation kicks in, the user sees the exact command first and gates
+/// it with a y/n confirm. Without this, the escalator (typically `sudo`)
+/// pops a password prompt with no context about what gitaur is about to
+/// run — a hostile UX especially mid-build when several minutes have
+/// elapsed since the user's last interaction. The `noconfirm` flag (read
+/// from [`runopts`]) suppresses the prompt for non-interactive callers.
 #[instrument(skip(cfg))]
 pub fn exec_pacman(cfg: &Config, argv: &[String]) -> Result<u8> {
     let escalate = needs_sudo(argv);
@@ -72,6 +81,9 @@ pub fn exec_pacman(cfg: &Config, argv: &[String]) -> Result<u8> {
     } else {
         ("pacman", argv.to_vec())
     };
+    if escalate {
+        confirm_escalation(program, &spawn_args)?;
+    }
     debug!(program, args = ?spawn_args, "spawning pacman");
     let status = Command::new(program).args(&spawn_args).status()?;
     let code = status.code().unwrap_or(1);
@@ -81,6 +93,20 @@ pub fn exec_pacman(cfg: &Config, argv: &[String]) -> Result<u8> {
     } else {
         Err(Error::PacmanExit(code))
     }
+}
+
+/// Show what's about to run with elevated privileges and gate it with a
+/// y/n confirm. No-op under `--noconfirm` (returns `Ok(())` immediately).
+fn confirm_escalation(program: &str, spawn_args: &[String]) -> Result<()> {
+    let noconfirm = runopts::noconfirm();
+    ui::info(&format!(
+        "about to elevate via {program}:\n   {program} {}",
+        spawn_args.join(" "),
+    ));
+    if !ui::confirm("Continue?", noconfirm)? {
+        return Err(Error::UserAbort);
+    }
+    Ok(())
 }
 
 fn with_pacman(argv: &[String]) -> Vec<String> {
