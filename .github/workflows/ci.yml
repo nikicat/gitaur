@@ -55,19 +55,24 @@ jobs:
   coverage:
     name: coverage
     runs-on: ubuntu-latest
-    # Runs in parallel to the main `ci` job. Uses stock GitHub runner rather
-    # than the Arch container so cargo-llvm-cov's prebuilt-binary install
-    # action works without extra glibc plumbing.
+    # Runs in parallel to the main `ci` job. Must use the same Arch container
+    # because `alpm-sys` link-checks against libalpm via pkg-config, which is
+    # only packaged on Arch. cargo-llvm-cov is shipped in Arch's extra repo.
+    container:
+      image: archlinux:latest
     steps:
+      - name: Install system dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel git pkgconf pacman rustup cargo-llvm-cov
+          # rust-toolchain.toml drives channel + components on first cargo call.
+
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install llvm-tools-preview component
+        # cargo-llvm-cov needs the rustc-emitted profiler runtime; the
+        # component lands in the toolchain pinned by rust-toolchain.toml.
+        run: rustup component add llvm-tools-preview
 
       - name: Cache cargo registry and target
         uses: actions/cache@v5
