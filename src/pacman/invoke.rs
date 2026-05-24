@@ -87,23 +87,29 @@ pub fn exec_pacman(cfg: &Config, argv: &[String]) -> Result<u8> {
     }
     debug!(program, args = ?spawn_args, "spawning pacman");
     let status = Command::new(program).args(&spawn_args).status()?;
-    // `status.code()` is None iff the child was killed by a signal (OOM,
-    // SIGTERM, ^C). Surface the signal explicitly — without it, an
-    // OOM-killed pacman is indistinguishable from a normal `pacman` exit 1
-    // in both logs and the bubbled-up `Error::PacmanExit`. POSIX shells use
-    // `128 + signal` for the propagated code, so we do the same.
-    let code = if let Some(c) = status.code() {
+    let code = status_to_exit_code(status);
+    if status.success() {
+        Ok(0)
+    } else {
+        Err(Error::PacmanExit(code))
+    }
+}
+
+/// Collapse a child [`std::process::ExitStatus`] to a single `i32` the caller
+/// can propagate. `status.code()` returns `None` iff the child was killed by
+/// a signal (OOM, SIGTERM, ^C) — picking up [`ExitStatusExt::signal`] keeps
+/// that distinguishable from a normal `pacman` exit 1 in both logs and the
+/// bubbled-up `Error::PacmanExit`. POSIX shells use `128 + signal` for the
+/// propagated code (bash reports 137 for SIGKILL, 143 for SIGTERM), so we do
+/// the same.
+fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
+    if let Some(c) = status.code() {
         info!(code = c, "pacman exited");
         c
     } else {
         let sig = status.signal().unwrap_or(0);
         warn!(signal = sig, "pacman was killed by signal");
         128 + sig
-    };
-    if status.success() {
-        Ok(0)
-    } else {
-        Err(Error::PacmanExit(code))
     }
 }
 
@@ -170,5 +176,36 @@ mod tests {
     fn print_flag_disables_sudo() {
         assert!(!needs_sudo(&["-Syu".into(), "--print".into()]));
         assert!(!needs_sudo(&["-Syu".into(), "-p".into()]));
+    }
+
+    // Linux wait-status encoding (per waitpid(2)): low 7 bits = signal,
+    // bit 7 = core-dump flag, bits 8-15 = exit code. Signal 0 means "exited
+    // normally" so `from_raw(N << 8)` synthesises a clean exit-code-N status,
+    // and `from_raw(SIG)` synthesises a signal-N kill.
+
+    #[test]
+    fn exit_code_zero_propagates() {
+        let s = std::process::ExitStatus::from_raw(0);
+        assert_eq!(status_to_exit_code(s), 0);
+    }
+
+    #[test]
+    fn exit_code_nonzero_propagates() {
+        let s = std::process::ExitStatus::from_raw(1 << 8);
+        assert_eq!(status_to_exit_code(s), 1);
+    }
+
+    #[test]
+    fn sigkill_maps_to_137() {
+        let s = std::process::ExitStatus::from_raw(9);
+        assert!(s.code().is_none(), "sanity: SIGKILL has no exit code");
+        assert_eq!(s.signal(), Some(9));
+        assert_eq!(status_to_exit_code(s), 137);
+    }
+
+    #[test]
+    fn sigterm_maps_to_143() {
+        let s = std::process::ExitStatus::from_raw(15);
+        assert_eq!(status_to_exit_code(s), 143);
     }
 }

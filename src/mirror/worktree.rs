@@ -356,4 +356,30 @@ mod tests {
         prune(&mirror, "foo", &dest).expect("prune must handle restrictive perms");
         assert!(!dest.exists(), "prune must remove dest tree entirely");
     }
+
+    #[test]
+    fn prune_propagates_git_failure() {
+        // `prune` runs `git -C <mirror.path> worktree prune`. If that fails
+        // (mirror path doesn't exist, isn't a git repo, ...) the function must
+        // bubble the error up rather than swallowing it — otherwise callers
+        // think the postcondition ("admin entry removed") was met when it
+        // wasn't, and the next `worktree add` trips on a stale entry with no
+        // breadcrumb back to the actual failure.
+        let td = TempDir::new().unwrap();
+        // Real gix repo so MirrorRepo is constructible, but the `path` field
+        // points at a non-existent directory so the shelled-out git call fails.
+        let (_bare, repo) = make_bare(td.path());
+        let mirror = MirrorRepo {
+            path: td.path().join("does-not-exist"),
+            repo,
+        };
+        let dest = td.path().join("pkgs/foo"); // also non-existent → force_remove skipped
+
+        let err = prune(&mirror, "foo", &dest).expect_err("must surface git failure");
+        // We don't care which exact phrasing git uses across versions, only
+        // that the error came from the git shell-out (Error::Gix) and names
+        // the operation.
+        let msg = format!("{err}");
+        assert!(msg.contains("worktree prune"), "unexpected error: {msg}");
+    }
 }

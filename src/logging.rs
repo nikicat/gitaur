@@ -31,23 +31,7 @@ const FILE_LOG_FILTER: &str =
 /// Best-effort: console logging always works; if the log file can't be
 /// created we print a warning to stderr and continue without file logging.
 pub fn init() -> Option<PathBuf> {
-    // Branch on the raw env var rather than `try_from_default_env()` alone:
-    // its `FromEnvError` doesn't expose whether the failure was "unset" (a
-    // silent legitimate case → fall back to "warn") or "couldn't parse the
-    // value" (the user typed something — they need to know it was ignored).
-    let console_filter = match std::env::var("RUST_LOG") {
-        Err(std::env::VarError::NotPresent) => EnvFilter::new("warn"),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            eprintln!("gitaur: RUST_LOG is not valid UTF-8; falling back to RUST_LOG=warn");
-            EnvFilter::new("warn")
-        }
-        Ok(raw) => EnvFilter::try_new(&raw).unwrap_or_else(|e| {
-            eprintln!(
-                "gitaur: ignoring malformed RUST_LOG='{raw}' ({e}); falling back to RUST_LOG=warn"
-            );
-            EnvFilter::new("warn")
-        }),
-    };
+    let console_filter = parse_console_filter(std::env::var("RUST_LOG"), &mut std::io::stderr());
     // `fmt::layer()` defaults to stdout, which competes with subprocess
     // stdout (makepkg, pacman -U). Pin to stderr so log lines interleave
     // cleanly with `ui::{step,note,…}` (which all use eprintln) and don't
@@ -99,6 +83,40 @@ fn new_log_file_path() -> PathBuf {
     let stamp = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S");
     let pid = std::process::id();
     paths::logs_dir().join(format!("gitaur-{stamp}-{pid}.log"))
+}
+
+/// Translate a `RUST_LOG` env-var lookup into a console-layer [`EnvFilter`].
+///
+/// The opaque `FromEnvError` from `EnvFilter::try_from_default_env` doesn't
+/// tell us *why* the lookup failed, so we branch on the raw [`Result`] from
+/// `env::var`: only the "unset" path falls back silently — anything else (bad
+/// UTF-8, malformed directive) is the user typing something we have to
+/// ignore, and we tell them via `diag` so a typo doesn't silently kill their
+/// debug output. `diag` is `&mut dyn Write` so callers can inject stderr (the
+/// production wiring) or a `Vec<u8>` (tests).
+fn parse_console_filter(
+    raw: Result<String, std::env::VarError>,
+    diag: &mut dyn std::io::Write,
+) -> EnvFilter {
+    match raw {
+        Err(std::env::VarError::NotPresent) => EnvFilter::new("warn"),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            writeln!(
+                diag,
+                "gitaur: RUST_LOG is not valid UTF-8; falling back to RUST_LOG=warn",
+            )
+            .ok();
+            EnvFilter::new("warn")
+        }
+        Ok(raw) => EnvFilter::try_new(&raw).unwrap_or_else(|e| {
+            writeln!(
+                diag,
+                "gitaur: ignoring malformed RUST_LOG='{raw}' ({e}); falling back to RUST_LOG=warn",
+            )
+            .ok();
+            EnvFilter::new("warn")
+        }),
+    }
 }
 
 fn is_log_file(name: &std::ffi::OsStr) -> bool {
@@ -182,6 +200,97 @@ mod tests {
         }
         assert!(dir.path().join("not-a-log.txt").exists());
         assert!(dir.path().join("other-1.log").exists());
+    }
+
+    #[test]
+    fn prune_continues_after_one_unlink_failure() {
+        // Plant a *directory* alongside real log files. `is_log_file` matches
+        // on filename only, so the dir lands in the prune-candidate list; the
+        // subsequent `remove_file()` then fails with EISDIR. The new
+        // diagnostic branch should log and keep going so the other prune
+        // targets still get removed.
+        let dir = tempdir().unwrap();
+        let now = SystemTime::now();
+        let mut files = Vec::new();
+        for i in 1u64..15 {
+            let p = dir.path().join(format!("gitaur-{i:02}.log"));
+            // i=1 is oldest file, i=14 is newest.
+            touch_with_mtime(&p, now - Duration::from_secs(60 * (15 - i)));
+            files.push((i, p));
+        }
+        let trap = dir.path().join("gitaur-00.log");
+        fs::create_dir(&trap).unwrap();
+        // Trap is older than any file so it ends up in the prune tail.
+        File::open(&trap)
+            .unwrap()
+            .set_modified(now - Duration::from_mins(100))
+            .unwrap();
+
+        prune_old_logs_in(dir.path(), 10).expect("prune must not bail on EISDIR");
+
+        // Trap survived its unlink attempt.
+        assert!(trap.is_dir(), "EISDIR trap should still exist");
+        // Five prune slots, the trap took one; the four next-oldest files
+        // (i=1..=4) should have been removed; the 10 newest kept.
+        for (i, p) in &files {
+            let kept = p.exists();
+            if *i <= 4 {
+                assert!(!kept, "expected to prune {}", p.display());
+            } else {
+                assert!(kept, "expected to keep {}", p.display());
+            }
+        }
+    }
+
+    #[test]
+    fn parse_filter_falls_back_silently_when_unset() {
+        let mut diag = Vec::<u8>::new();
+        let f = parse_console_filter(Err(std::env::VarError::NotPresent), &mut diag);
+        assert_eq!(f.to_string(), "warn");
+        assert!(
+            diag.is_empty(),
+            "unset RUST_LOG must not produce diagnostics",
+        );
+    }
+
+    #[test]
+    fn parse_filter_warns_on_non_utf8() {
+        let mut diag = Vec::<u8>::new();
+        let bad = std::ffi::OsString::from("warn");
+        // VarError::NotUnicode takes an OsString — we don't care what's inside,
+        // only that this variant routes to the warn-then-fallback branch.
+        let f = parse_console_filter(Err(std::env::VarError::NotUnicode(bad)), &mut diag);
+        assert_eq!(f.to_string(), "warn");
+        let msg = String::from_utf8(diag).unwrap();
+        assert!(msg.contains("not valid UTF-8"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_filter_warns_on_malformed_directive() {
+        let mut diag = Vec::<u8>::new();
+        // `brbug` is not a known level (the levels are trace/debug/info/warn/
+        // error/off). EnvFilter rejects unknown level names.
+        let f = parse_console_filter(Ok("mycrate=brbug".into()), &mut diag);
+        assert_eq!(f.to_string(), "warn");
+        let msg = String::from_utf8(diag).unwrap();
+        assert!(msg.contains("malformed RUST_LOG"), "got: {msg}");
+        assert!(
+            msg.contains("mycrate=brbug"),
+            "diag should echo the bad value: {msg}",
+        );
+    }
+
+    #[test]
+    fn parse_filter_accepts_valid_directives() {
+        let mut diag = Vec::<u8>::new();
+        // Multi-directive parses cleanly; we don't pin the exact serialization
+        // (EnvFilter reorders directives alphabetically) — only that it didn't
+        // hit the diagnostic branch.
+        let _f = parse_console_filter(Ok("info,h2=warn".into()), &mut diag);
+        assert!(
+            diag.is_empty(),
+            "valid directives must not produce diagnostics"
+        );
     }
 
     #[test]
