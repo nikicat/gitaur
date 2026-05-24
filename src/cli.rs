@@ -10,6 +10,7 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::pacman::invoke;
 use crate::paths;
+use crate::runopts::{self, RunOpts};
 use crate::ui;
 use clap::Parser;
 
@@ -80,6 +81,17 @@ pub fn run() -> Result<u8> {
     paths::ensure_state_dir()?;
 
     let raw_argv: Vec<String> = std::env::args().skip(1).collect();
+
+    // Install per-run options before any code path that can reach
+    // `pacman::invoke::exec_pacman` — that's the pre-scan pass-through, the
+    // clap-driven dispatch, and `mirror::cmd_refresh` (which doesn't sudo
+    // but is cheap to cover). `argv_has_noconfirm` on raw argv is a
+    // superset of `cli.noconfirm || f.has_long("noconfirm")` since both of
+    // those ultimately mean "the token appears in raw argv", so dispatch
+    // doesn't need to re-install.
+    runopts::set(RunOpts {
+        noconfirm: runopts::argv_has_noconfirm(&raw_argv),
+    });
 
     // Pre-scan: if the first operation letter is pacman-owned, forward
     // verbatim and never let clap see it (clap would reject unknown short
