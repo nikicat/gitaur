@@ -97,7 +97,7 @@ jobs:
         with:
           files: lcov.info
           fail_ci_if_error: false
-          # Public repo: no token needed — codecov-action authenticates via
-          # GitHub OIDC. If the repo ever goes private, add
+          # Public repo: codecov-action's tokenless flow verifies the
+          # repo+commit pair via the standard GITHUB_TOKEN, no extra
+          # permissions needed. If the repo ever goes private, add
           # `token: ${{ secrets.CODECOV_TOKEN }}` here.
-          use_oidc: true
