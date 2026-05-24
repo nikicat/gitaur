@@ -99,6 +99,23 @@ pub fn note(msg: &str) {
     }
 }
 
+/// Emit terminal BEL (0x07) to stderr to nudge a walked-away user.
+///
+/// Call sites: long-running operations where the prompt may fire long
+/// after the last interaction (e.g. mid-build sudo escalation, 5–30 min
+/// into an AUR build). No-op when stderr isn't a TTY so logfiles and CI
+/// pipes stay clean. Writes via the raw byte API (not `eprint!`) to
+/// bypass any future `console`/styling layers that might filter control
+/// chars.
+pub fn bell() {
+    use std::io::{IsTerminal, Write};
+    let mut err = std::io::stderr().lock();
+    if err.is_terminal() {
+        err.write_all(b"\x07").ok();
+        err.flush().ok();
+    }
+}
+
 /// Render `text` as supporting/secondary UI text — mid-gray (color 244) italic.
 ///
 /// Reads clearly without competing with the bright primary text. Use for

@@ -97,8 +97,16 @@ pub fn exec_pacman(cfg: &Config, argv: &[String]) -> Result<u8> {
 
 /// Show what's about to run with elevated privileges and gate it with a
 /// y/n confirm. No-op under `--noconfirm` (returns `Ok(())` immediately).
+///
+/// Rings the terminal bell before the prompt: a `pacman -U` after a long
+/// AUR build can fire 5–30 min after the user's last interaction, and the
+/// bell pulls their attention back. Skipped under `--noconfirm` (no one
+/// is waiting) and inside [`ui::bell`] when stderr isn't a TTY.
 fn confirm_escalation(program: &str, spawn_args: &[String]) -> Result<()> {
     let noconfirm = runopts::noconfirm();
+    if !noconfirm {
+        ui::bell();
+    }
     ui::info(&format!(
         "about to elevate via {program}:\n   {program} {}",
         spawn_args.join(" "),
