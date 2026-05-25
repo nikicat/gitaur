@@ -32,19 +32,19 @@ gix = { git = "https://github.com/nikicat/gitoxide", rev = "7606d2ed1", features
 ] }
 clap = { version = "4", features = ["derive"] }
 rayon = "1.10"
-alpm = "4"
-alpm-utils = "4"
+alpm = "5"
+alpm-utils = "5"
 pacmanconf = "3"
 rkyv = { version = "0.8", features = ["bytecheck"] }
 memmap2 = "0.9"
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-dialoguer = "0.11"
-console = "0.15"
-indicatif = "0.17"
+toml = "1"
+dialoguer = "0.12"
+console = "0.16"
+indicatif = "0.18"
 anyhow = "1"
-thiserror = "1"
-dirs = "5"
+thiserror = "2"
+dirs = "6"
 regex = "1"
 smallvec = { version = "1", features = ["serde"] }
 tracing = "0.1"
