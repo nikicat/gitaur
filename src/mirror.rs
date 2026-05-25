@@ -13,6 +13,7 @@ use crate::ui;
 use gix::protocol::transport::client::blocking_io::http;
 use std::any::Any;
 use std::path::{Path, PathBuf};
+use tracing::debug;
 
 pub mod clone;
 pub mod fetch;
@@ -100,9 +101,11 @@ pub fn cmd_refresh(cfg: &Config, force_reclone: bool) -> Result<()> {
         match index::load(&idx_path) {
             Ok(idx) => Some(idx),
             Err(e) => {
-                ui::warn(&format!(
-                    "existing index unreadable, rebuilding from scratch: {e}"
-                ));
+                // Expected after a gitaur upgrade bumps the schema: the rebuild
+                // below is announced by "building index"/"index built", and on
+                // the resync path `load_or_resync` has already told the user
+                // why. So this is a trace, not a user-facing warning.
+                debug!(error = %e, "existing index unreadable; rebuilding from scratch");
                 None
             }
         }

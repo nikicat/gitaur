@@ -20,6 +20,12 @@ gitaur test-trivial
 assert_exit 0
 assert_stdout_contains "aur/test-trivial"
 assert_stderr_contains "resyncing"
+# The resync notice must read cleanly — no leaked rancor detail (the release
+# build's "failed without error information; enable debug assertions and the
+# `alloc` feature…" placeholder), and no second "rebuilding from scratch"
+# warning duplicating the resync the user was already told about.
+assert_stderr_not_contains "debug assertions"
+assert_stderr_not_contains "rebuilding from scratch"
 
 # Recovery is durable: the rebuilt index loads cleanly next time, with no
 # further resync notice.

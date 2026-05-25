@@ -93,6 +93,10 @@ assert_stderr_contains() {
     grep -qF -- "$1" "$LAST_STDERR" || { echo "stderr missing: $1" >&2; _dump >&2; return 1; }
 }
 
+assert_stderr_not_contains() {
+    ! grep -qF -- "$1" "$LAST_STDERR" || { echo "stderr unexpectedly contains: $1" >&2; _dump >&2; return 1; }
+}
+
 assert_pkg_installed() {
     pacman -Qi "$1" >/dev/null 2>&1 || { echo "expected $1 installed" >&2; return 1; }
 }

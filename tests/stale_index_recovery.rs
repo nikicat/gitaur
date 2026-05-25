@@ -94,6 +94,26 @@ fn bootstrapped_with_corrupt_index() -> (TempDir, ScopedStateRoot, Config) {
 }
 
 #[test]
+fn unreadable_index_error_message_is_clean() {
+    // Regression: in release builds rkyv's rancor error is an opaque
+    // placeholder ("failed without error information; enable debug assertions
+    // and the `alloc` feature…"). It must not leak into the user-facing
+    // `IndexIncompatible` reason — the message stays the fixed, readable
+    // "on-disk archive unreadable".
+    let td = TempDir::new().unwrap();
+    let idx_path = td.path().join("index.bin");
+    std::fs::write(&idx_path, b"this is not a valid rkyv archive at all").unwrap();
+
+    let err = index::load(&idx_path).expect_err("garbage bytes must fail to load");
+    let msg = format!("{err}");
+    assert_eq!(msg, "index incompatible: on-disk archive unreadable");
+    assert!(
+        !msg.contains("debug assertions") && !msg.contains("rancor"),
+        "rancor placeholder leaked into user-facing message: {msg}",
+    );
+}
+
+#[test]
 fn load_or_resync_rebuilds_and_returns_index() {
     // Default opts (no --noresync): a normal command that hits the bad index
     // transparently resyncs and gets a usable index back, no `-Sy` by hand.

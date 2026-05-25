@@ -39,8 +39,12 @@ pub fn load(path: &Path) -> Result<IndexFile> {
     let idx: IndexFile = rkyv::from_bytes::<IndexFile, RkyvError>(&bytes).map_err(|e| {
         // A schema bump invalidates the on-disk layout, so rkyv's validator
         // trips before we'd ever see `format_version` — hence the generic
-        // "unreadable" wording rather than a version comparison.
-        Error::IndexIncompatible(format!("on-disk archive unreadable ({e})"))
+        // "unreadable" wording rather than a version comparison. The rancor
+        // error carries no detail in release builds ("enable debug assertions
+        // and the `alloc` feature…"), so keep it for traces and surface a
+        // clean reason to the user.
+        debug!(error = %e, "rkyv rejected on-disk index");
+        Error::IndexIncompatible("on-disk archive unreadable".into())
     })?;
     if idx.format_version != IndexFile::FORMAT_VERSION {
         return Err(Error::IndexIncompatible(format!(
