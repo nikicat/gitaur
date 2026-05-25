@@ -89,6 +89,7 @@ jobs:
           files: coverage/lcov-rust.info
           flags: rust
           fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Upload podman coverage to Codecov
         if: always()
@@ -97,6 +98,7 @@ jobs:
           files: coverage/lcov-podman.info
           flags: podman
           fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Upload combined coverage to Codecov
         if: always()
@@ -105,7 +107,8 @@ jobs:
           files: coverage/lcov-combined.info
           flags: combined
           fail_ci_if_error: false
-          # Public repo: codecov-action's tokenless flow verifies the
-          # repo+commit pair via the standard GITHUB_TOKEN, no extra
-          # permissions needed. If the repo ever goes private, add
-          # `token: ${{ secrets.CODECOV_TOKEN }}` here.
+          # A token is required: tokenless uploads are rejected on this repo
+          # with "Token required because branch is protected". Add a
+          # CODECOV_TOKEN repo secret (Codecov → repo settings → copy the
+          # upload token) for any of these uploads to land.
+          token: ${{ secrets.CODECOV_TOKEN }}
