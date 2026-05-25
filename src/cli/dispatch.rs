@@ -34,7 +34,9 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
         Some('S') => handle_s(cfg, cli, &f, argv),
         // Pre-scan in `cli::run` only routes the bare `-Qu` form here; every
         // other Q variant is plain pacman territory and never reaches dispatch.
-        Some('Q') => build::cmd_query_upgrades(cli.devel || cfg.devel || f.has_long("devel")),
+        Some('Q') => {
+            build::cmd_query_upgrades(cfg, cli.devel || cfg.devel || f.has_long("devel"))
+        }
         Some(other) => Err(Error::other(format!(
             "unsupported gitaur op `-{other}` (pacman pass-through goes via the pre-scan, this dispatch is `-S` / `-Qu` only)"
         ))),
@@ -91,7 +93,7 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
         // interactive picker, then act on the user's selection. The picker
         // falls back to the default mask under `noconfirm` or non-TTY stdin,
         // so cron / pipes keep working without prompting.
-        let plan = build::collect_upgrade_plan(cfg.devel || devel)?;
+        let plan = build::collect_upgrade_plan(cfg, cfg.devel || devel)?;
         if plan.is_empty() {
             ui::info("nothing to do");
         } else {

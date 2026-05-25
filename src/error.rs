@@ -34,6 +34,13 @@ pub enum Error {
     #[error("rkyv: {0}")]
     Rkyv(String),
 
+    /// The on-disk index archive can't be read by this build — either rkyv's
+    /// validator rejected the layout or `format_version` predates us. Carries a
+    /// human-readable reason; the loader recovers by resyncing the database
+    /// rather than surfacing it, so this rarely reaches the user.
+    #[error("index incompatible: {0}")]
+    IndexIncompatible(String),
+
     /// `.SRCINFO` parsing failure with offending text.
     #[error("srcinfo parse: {0}")]
     SrcInfo(String),

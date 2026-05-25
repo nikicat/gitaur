@@ -14,6 +14,7 @@ use crate::index::{self, secondary::Secondary, IndexEntry};
 use crate::names::PkgTarget;
 use crate::pacman::alpm_db::{self, RepoHit};
 use crate::paths;
+use crate::runopts;
 use crate::ui;
 
 use console::style;
@@ -79,13 +80,16 @@ pub fn cmd_search_install(cfg: &Config, cli: &Cli, terms: &[String]) -> Result<u
     // mmap. Run them concurrently and merge below.
     let (repo_res, aur_res) = rayon::join(
         || alpm_db::search_sync(terms),
-        || -> Result<Option<index::IndexFile>> {
+        // `propagate` so `load_or_resync` sees `--noresync` even when rayon
+        // runs this closure on a worker thread (its RunOpts TLS is otherwise
+        // the default).
+        runopts::propagate(|| -> Result<Option<index::IndexFile>> {
             let path = paths::index_path();
             if !path.exists() {
                 return Ok(None);
             }
-            Ok(Some(index::load(&path)?))
-        },
+            Ok(Some(index::load_or_resync(cfg, &path)?))
+        }),
     );
     let repo_hits = repo_res?;
     let idx = aur_res?;

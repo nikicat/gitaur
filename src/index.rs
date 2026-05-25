@@ -5,7 +5,9 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::mirror;
 use crate::paths;
+use crate::runopts;
 use crate::ui;
 use rkyv::rancor::Error as RkyvError;
 use std::path::Path;
@@ -21,10 +23,12 @@ pub use schema::{IndexEntry, IndexFile};
 
 /// Load the on-disk index. Returns an empty index if the file is missing.
 ///
-/// Rejects archives whose `format_version` doesn't match the current
-/// [`IndexFile::FORMAT_VERSION`]. Rather than silently rebuilding, we error
-/// out with a `gitaur -Sy` hint so the user notices the schema change and
-/// triggers the rebuild deliberately (rebuilds take ~30 s on a slow disk).
+/// Archives this build can't read — rkyv's validator trips on a changed layout,
+/// or `format_version` predates us — surface as [`Error::IndexIncompatible`].
+/// Callers that want the index to "just work" use [`load_or_resync`], which
+/// catches that variant and rebuilds in place; this low-level entry point is
+/// the one [`mirror::cmd_refresh`] uses, where a failed load must *not*
+/// recurse back into a resync.
 #[instrument]
 pub fn load(path: &Path) -> Result<IndexFile> {
     if !path.exists() {
@@ -34,21 +38,50 @@ pub fn load(path: &Path) -> Result<IndexFile> {
     let bytes = std::fs::read(path)?;
     let idx: IndexFile = rkyv::from_bytes::<IndexFile, RkyvError>(&bytes).map_err(|e| {
         // A schema bump invalidates the on-disk layout, so rkyv's validator
-        // trips before we'd ever see `format_version`. Tell the user how to
-        // recover instead of dumping a raw "validator: bounds mismatch".
-        Error::Rkyv(format!(
-            "{e} — index may be from an older gitaur; run `gitaur -Sy` to rebuild"
-        ))
+        // trips before we'd ever see `format_version` — hence the generic
+        // "unreadable" wording rather than a version comparison.
+        Error::IndexIncompatible(format!("on-disk archive unreadable ({e})"))
     })?;
     if idx.format_version != IndexFile::FORMAT_VERSION {
-        return Err(Error::other(format!(
-            "index format v{} is incompatible with gitaur v{} — run `gitaur -Sy` to rebuild",
+        return Err(Error::IndexIncompatible(format!(
+            "index format v{} predates this gitaur (v{})",
             idx.format_version,
             IndexFile::FORMAT_VERSION,
         )));
     }
     info!(entries = idx.entries.len(), "index loaded");
     Ok(idx)
+}
+
+/// Load the index, transparently resyncing the database on an incompatible
+/// archive.
+///
+/// This is the common case right after `pacman -Syu` bumps gitaur and changes
+/// [`IndexFile::FORMAT_VERSION`]. On [`Error::IndexIncompatible`] we print a
+/// one-line notice, run a normal
+/// `-Sy` refresh (which rebuilds the index from the bare mirror), then retry
+/// the load *once* and return its result — a second failure propagates rather
+/// than looping. Every other outcome (success, missing file → empty, genuine
+/// I/O error) is forwarded untouched, so the happy path is identical to
+/// [`load`].
+///
+/// `--noresync` ([`runopts::noresync`]) opts out: the incompatibility is
+/// reported as an error with a `-Sy` hint instead of triggering an implicit
+/// network fetch + rebuild.
+pub fn load_or_resync(cfg: &Config, path: &Path) -> Result<IndexFile> {
+    match load(path) {
+        Err(Error::IndexIncompatible(reason)) => {
+            if runopts::noresync() {
+                return Err(Error::IndexIncompatible(format!(
+                    "{reason}; --noresync set, run `gitaur -Sy` to rebuild"
+                )));
+            }
+            ui::info(&format!("AUR index {reason}; resyncing database"));
+            mirror::cmd_refresh(cfg, false)?;
+            load(path)
+        }
+        other => other,
+    }
 }
 
 /// Atomically write the index to `path` via `index.bin.tmp` + rename.
@@ -63,13 +96,13 @@ pub fn save(idx: &IndexFile, path: &Path) -> Result<()> {
 }
 
 /// `-Ss` search across pkgnames/pkgdesc/provides, with pacman-style output.
-pub fn cmd_search(_cfg: &Config, terms: &[String]) -> Result<u8> {
+pub fn cmd_search(cfg: &Config, terms: &[String]) -> Result<u8> {
     let path = paths::index_path();
     if !path.exists() {
         ui::warn("no index; run `gitaur -Sy` first");
         return Ok(1);
     }
-    let idx = load(&path)?;
+    let idx = load_or_resync(cfg, &path)?;
     let by = secondary::Secondary::build(&idx);
     let regexes: Vec<regex::Regex> = terms
         .iter()
@@ -104,8 +137,8 @@ fn write_search_result<W: std::io::Write>(out: &mut W, entry: &IndexEntry) -> st
 }
 
 /// `-Si` info for one or more pkgnames.
-pub fn cmd_info(_cfg: &Config, targets: &[String]) -> Result<u8> {
-    let idx = load(&paths::index_path())?;
+pub fn cmd_info(cfg: &Config, targets: &[String]) -> Result<u8> {
+    let idx = load_or_resync(cfg, &paths::index_path())?;
     let by = secondary::Secondary::build(&idx);
     let mut missing = Vec::new();
     for t in targets {

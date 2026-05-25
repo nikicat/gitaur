@@ -34,6 +34,9 @@ pub mod search;
     after_help = AFTER_HELP,
     disable_help_subcommand = true,
 )]
+// Each bool is an independent on/off CLI flag, not packed state — the
+// "fold into an enum" remedy the lint suggests doesn't apply to clap args.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Cli {
     /// Include VCS pkgs (-git/-svn/-hg/-bzr) when running -Syu.
     #[arg(long, global = true)]
@@ -42,6 +45,11 @@ pub struct Cli {
     /// Skip prompts; auto-accept installs.
     #[arg(long, global = true)]
     pub noconfirm: bool,
+
+    /// Don't auto-rebuild the AUR index when it's from an older gitaur; error
+    /// out instead (rerun `gitaur -Sy` yourself to rebuild).
+    #[arg(long, global = true)]
+    pub noresync: bool,
 
     /// Mark installed packages as dependencies (forwarded to `pacman -U --asdeps`).
     #[arg(long, global = true)]
@@ -97,6 +105,7 @@ pub fn run() -> Result<u8> {
     // doesn't need to re-install.
     runopts::set(RunOpts {
         noconfirm: runopts::argv_has_noconfirm(&raw_argv),
+        noresync: runopts::argv_has_noresync(&raw_argv),
     });
 
     // Pre-scan: if the first operation letter is pacman-owned, forward

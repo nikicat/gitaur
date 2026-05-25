@@ -18,6 +18,7 @@ use crate::pacman::alpm_db::{self, PacmanIndex};
 use crate::pacman::invoke;
 use crate::paths;
 use crate::resolver::{self, PkgbasePlan, Plan};
+use crate::runopts;
 use crate::ui;
 use crate::version::Version;
 use std::collections::{HashMap, HashSet};
@@ -111,14 +112,17 @@ pub fn cmd_install(
             let alpm = alpm_db::open()?;
             Ok(PacmanIndex::build(&alpm))
         },
-        || -> Result<Option<(IndexFile, Secondary)>> {
+        // `propagate` so `load_or_resync` sees `--noresync` even when rayon
+        // runs this closure on a worker thread (its RunOpts TLS is otherwise
+        // the default).
+        runopts::propagate(|| -> Result<Option<(IndexFile, Secondary)>> {
             if !idx_path.exists() {
                 return Ok(None);
             }
-            let idx = index::load(&idx_path)?;
+            let idx = index::load_or_resync(cfg, &idx_path)?;
             let by = Secondary::build(&idx);
             Ok(Some((idx, by)))
-        },
+        }),
     );
     let pac = pac_res?;
     let aur_loaded = idx_res?;

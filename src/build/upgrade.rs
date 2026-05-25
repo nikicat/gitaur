@@ -2,6 +2,7 @@
 //! `-Syu` interactive picker. Read-only: walks alpm + the AUR index file,
 //! never shells out to `pacman -S` or asks for sudo.
 
+use crate::config::Config;
 use crate::error::Result;
 use crate::index::secondary::Secondary;
 use crate::index::{self, IndexFile};
@@ -17,19 +18,19 @@ use tracing::{instrument, warn};
 /// unprivileged (no sudo), so safe to call both as the bare `-Qu` and as a
 /// preview before `-Syu` runs.
 #[instrument]
-pub fn cmd_query_upgrades(devel: bool) -> Result<u8> {
-    ui::upgrade_table(&collect_upgrade_plan(devel)?);
+pub fn cmd_query_upgrades(cfg: &Config, devel: bool) -> Result<u8> {
+    ui::upgrade_table(&collect_upgrade_plan(cfg, devel)?);
     Ok(0)
 }
 
 /// Gather the merged repo + AUR upgrade list. Shared by `-Qu` (read-only
 /// rendering) and `-Syu` (feeds the interactive picker). Unprivileged —
 /// reads alpm and the AUR index file only.
-pub fn collect_upgrade_plan(devel: bool) -> Result<Vec<PkgUpgrade>> {
+pub fn collect_upgrade_plan(cfg: &Config, devel: bool) -> Result<Vec<PkgUpgrade>> {
     let mut plan = invoke::query_repo_upgrades()?;
     let idx_path = paths::index_path();
     if idx_path.exists() {
-        let idx = index::load(&idx_path)?;
+        let idx = index::load_or_resync(cfg, &idx_path)?;
         let by = Secondary::build(&idx);
         let alpm = alpm_db::open()?;
         let pac = PacmanIndex::build(&alpm);

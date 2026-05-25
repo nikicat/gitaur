@@ -14,10 +14,12 @@
 //! override is auto-cleared on test exit.
 
 use gitaur::config::defaults::default_config;
+use gitaur::config::Config;
 use gitaur::index::{self, IndexFile};
 use gitaur::mirror;
 use gitaur::names::PkgBase;
 use gitaur::paths;
+use gitaur::runopts::{self, RunOpts};
 use gitaur::testing::{git, ScopedStateRoot};
 use std::path::Path;
 use tempfile::TempDir;
@@ -48,6 +50,92 @@ fn build_upstream_bare(root: &Path, branches: &[(&str, &str)]) -> std::path::Pat
         root,
     );
     bare
+}
+
+/// The two fixture branches every test in this file indexes — a plain pkgbase
+/// and a split pkg with a per-pkgname `provides`.
+const FIXTURE_BRANCHES: &[(&str, &str)] = &[
+    (
+        "cower",
+        "pkgbase = cower\npkgver = 17\npkgrel = 2\npkgname = cower\n",
+    ),
+    (
+        "bisq",
+        "pkgbase = bisq\n\
+         pkgver = 1\npkgrel = 1\n\
+         pkgname = bisq-desktop\n\
+            provides = bisq\n",
+    ),
+];
+
+/// Bootstrap a mirror into a fresh tempdir state root, then overwrite the
+/// freshly-built index with bytes rkyv can't validate — the post-schema-bump
+/// failure mode. Returns the live `TempDir` + [`ScopedStateRoot`] guards the
+/// caller must keep in scope, plus the configured [`Config`].
+fn bootstrapped_with_corrupt_index() -> (TempDir, ScopedStateRoot, Config) {
+    let td = TempDir::new().unwrap();
+    let state_root = td.path().join("state");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let guard = ScopedStateRoot::new(state_root);
+
+    let upstream = build_upstream_bare(td.path(), FIXTURE_BRANCHES);
+    let mut cfg = default_config();
+    cfg.mirror_url = format!("file://{}", upstream.display());
+
+    mirror::cmd_refresh(&cfg, false).expect("initial bootstrap must succeed");
+    let idx_path = paths::index_path();
+    std::fs::write(&idx_path, b"this is not a valid rkyv archive at all").unwrap();
+    assert!(
+        index::load(&idx_path).is_err(),
+        "precondition: planted index must be unreadable",
+    );
+
+    (td, guard, cfg)
+}
+
+#[test]
+fn load_or_resync_rebuilds_and_returns_index() {
+    // Default opts (no --noresync): a normal command that hits the bad index
+    // transparently resyncs and gets a usable index back, no `-Sy` by hand.
+    runopts::set(RunOpts::default());
+    let (_td, _guard, cfg) = bootstrapped_with_corrupt_index();
+
+    let idx = index::load_or_resync(&cfg, &paths::index_path())
+        .expect("load_or_resync must rebuild and return the index");
+    assert_eq!(idx.format_version, IndexFile::FORMAT_VERSION);
+    let mut bases: Vec<&PkgBase> = idx.entries.iter().map(|e| &e.pkgbase).collect();
+    bases.sort_unstable();
+    assert_eq!(bases, vec![&PkgBase::from("bisq"), &PkgBase::from("cower")]);
+}
+
+#[test]
+fn load_or_resync_honors_noresync_and_does_not_rebuild() {
+    // --noresync set: surface the incompatibility as an error instead of
+    // kicking off an implicit network fetch + rebuild.
+    runopts::set(RunOpts {
+        noconfirm: false,
+        noresync: true,
+    });
+    let (_td, _guard, cfg) = bootstrapped_with_corrupt_index();
+    let idx_path = paths::index_path();
+    let planted = std::fs::read(&idx_path).unwrap();
+
+    let err = index::load_or_resync(&cfg, &idx_path)
+        .expect_err("--noresync must surface the error rather than rebuild");
+    assert!(
+        format!("{err}").contains("noresync"),
+        "error should point at --noresync: {err}",
+    );
+    // The corrupt bytes are untouched — confirms no rebuild slipped through.
+    assert_eq!(
+        std::fs::read(&idx_path).unwrap(),
+        planted,
+        "index must be left as-is under --noresync",
+    );
+
+    // This binary's tests share runner threads; clear the override so a later
+    // test on this thread starts from the default.
+    runopts::set(RunOpts::default());
 }
 
 #[test]
