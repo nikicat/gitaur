@@ -56,6 +56,12 @@ pub struct Plan {
     /// listed pkgnames are fed into the final `pacman -U`. Pkgbases absent
     /// from the map default to "install everything".
     pub pkgname_selections: HashMap<PkgBase, Vec<PkgName>>,
+    /// AUR pkgbases the user named directly, as opposed to ones dragged in
+    /// as another pkgbase's dep. The repo side gets this split for free
+    /// (`direct_repo` vs. `transitive_repo`), but `aur_strata` mixes both;
+    /// this set is the AUR complement so [`Plan::only_requested`] can tell
+    /// an all-explicit plan apart from one that pulls in unrequested builds.
+    pub direct_aur: HashSet<PkgBase>,
     /// pkgbase → user's intended counterpart pkgname (see
     /// [`crate::build::Target::hint`]). Populated by
     /// [`expand_pkgbase_targets`] for any target rewritten via the
@@ -73,6 +79,23 @@ impl Plan {
     /// that don't care about stratum boundaries (counts, displays, …).
     pub fn aur_order(&self) -> Vec<PkgBase> {
         self.aur_strata.iter().flatten().cloned().collect()
+    }
+
+    /// True when every package the plan would install was named by the user:
+    /// no repo dependencies pulled in (`transitive_repo` empty) and every AUR
+    /// pkgbase was a direct target (none dragged in as another's dep). The
+    /// build pipeline skips its "Proceed with installation?" prompt in this
+    /// case — the plan table just echoes the user's own request, so the
+    /// confirm only earns its place when there are unrequested packages
+    /// (deps or makedepends) to disclose. The sudo "Continue?" gate and the
+    /// per-pkgbase AUR review prompts still apply regardless.
+    pub fn only_requested(&self) -> bool {
+        self.transitive_repo.is_empty()
+            && self
+                .aur_strata
+                .iter()
+                .flatten()
+                .all(|pb| self.direct_aur.contains(pb))
     }
 
     /// What the plan says about one pkgbase: the pkgbase itself plus the two
@@ -162,6 +185,14 @@ pub fn resolve(
             Source::Aur(entry_idx) => {
                 let entry = &idx.entries[entry_idx];
                 let pkgbase = entry.pkgbase.clone();
+                // Record direct-ness before the visited-dedup `continue`: the
+                // queue is LIFO, so a pkgbase can be popped as a dep before
+                // the direct target that also names it. `direct_set` (keyed on
+                // the user-typed string) backstops the `is_direct` flag for
+                // that ordering, mirroring the repo branch above.
+                if is_direct || direct_set.contains(&bare) {
+                    plan.direct_aur.insert(pkgbase.clone());
+                }
                 for pkg in &entry.pkgnames {
                     pkgname_to_pkgbase.insert(pkg.name.clone(), pkgbase.clone());
                 }
@@ -348,6 +379,53 @@ mod tests {
             Error::UnknownTargets(s) => assert_eq!(s, "nope"),
             other => panic!("expected UnknownTargets, got {other:?}"),
         }
+    }
+
+    // ---- only_requested: when the plan adds nothing the user didn't name -
+
+    #[test]
+    fn only_requested_for_pure_repo_target() {
+        let plan = run(&["foo"], vec![], &["foo"]).unwrap();
+        assert!(plan.only_requested());
+    }
+
+    #[test]
+    fn only_requested_false_when_repo_dep_pulled_in() {
+        // AUR `a` drags in repo `bash` as a makedep → unrequested repo pkg.
+        let plan = run(&["a"], vec![entry("a", &[], &["bash"])], &["bash"]).unwrap();
+        assert!(!plan.only_requested());
+    }
+
+    #[test]
+    fn only_requested_for_named_aur_with_no_deps() {
+        let plan = run(&["a"], vec![entry("a", &[], &[])], &[]).unwrap();
+        assert!(plan.only_requested());
+    }
+
+    #[test]
+    fn only_requested_false_when_aur_makedep_pkgbase_pulled_in() {
+        // `a` makedepends on AUR `b`; `b` is built but never named.
+        let plan = run(
+            &["a"],
+            vec![entry("a", &[], &["b"]), entry("b", &[], &[])],
+            &[],
+        )
+        .unwrap();
+        assert!(!plan.only_requested());
+        assert!(plan.direct_aur.contains("a"));
+        assert!(!plan.direct_aur.contains("b"));
+    }
+
+    #[test]
+    fn only_requested_when_both_aur_pkgbases_named() {
+        // Same graph, but the user names `b` too → no unrequested pkg.
+        let plan = run(
+            &["a", "b"],
+            vec![entry("a", &[], &["b"]), entry("b", &[], &[])],
+            &[],
+        )
+        .unwrap();
+        assert!(plan.only_requested());
     }
 
     // ---- single AUR pkg --------------------------------------------------

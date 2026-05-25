@@ -55,6 +55,21 @@ gitaur() {
     set -e
 }
 
+# Like `gitaur`, but feeds the first argument to stdin so the interactive
+# confirm path is exercised (no `--noconfirm`). stdin is not a TTY here, so
+# `ui::confirm` takes its line-read fallback: each prompt consumes one input
+# line, and an empty string (EOF on the first read) is treated as the "yes"
+# default. Use "y"/"n" lines to answer successive prompts deterministically.
+gitaur_input() {
+    local input="$1"; shift
+    LAST_STDOUT="$(mktemp)"
+    LAST_STDERR="$(mktemp)"
+    set +e
+    printf '%s' "$input" | "$GITAUR" "$@" >"$LAST_STDOUT" 2>"$LAST_STDERR"
+    LAST_EXIT=$?
+    set -e
+}
+
 # ---------------------------------------------------------------------------
 # Assertions — each one dumps captured output before failing for diagnostics.
 

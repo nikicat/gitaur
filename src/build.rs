@@ -161,7 +161,15 @@ pub fn cmd_install(
         return Ok(0);
     }
 
-    if !already_confirmed && !ui::confirm("Proceed with installation?", noconfirm)? {
+    // Skip the plan confirm when every package was explicitly named — the
+    // table above just echoes the user's own request. The prompt earns its
+    // place only when the plan drags in unrequested packages (repo deps or
+    // AUR makedepends). The sudo "Continue?" gate (and AUR review prompts)
+    // still fire regardless.
+    if !already_confirmed
+        && !plan.only_requested()
+        && !ui::confirm("Proceed with installation?", noconfirm)?
+    {
         return Err(Error::UserAbort);
     }
 
