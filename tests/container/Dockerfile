@@ -14,6 +14,10 @@
 FROM archlinux:latest
 
 # Refresh keys + base-devel + tools needed for real makepkg runs.
+# cargo-llvm-cov + llvm are present so this same image drives the coverage
+# orchestrator (scripts/coverage.sh): instrumented build, cargo test, and the
+# lcov merge/report step all happen inside the test image — the host (or CI
+# runner) only needs podman.
 RUN pacman -Syu --noconfirm --needed \
         base-devel \
         fakeroot \
@@ -21,6 +25,8 @@ RUN pacman -Syu --noconfirm --needed \
         sudo \
         rust \
         cargo \
+        cargo-llvm-cov \
+        llvm \
         pacman-contrib \
     && pacman -Scc --noconfirm
 

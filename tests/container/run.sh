@@ -12,6 +12,14 @@
 # Image is cached as `gitaur-test:latest`; rebuild with --rebuild.
 # Parallelism: -j N (default = $(nproc), 1 disables, all tests are
 # fully isolated by container so contention is on host CPU/IO only).
+#
+# Coverage mode:
+#   --coverage <dir>   Bind-mount <dir> into each test container at /profraw
+#                      and set LLVM_PROFILE_FILE so the gitaur binary writes
+#                      LLVM source-coverage data there. Also skips the host
+#                      `cargo build` step (the caller is expected to have
+#                      already built an instrumented binary and to set
+#                      GITAUR=<path-inside-/work>). Driven by scripts/coverage.sh.
 
 set -euo pipefail
 
@@ -22,10 +30,12 @@ TESTS_DIR="$REPO_ROOT/tests/container"
 
 rebuild=0
 jobs="$(nproc)"
+coverage_dir=""
 selectors=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --rebuild) rebuild=1 ;;
+        --coverage) coverage_dir="$2"; shift ;;
         -j) jobs="$2"; shift ;;
         -j*) jobs="${1#-j}" ;;
         smoke|extended|all) selectors+=("$1") ;;
@@ -42,11 +52,16 @@ if [[ "$rebuild" == "1" ]] || ! "$CONTAINER" image exists "$IMAGE" 2>/dev/null; 
     "$CONTAINER" build -t "$IMAGE" -f "$TESTS_DIR/Dockerfile" "$TESTS_DIR"
 fi
 
-# Build the binary on the host once, mount /work read-only. `tarpit` is the
-# HTTP-stall example used by the idle-timeout test in extended/ — building
-# it alongside gitaur keeps the test script container-side (no host cargo
-# inside the container).
-( cd "$REPO_ROOT" && cargo build --bin gitaur --example tarpit )
+# Build the binary on the host once, mount /work read-only. In coverage mode
+# the orchestrator has already produced an instrumented binary, so we skip.
+if [[ -z "$coverage_dir" ]]; then
+    # `tarpit` is the HTTP-stall example used by the idle-timeout test in
+    # extended/. Building it alongside gitaur is cheap and keeps the test
+    # script container-side (no host cargo inside the container).
+    ( cd "$REPO_ROOT" && cargo build --bin gitaur --example tarpit )
+else
+    mkdir -p "$coverage_dir"
+fi
 
 # Resolve selectors into a flat list of test scripts.
 resolve() {
@@ -80,9 +95,24 @@ run_one() {
     local rel="${script#$REPO_ROOT/}"
     local slug="${rel//\//_}"
     local out="$results_dir/$slug.out"
+
+    # Coverage args, built from scalar env vars exported below (bash arrays
+    # don't survive the xargs/bash -c bounce).
+    local cov_args=()
+    if [[ -n "${COVERAGE_DIR:-}" ]]; then
+        # :U asks podman to chown the bind-mount to the in-container UID
+        # (`builder`) so the unprivileged test process can write profraw.
+        cov_args=(
+            -v "$COVERAGE_DIR:/profraw:rw,U"
+            -e "LLVM_PROFILE_FILE=/profraw/gitaur-%p-%m.profraw"
+        )
+        [[ -n "${GITAUR:-}" ]] && cov_args+=(-e "GITAUR=$GITAUR")
+    fi
+
     if "$CONTAINER" run --rm \
             -v "$REPO_ROOT:/work:ro" \
             -v "$(mktemp -d):/tmp/target" \
+            "${cov_args[@]}" \
             "$IMAGE" \
             bash -c "set -e; cd /work && bash $rel" >"$out" 2>&1; then
         echo "PASS $rel"
@@ -104,6 +134,8 @@ run_one() {
 }
 export -f run_one
 export CONTAINER IMAGE REPO_ROOT results_dir
+export COVERAGE_DIR="$coverage_dir"
+export GITAUR="${GITAUR:-}"
 
 pass=0 fail=0
 # `stdbuf -oL` flushes xargs's stdout per line so the FAIL+body block reaches

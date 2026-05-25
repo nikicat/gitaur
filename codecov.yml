@@ -1,22 +1,61 @@
 # Codecov configuration.
 # Docs: https://docs.codecov.com/docs/codecovyml-reference
 
+# Three flags are uploaded by .github/workflows/ci.yml's coverage job:
+#   rust      — `cargo test` profraw only
+#   podman    — tests/container/run.sh profraw only
+#   combined  — union of the two (the "real" coverage)
+# All three measure the same source paths; they differ only in which tests
+# produced the profraw. Flag-specific project statuses make each visible
+# independently in PR comments / dashboards.
+flags:
+  rust:
+    paths:
+      - src/
+  podman:
+    paths:
+      - src/
+  combined:
+    paths:
+      - src/
+
 coverage:
   status:
     # Project-wide status: did total coverage drop?
     # `threshold: 1%` tolerates small fluctuations so PRs aren't blocked by
     # noise (e.g. a generic monomorphization shifting region counts).
+    # The unflagged `default` is the merged total across all uploads. The
+    # rust/podman flags are informational so they surface in PR comments
+    # without gating merges — the combined flag is the gate.
     project:
       default:
+        target: auto
+        threshold: 1%
+        informational: false
+      rust:
+        flags: [rust]
+        target: auto
+        threshold: 1%
+        informational: true
+      podman:
+        flags: [podman]
+        target: auto
+        threshold: 1%
+        informational: true
+      combined:
+        flags: [combined]
         target: auto
         threshold: 1%
         informational: false
 
     # Patch status: are the *newly changed lines* in this PR covered?
     # This is the gate that catches "new feature shipped without tests".
-    # 80% is a defensible floor; raise once the suite is mature.
+    # 80% is a defensible floor; raise once the suite is mature. Measured
+    # against the combined upload so a new line covered by *either* rust or
+    # podman tests counts.
     patch:
       default:
+        flags: [combined]
         target: 80%
         threshold: 0%
         informational: false

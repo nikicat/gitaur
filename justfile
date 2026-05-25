@@ -38,3 +38,18 @@ coverage-lcov:
 # Drop cached .profraw / .profdata / HTML report.
 coverage-clean:
     cargo llvm-cov clean --workspace
+
+# The podman test containers write profraw as an unprivileged subuid (via the
+# :U mount), which the host user can't rm directly — so try `podman unshare`
+# first and fall back to a plain rm (e.g. when using rootful docker).
+# Drop the container coverage build dir, cargo cache, and lcov outputs.
+coverage-all-clean:
+    podman unshare rm -rf target/coverage-build 2>/dev/null || rm -rf target/coverage-build
+    rm -rf target/coverage-cargo coverage
+
+# Runs everything inside the test image (needs only podman/docker on the host),
+# mirroring the coverage job in .github/workflows/ci.yml; writes
+# coverage/lcov-{rust,podman,combined}.info plus summaries.
+# Three-tier coverage: rust tests, podman container tests, and combined.
+coverage-all:
+    bash scripts/coverage.sh
