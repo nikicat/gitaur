@@ -436,6 +436,7 @@ mod tests {
                 .map(|s| Pkgname {
                     name: (*s).into(),
                     provides: Vec::new(),
+                    pkgdesc: None,
                 })
                 .collect(),
             provides: provides.iter().map(|s| (*s).into()).collect(),
@@ -455,11 +456,13 @@ mod tests {
         let mut pkgnames = vec![Pkgname {
             name: provider_pkgname.into(),
             provides: provider_provides.iter().map(|s| (*s).into()).collect(),
+            pkgdesc: None,
         }];
         for s in siblings {
             pkgnames.push(Pkgname {
                 name: (*s).into(),
                 provides: Vec::new(),
+                pkgdesc: None,
             });
         }
         IndexEntry {
@@ -760,10 +763,12 @@ mod tests {
                     Pkgname {
                         name: "test-split-core".into(),
                         provides: Vec::new(),
+                        pkgdesc: None,
                     },
                     Pkgname {
                         name: "test-split-extras".into(),
                         provides: Vec::new(),
+                        pkgdesc: None,
                     },
                 ],
                 depends: vec!["test-split-core".into()],

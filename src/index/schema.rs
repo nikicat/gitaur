@@ -10,10 +10,11 @@ use rkyv::{Archive, Deserialize, Serialize};
 /// fields on [`IndexEntry`] apply to every pkgname implicitly and are not
 /// duplicated here.
 ///
-/// Today this only carries pkgname-scoped `provides`, because that's the one
-/// field gitaur's resolver needs to disambiguate split packages (e.g. yay-
-/// style `-S bisq` matching `bisq-desktop`'s `provides=bisq`, not the other
-/// two siblings in the same pkgbase). Pkgname-scoped `depends`, `conflicts`,
+/// Carries pkgname-scoped `provides` (needed by the resolver to disambiguate
+/// split packages — e.g. yay-style `-S bisq` matching `bisq-desktop`'s
+/// `provides=bisq`, not the other two siblings) and `pkgdesc` (split packages
+/// frequently describe each member separately, with no pkgbase-level desc —
+/// see [`IndexEntry::display_desc`]). Pkgname-scoped `depends`, `conflicts`,
 /// `replaces` etc. can be added the same way if a future feature needs them.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct Pkgname {
@@ -23,6 +24,11 @@ pub struct Pkgname {
     /// Empty for the common case where a pkgbase declares all its provides
     /// at the top level.
     pub provides: Vec<String>,
+    /// `pkgdesc = …` declared inside this pkgname's section in `.SRCINFO`.
+    /// `None` when the description is declared once at the pkgbase level
+    /// (the common non-split case) — that value lives on
+    /// [`IndexEntry::pkgdesc`] instead.
+    pub pkgdesc: Option<String>,
 }
 
 /// One pkgbase row. Split-package pkgnames are all listed in `pkgnames`.
@@ -39,7 +45,11 @@ pub struct IndexEntry {
     pub pkgrel: String,
     /// Optional `epoch` field (often unset).
     pub epoch: Option<String>,
-    /// One-line description (`pkgdesc`).
+    /// Pkgbase-level one-line description (`pkgdesc` declared *before* any
+    /// `pkgname = …` line). `None` for split packages that describe each
+    /// member individually — those descriptions live on [`Pkgname::pkgdesc`].
+    /// Use [`IndexEntry::display_desc`] for the headline shown in the picker
+    /// and `-Ss`, which falls back to the per-pkgname value.
     pub pkgdesc: Option<String>,
     /// Runtime dependencies.
     pub depends: Vec<String>,
@@ -86,6 +96,11 @@ pub struct IndexFile {
     pub entries: Vec<IndexEntry>,
 }
 
+/// Pass through a description, treating an empty string as absent.
+fn nonempty(d: Option<&str>) -> Option<&str> {
+    d.filter(|s| !s.is_empty())
+}
+
 impl IndexEntry {
     /// Iterate every `provides` declared anywhere in this pkgbase —
     /// pkgbase-level first, then each pkgname's scoped provides. Order is
@@ -97,6 +112,32 @@ impl IndexEntry {
                 .iter()
                 .flat_map(|p| p.provides.iter().map(String::as_str)),
         )
+    }
+
+    /// Headline one-line description for the pkgbase row shown in the picker,
+    /// `-Ss`, and `-Si`.
+    ///
+    /// `.SRCINFO` declares `pkgdesc` either once in the pkgbase header (applies
+    /// to every pkgname) or inside individual `pkgname = …` sections (split
+    /// packages that describe each member separately, with no pkgbase-level
+    /// desc). Prefer the pkgbase-level value; otherwise fall back to the
+    /// pkgname matching the pkgbase (the canonical member whose name the picker
+    /// displays), then to the first pkgname carrying any description. Empty
+    /// strings are skipped at every step so a stray `pkgdesc=` doesn't mask a
+    /// real description further down.
+    pub fn display_desc(&self) -> Option<&str> {
+        nonempty(self.pkgdesc.as_deref())
+            .or_else(|| {
+                self.pkgnames
+                    .iter()
+                    .find(|p| self.pkgbase.matches_pkgname(&p.name))
+                    .and_then(|p| nonempty(p.pkgdesc.as_deref()))
+            })
+            .or_else(|| {
+                self.pkgnames
+                    .iter()
+                    .find_map(|p| nonempty(p.pkgdesc.as_deref()))
+            })
     }
 
     /// Pacman-style `[epoch:]pkgver-pkgrel` combined version. Returned as
@@ -115,7 +156,9 @@ impl IndexEntry {
 }
 
 impl IndexFile {
-    /// Current format version constant. Bumped to **4** when
+    /// Current format version constant. Bumped to **5** when
+    /// [`Pkgname::pkgdesc`] was added (per-pkgname descriptions for split
+    /// packages that omit a pkgbase-level `pkgdesc`). Was **4** when
     /// [`IndexEntry::commit_time_unix`] was added (the branch-tip committer
     /// timestamp the search picker sorts on). Was **3** when `pkgbase` and
     /// `Pkgname.name` switched from `String` to the typed `PkgBase` / `PkgName`
@@ -124,7 +167,7 @@ impl IndexFile {
     /// older file with newer types would silently mis-shape the deserialized
     /// struct without the version gate. Older archives must be rebuilt via
     /// `gitaur -Sy`.
-    pub const FORMAT_VERSION: u32 = 4;
+    pub const FORMAT_VERSION: u32 = 5;
 
     /// Empty in-memory index. Used when no on-disk file exists yet.
     pub const fn empty() -> Self {
@@ -160,6 +203,74 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(e.version(), "1.0-2");
+    }
+
+    fn pkg(name: &str, desc: Option<&str>) -> Pkgname {
+        Pkgname {
+            name: name.into(),
+            provides: Vec::new(),
+            pkgdesc: desc.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn display_desc_prefers_pkgbase_level() {
+        let e = IndexEntry {
+            pkgbase: "foo".into(),
+            pkgdesc: Some("base desc".into()),
+            pkgnames: vec![pkg("foo", Some("member desc"))],
+            ..Default::default()
+        };
+        assert_eq!(e.display_desc(), Some("base desc"));
+    }
+
+    #[test]
+    fn display_desc_falls_back_to_canonical_pkgname() {
+        // Split package with no pkgbase-level desc: prefer the member whose
+        // name matches the pkgbase (the one the picker shows), not a sibling.
+        let e = IndexEntry {
+            pkgbase: "systemd-selinux".into(),
+            pkgdesc: None,
+            pkgnames: vec![
+                pkg("systemd-libs-selinux", Some("client libraries")),
+                pkg("systemd-selinux", Some("service manager")),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(e.display_desc(), Some("service manager"));
+    }
+
+    #[test]
+    fn display_desc_falls_back_to_first_member_when_no_canonical_match() {
+        let e = IndexEntry {
+            pkgbase: "foo".into(),
+            pkgdesc: None,
+            pkgnames: vec![pkg("foo-bin", None), pkg("foo-extras", Some("extras"))],
+            ..Default::default()
+        };
+        assert_eq!(e.display_desc(), Some("extras"));
+    }
+
+    #[test]
+    fn display_desc_skips_empty_strings() {
+        let e = IndexEntry {
+            pkgbase: "foo".into(),
+            pkgdesc: Some(String::new()),
+            pkgnames: vec![pkg("foo", Some("real desc"))],
+            ..Default::default()
+        };
+        assert_eq!(e.display_desc(), Some("real desc"));
+    }
+
+    #[test]
+    fn display_desc_none_when_nothing_anywhere() {
+        let e = IndexEntry {
+            pkgbase: "foo".into(),
+            pkgdesc: None,
+            pkgnames: vec![pkg("foo", None)],
+            ..Default::default()
+        };
+        assert_eq!(e.display_desc(), None);
     }
 
     #[test]

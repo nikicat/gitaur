@@ -130,7 +130,7 @@ fn write_search_result<W: std::io::Write>(out: &mut W, entry: &IndexEntry) -> st
         entry.pkgbase,
         version_string(entry.epoch.as_ref(), &entry.pkgver, &entry.pkgrel)
     )?;
-    if let Some(desc) = &entry.pkgdesc {
+    if let Some(desc) = entry.display_desc() {
         writeln!(out, "    {desc}")?;
     }
     Ok(())
@@ -175,7 +175,7 @@ fn print_info(e: &IndexEntry) {
         "Version         : {}",
         version_string(e.epoch.as_ref(), &e.pkgver, &e.pkgrel)
     );
-    if let Some(d) = &e.pkgdesc {
+    if let Some(d) = e.display_desc() {
         println!("Description     : {d}");
     }
     if !e.depends.is_empty() {
@@ -218,6 +218,7 @@ mod tests {
             pkgnames: vec![Pkgname {
                 name: pkgbase.into(),
                 provides: Vec::new(),
+                pkgdesc: None,
             }],
             pkgver: "1.0".into(),
             pkgrel: "1".into(),

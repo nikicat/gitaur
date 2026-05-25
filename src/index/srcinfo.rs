@@ -56,6 +56,7 @@ pub fn parse(text: &str) -> Result<IndexEntry> {
                 e.pkgnames.push(Pkgname {
                     name: v.into(),
                     provides: Vec::new(),
+                    pkgdesc: None,
                 });
                 current_pkgname = Some(e.pkgnames.len() - 1);
             }
@@ -63,7 +64,15 @@ pub fn parse(text: &str) -> Result<IndexEntry> {
             "pkgver" if current_pkgname.is_none() => e.pkgver = v.into(),
             "pkgrel" if current_pkgname.is_none() => e.pkgrel = v.into(),
             "epoch" if current_pkgname.is_none() => e.epoch = Some(v.into()),
-            "pkgdesc" if current_pkgname.is_none() => e.pkgdesc = Some(v.into()),
+
+            // `pkgdesc` is attributed like `provides`: pkgbase-level when it
+            // precedes any `pkgname = …`, otherwise scoped to that pkgname.
+            // Split packages routinely omit a pkgbase desc and describe each
+            // member instead; `IndexEntry::display_desc` reunites the two.
+            "pkgdesc" => match current_pkgname {
+                None => e.pkgdesc = Some(v.into()),
+                Some(i) => e.pkgnames[i].pkgdesc = Some(v.into()),
+            },
 
             "arch" => e.arch.push(v.into()),
             // `provides` gets attribution: pkgbase-level vs pkgname-scoped.
@@ -95,6 +104,7 @@ pub fn parse(text: &str) -> Result<IndexEntry> {
         e.pkgnames.push(Pkgname {
             name: e.pkgbase.canonical_pkgname(),
             provides: Vec::new(),
+            pkgdesc: None,
         });
     }
     for v in [
@@ -247,6 +257,12 @@ pkgname = bisq-daemon
         // Pkgbase-level + pkgname-level depends are both collected.
         assert!(e.depends.contains(&"mingw-w64-crt".to_owned()));
         assert!(e.depends.contains(&"mingw-w64-winpthreads".to_owned()));
+        // `pkgdesc` declared inside a `pkgname` section lands on that pkgname,
+        // not on the pkgbase (which has no desc here).
+        assert!(e.pkgdesc.is_none());
+        assert!(e.pkgnames[0].pkgdesc.is_none());
+        assert_eq!(e.pkgnames[1].pkgdesc.as_deref(), Some("Runtime libs"));
+        assert!(e.pkgnames[2].pkgdesc.is_none());
     }
 
     #[test]

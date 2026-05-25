@@ -492,6 +492,7 @@ mod tests {
                 .map(|(n, provs)| Pkgname {
                     name: (*n).into(),
                     provides: provs.iter().map(|p| (*p).into()).collect(),
+                    pkgdesc: None,
                 })
                 .collect(),
             replaces: replaces.iter().map(|s| (*s).into()).collect(),

@@ -205,9 +205,9 @@ fn label_plain(row: &Row<'_>) -> String {
         }
         Row::Aur(e) => {
             let ver = aur_version(e);
-            match e.pkgdesc.as_deref() {
-                Some(d) if !d.is_empty() => format!("aur/{} {ver}  {d}", e.pkgbase),
-                _ => format!("aur/{} {ver}", e.pkgbase),
+            match e.display_desc() {
+                Some(d) => format!("aur/{} {ver}  {d}", e.pkgbase),
+                None => format!("aur/{} {ver}", e.pkgbase),
             }
         }
     }
@@ -240,9 +240,9 @@ fn label_colored(row: &Row<'_>) -> String {
                 style(&e.pkgbase).bold(),
                 style(ver).green(),
             );
-            match e.pkgdesc.as_deref() {
-                Some(d) if !d.is_empty() => format!("{head}  {}", ui::dim(d)),
-                _ => head,
+            match e.display_desc() {
+                Some(d) => format!("{head}  {}", ui::dim(d)),
+                None => head,
             }
         }
     }
@@ -269,6 +269,7 @@ mod tests {
             pkgnames: vec![Pkgname {
                 name: pkgbase.into(),
                 provides: Vec::new(),
+                pkgdesc: None,
             }],
             pkgver: "1.2.3".into(),
             pkgrel: "4".into(),

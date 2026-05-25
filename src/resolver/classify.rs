@@ -75,6 +75,7 @@ mod tests {
                 .map(|s| Pkgname {
                     name: (*s).into(),
                     provides: Vec::new(),
+                    pkgdesc: None,
                 })
                 .collect(),
             provides: provides.iter().map(|s| (*s).into()).collect(),

@@ -109,6 +109,7 @@ mod tests {
             pkgnames: vec![Pkgname {
                 name: pkgname.into(),
                 provides: Vec::new(),
+                pkgdesc: None,
             }],
             pkgver: pkgver.into(),
             pkgrel: pkgrel.into(),

@@ -1,0 +1,25 @@
+# Split pkgbase whose `pkgdesc` is declared ONLY per-pkgname — there is no
+# pkgbase-level pkgdesc. `makepkg --printsrcinfo` emits each description inside
+# its `pkgname = …` section, the exact shape of real AUR split packages like
+# `systemd-selinux`. Older gitaur only read pkgbase-level pkgdesc, so every
+# such package showed a blank description in the picker, `-Ss`, and `-Si`.
+# Regression target for per-pkgname pkgdesc parsing + display_desc fallback.
+#
+# Note one pkgname (`test-splitdesc`) matches the pkgbase: that's the
+# "canonical" member whose description display_desc surfaces for the row.
+pkgbase=test-splitdesc
+pkgname=(test-splitdesc test-splitdesc-libs)
+pkgver=1.0
+pkgrel=1
+arch=('any')
+license=('MIT')
+
+package_test-splitdesc() {
+    pkgdesc='the main splitdesc package'
+    install -Dm644 /dev/null "$pkgdir/usr/share/test-splitdesc/marker"
+}
+
+package_test-splitdesc-libs() {
+    pkgdesc='splitdesc client libraries'
+    install -Dm644 /dev/null "$pkgdir/usr/share/test-splitdesc-libs/marker"
+}

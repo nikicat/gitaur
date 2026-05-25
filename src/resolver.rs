@@ -329,6 +329,7 @@ mod tests {
                 .map(|s| Pkgname {
                     name: (*s).into(),
                     provides: Vec::new(),
+                    pkgdesc: None,
                 })
                 .collect(),
             depends: depends.iter().map(|s| (*s).into()).collect(),

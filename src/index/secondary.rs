@@ -220,7 +220,9 @@ impl Secondary {
 }
 
 fn entry_matches(e: &IndexEntry, r: &regex::Regex) -> bool {
-    e.pkgnames.iter().any(|p| p.name.matches_regex(r))
+    e.pkgnames
+        .iter()
+        .any(|p| p.name.matches_regex(r) || p.pkgdesc.as_deref().is_some_and(|d| r.is_match(d)))
         || e.pkgdesc.as_deref().is_some_and(|d| r.is_match(d))
         || e.all_provides().any(|p| r.is_match(p))
 }
@@ -251,6 +253,7 @@ mod tests {
                 .map(|s| Pkgname {
                     name: (*s).into(),
                     provides: Vec::new(),
+                    pkgdesc: None,
                 })
                 .collect(),
             provides: provides.iter().map(|s| (*s).into()).collect(),
@@ -271,11 +274,13 @@ mod tests {
         let mut pkgnames = vec![Pkgname {
             name: owner.into(),
             provides: owner_provides.iter().map(|s| (*s).into()).collect(),
+            pkgdesc: None,
         }];
         for o in others {
             pkgnames.push(Pkgname {
                 name: (*o).into(),
                 provides: Vec::new(),
+                pkgdesc: None,
             });
         }
         IndexEntry {
