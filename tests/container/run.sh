@@ -42,8 +42,11 @@ if [[ "$rebuild" == "1" ]] || ! "$CONTAINER" image exists "$IMAGE" 2>/dev/null; 
     "$CONTAINER" build -t "$IMAGE" -f "$TESTS_DIR/Dockerfile" "$TESTS_DIR"
 fi
 
-# Build the binary on the host once, mount /work read-only.
-( cd "$REPO_ROOT" && cargo build --bin gitaur )
+# Build the binary on the host once, mount /work read-only. `tarpit` is the
+# HTTP-stall example used by the idle-timeout test in extended/ — building
+# it alongside gitaur keeps the test script container-side (no host cargo
+# inside the container).
+( cd "$REPO_ROOT" && cargo build --bin gitaur --example tarpit )
 
 # Resolve selectors into a flat list of test scripts.
 resolve() {
