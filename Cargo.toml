@@ -23,7 +23,11 @@ path = "src/main.rs"
 # fetch update_refs) land in a published gix release. Together they bring
 # `gitaur -Sy` against the AUR mirror from ~11s to ~5s (≈ git fetch parity).
 gix = { git = "https://github.com/nikicat/gitoxide", rev = "7606d2ed1", features = [
-  "blocking-http-transport-reqwest-rust-tls",
+  # curl-rustls (over reqwest-rust-tls) so gix's low_speed_* / lowSpeedLimit
+  # config actually fires — only the curl transport implements it, the
+  # reqwest blocking transport silently ignores those fields. Adds libcurl
+  # (dyn-linked) but keeps TLS pure-Rust via rustls.
+  "blocking-http-transport-curl-rustls",
   "worktree-mutation",
 ] }
 clap = { version = "4", features = ["derive"] }

@@ -16,6 +16,11 @@ pub struct Config {
     pub build_dir: PathBuf,
     /// Git URL of the AUR mirror to clone.
     pub mirror_url: String,
+    /// Abort a clone/fetch if the HTTP transport sees fewer than 1 byte/sec
+    /// for this many seconds. Wired into gix's `http.lowSpeedTime` /
+    /// `http.lowSpeedLimit` so the curl backend enforces it at the syscall
+    /// level. Set to 0 to disable.
+    pub mirror_idle_timeout_secs: u64,
     /// Worker count for parallel index builds.
     pub index_threads: usize,
     /// Re-fetch mirror if `index.bin` is older than this (used by no-arg run).

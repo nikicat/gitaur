@@ -5,6 +5,7 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::mirror::http_transport_options;
 use crate::ui;
 use gix::remote::Direction;
 use std::path::Path;
@@ -23,11 +24,20 @@ pub fn bootstrap_clone(cfg: &Config, dest: &Path) -> Result<()> {
     // (matches `git clone`), but for a bare AUR mirror we want the
     // `git clone --bare` semantics: branches land directly under
     // `refs/heads/*` so collect_branches() / is_bootstrapped() see them.
+    let opts = http_transport_options(cfg);
     let mut prep = gix::prepare_clone_bare(cfg.mirror_url.as_str(), dest)
         .map_err(|e| Error::Gix(format!("prepare_clone_bare: {e}")))?
         .configure_remote(|mut remote| {
             remote.replace_refspecs(["+refs/heads/*:refs/heads/*"], Direction::Fetch)?;
             Ok(remote)
+        })
+        .configure_connection(move |connection| {
+            // Wire lowSpeed* into the curl transport so the bootstrap fetch
+            // bails when the server stops streaming (vs. waiting on TCP retry).
+            // `configure_connection` may fire more than once on retry, so
+            // we clone our cached `opts` each time.
+            connection.set_transport_options(Box::new(opts.clone()));
+            Ok(())
         });
     let (_repo, _outcome) = prep
         .fetch_only(&mut progress, &interrupt)

@@ -5,7 +5,7 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::mirror::MirrorRepo;
+use crate::mirror::{boxed_http_options, MirrorRepo};
 use crate::ui::GixProgress;
 use gix::bstr::ByteSlice;
 use gix::refs::TargetRef;
@@ -29,8 +29,8 @@ pub struct RefUpdate {
 }
 
 /// Fetch `refs/heads/*` from the mirror remote and collect [`RefUpdate`]s.
-#[instrument(skip(_cfg, mirror))]
-pub fn incremental_fetch(_cfg: &Config, mirror: &MirrorRepo) -> Result<Vec<RefUpdate>> {
+#[instrument(skip(cfg, mirror))]
+pub fn incremental_fetch(cfg: &Config, mirror: &MirrorRepo) -> Result<Vec<RefUpdate>> {
     let mut progress = GixProgress::new("fetch");
     let interrupt = AtomicBool::new(false);
 
@@ -41,9 +41,10 @@ pub fn incremental_fetch(_cfg: &Config, mirror: &MirrorRepo) -> Result<Vec<RefUp
             .ok_or_else(|| Error::Gix("no default remote configured".into()))?
             .map_err(|e| Error::Gix(format!("find_default_remote: {e}")))?;
 
-        let connection = remote
+        let mut connection = remote
             .connect(Direction::Fetch)
             .map_err(|e| Error::Gix(format!("connect: {e}")))?;
+        connection.set_transport_options(boxed_http_options(cfg));
 
         debug!("preparing fetch: handshake + list refs against remote");
         let t_prepare = Instant::now();

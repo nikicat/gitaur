@@ -10,12 +10,32 @@ use crate::error::{Error, Result};
 use crate::index;
 use crate::paths;
 use crate::ui;
+use gix::protocol::transport::client::blocking_io::http;
+use std::any::Any;
 use std::path::{Path, PathBuf};
 
 pub mod clone;
 pub mod fetch;
 pub mod sideband;
 pub mod worktree;
+
+/// Build the `http::Options` payload gix's curl transport downcasts in its
+/// `configure()` hook. Sets `lowSpeedLimit=1`, `lowSpeedTime=cfg.idle_secs`
+/// so the connection aborts after `idle_secs` of <1 byte/s — i.e., true
+/// silence from the remote, not a total deadline.
+pub(crate) fn http_transport_options(cfg: &Config) -> http::Options {
+    let mut opts = http::Options::default();
+    if cfg.mirror_idle_timeout_secs > 0 {
+        opts.low_speed_limit_bytes_per_second = 1;
+        opts.low_speed_time_seconds = cfg.mirror_idle_timeout_secs;
+    }
+    opts
+}
+
+/// `set_transport_options` wants `Box<dyn Any>`; wrap once at the call site.
+pub(crate) fn boxed_http_options(cfg: &Config) -> Box<dyn Any + Send + Sync> {
+    Box::new(http_transport_options(cfg))
+}
 
 /// Handle to the bare AUR mirror on disk.
 pub struct MirrorRepo {
