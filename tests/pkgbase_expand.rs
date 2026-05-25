@@ -111,9 +111,10 @@ fn pkgbase_only_target_expands_with_pkgbase_target_and_direct_pkgnames() {
     plan.direct_targets
         .extend(expanded.direct_pkgnames.into_iter().map(Into::into));
     assert_eq!(plan.aur_strata, vec![vec![PkgBase::from("bisq")]]);
-    assert!(plan
-        .direct_targets
-        .contains_pkgname(&PkgName::from("bisq-desktop")));
+    assert!(
+        plan.direct_targets
+            .contains_pkgname(&PkgName::from("bisq-desktop"))
+    );
 }
 
 #[test]
@@ -186,15 +187,19 @@ fn split_pkgbase_partial_selection_constrains_build_pipeline() {
         plan.aur_strata,
         vec![vec![PkgBase::from("linux-headers-multi")]]
     );
-    assert!(plan
-        .direct_targets
-        .contains_pkgname(&PkgName::from("linux-headers-multi-core")));
-    assert!(plan
-        .direct_targets
-        .contains_pkgname(&PkgName::from("linux-headers-multi-extras")));
-    assert!(!plan
-        .direct_targets
-        .contains_pkgname(&PkgName::from("linux-headers-multi-docs")));
+    assert!(
+        plan.direct_targets
+            .contains_pkgname(&PkgName::from("linux-headers-multi-core"))
+    );
+    assert!(
+        plan.direct_targets
+            .contains_pkgname(&PkgName::from("linux-headers-multi-extras"))
+    );
+    assert!(
+        !plan
+            .direct_targets
+            .contains_pkgname(&PkgName::from("linux-headers-multi-docs"))
+    );
     assert_eq!(plan.pkgname_selections.len(), 1);
 }
 
@@ -258,15 +263,20 @@ fn provides_target_rewrites_to_providing_pkgname_with_selection() {
     plan.direct_targets
         .extend(expanded.direct_pkgnames.into_iter().map(Into::into));
     assert_eq!(plan.aur_strata, vec![vec![PkgBase::from("bisq")]]);
-    assert!(plan
-        .direct_targets
-        .contains_pkgname(&PkgName::from("bisq-desktop")));
-    assert!(!plan
-        .direct_targets
-        .contains_pkgname(&PkgName::from("bisq-cli")));
-    assert!(!plan
-        .direct_targets
-        .contains_pkgname(&PkgName::from("bisq-daemon")));
+    assert!(
+        plan.direct_targets
+            .contains_pkgname(&PkgName::from("bisq-desktop"))
+    );
+    assert!(
+        !plan
+            .direct_targets
+            .contains_pkgname(&PkgName::from("bisq-cli"))
+    );
+    assert!(
+        !plan
+            .direct_targets
+            .contains_pkgname(&PkgName::from("bisq-daemon"))
+    );
     assert_eq!(
         plan.pkgname_selections
             .get(&PkgBase::from("bisq"))
@@ -351,12 +361,14 @@ fn pkgname_collision_with_another_pkgbase_does_not_leak_into_plan() {
         vec![vec![PkgBase::from("commit-mono-font")]],
         "the unrelated otf-commit-mono pkgbase must NOT leak into the build plan",
     );
-    assert!(plan
-        .direct_targets
-        .contains_pkgname(&PkgName::from("otf-commit-mono")));
-    assert!(plan
-        .direct_targets
-        .contains_pkgname(&PkgName::from("ttf-commit-mono")));
+    assert!(
+        plan.direct_targets
+            .contains_pkgname(&PkgName::from("otf-commit-mono"))
+    );
+    assert!(
+        plan.direct_targets
+            .contains_pkgname(&PkgName::from("ttf-commit-mono"))
+    );
 }
 
 #[test]

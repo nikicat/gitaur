@@ -1,9 +1,9 @@
 //! Decide whether to handle an operation natively or pass through to pacman.
 
 use crate::build;
+use crate::cli::Cli;
 use crate::cli::flags::{self, PacFlags};
 use crate::cli::search;
-use crate::cli::Cli;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::index;
@@ -34,9 +34,7 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
         Some('S') => handle_s(cfg, cli, &f, argv),
         // Pre-scan in `cli::run` only routes the bare `-Qu` form here; every
         // other Q variant is plain pacman territory and never reaches dispatch.
-        Some('Q') => {
-            build::cmd_query_upgrades(cfg, cli.devel || cfg.devel || f.has_long("devel"))
-        }
+        Some('Q') => build::cmd_query_upgrades(cfg, cli.devel || cfg.devel || f.has_long("devel")),
         Some(other) => Err(Error::other(format!(
             "unsupported gitaur op `-{other}` (pacman pass-through goes via the pre-scan, this dispatch is `-S` / `-Qu` only)"
         ))),

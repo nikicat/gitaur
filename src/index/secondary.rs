@@ -158,10 +158,10 @@ impl Secondary {
         // string slice the typed wrappers share — the cross-identity
         // string-match claim is encapsulated here.
         let s = <PkgName as std::borrow::Borrow<str>>::borrow(name);
-        if let Some(providers) = self.by_provides.get(s) {
-            if let Some(i) = providers.first() {
-                return AurClass::AsProvides(&idx.entries[*i as usize]);
-            }
+        if let Some(providers) = self.by_provides.get(s)
+            && let Some(i) = providers.first()
+        {
+            return AurClass::AsProvides(&idx.entries[*i as usize]);
         }
         if let Some(i) = self.by_pkgbase.get(s) {
             return AurClass::AsPkgbase(&idx.entries[*i as usize]);
@@ -201,10 +201,10 @@ impl Secondary {
         if let Some(i) = self.by_name.get(bare) {
             return idx.entries.get(*i as usize);
         }
-        if let Some(providers) = self.by_provides.get(bare) {
-            if let Some(i) = providers.first() {
-                return idx.entries.get(*i as usize);
-            }
+        if let Some(providers) = self.by_provides.get(bare)
+            && let Some(i) = providers.first()
+        {
+            return idx.entries.get(*i as usize);
         }
         let i = self.by_pkgbase.get(bare)?;
         idx.entries.get(*i as usize)

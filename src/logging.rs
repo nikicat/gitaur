@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{fmt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, fmt};
 
 use crate::paths;
 
@@ -23,8 +23,7 @@ const KEEP_LOGS: usize = 10;
 /// HTTP-plumbing layers (h2 frame-by-frame, hyper connection pool, rustls
 /// platform verifier, reqwest connect) which otherwise drown gitaur's own
 /// events ~5:1 during a single fetch.
-const FILE_LOG_FILTER: &str =
-    "debug,h2=info,hyper=info,hyper_util=info,reqwest=info,rustls=info,rustls_platform_verifier=info";
+const FILE_LOG_FILTER: &str = "debug,h2=info,hyper=info,hyper_util=info,reqwest=info,rustls=info,rustls_platform_verifier=info";
 
 /// Initialize tracing. Returns the log file path when file logging is active.
 ///

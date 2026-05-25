@@ -51,10 +51,10 @@ pub fn classify(by: Option<&Secondary>, pac: &PacmanIndex, name: &str) -> Source
     if let Some(&i) = by.by_name.get(name) {
         return Source::Aur(i as usize);
     }
-    if let Some(providers) = by.by_provides.get(name) {
-        if let Some(&i) = providers.first() {
-            return Source::Aur(i as usize);
-        }
+    if let Some(providers) = by.by_provides.get(name)
+        && let Some(&i) = providers.first()
+    {
+        return Source::Aur(i as usize);
     }
     if let Some(&i) = by.by_pkgbase.get(name) {
         return Source::Aur(i as usize);

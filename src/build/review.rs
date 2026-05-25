@@ -11,8 +11,8 @@
 
 use crate::error::{Error, Result};
 use crate::index::srcinfo;
-use crate::mirror::worktree::Worktree;
 use crate::mirror::MirrorRepo;
+use crate::mirror::worktree::Worktree;
 use crate::names::PkgBase;
 use crate::pacman::alpm_db::{InstalledCounterpart, MatchedVia};
 use crate::ui;
@@ -451,14 +451,14 @@ pub fn find_installed_commit(
 #[cfg(test)]
 mod tests {
     use super::{
-        diff_command, fallback_note, header, menu_items, upgrade_base_version, HistorySearch,
-        FULL_DIFF_CONTEXT,
+        FULL_DIFF_CONTEXT, HistorySearch, diff_command, fallback_note, header, menu_items,
+        upgrade_base_version,
     };
     use crate::names::{PkgBase, PkgName};
     use crate::pacman::alpm_db::{InstalledCounterpart, MatchedVia};
     use crate::version::{Ver, Version};
-    use gix::hash::Kind;
     use gix::ObjectId;
+    use gix::hash::Kind;
     use std::path::Path;
 
     /// Default search bound used in the `fallback_note` assertions — the
@@ -803,7 +803,7 @@ mod highlight {
     use syntect::easy::HighlightLines;
     use syntect::highlighting::{Theme, ThemeSet};
     use syntect::parsing::SyntaxSet;
-    use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
+    use syntect::util::{LinesWithEndings, as_24_bit_terminal_escaped};
 
     struct Ctx {
         syntaxes: SyntaxSet,

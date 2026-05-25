@@ -18,9 +18,9 @@
 
 use crate::build::Target;
 use crate::error::{Error, Result};
+use crate::index::IndexFile;
 use crate::index::schema::IndexEntry;
 use crate::index::secondary::{self, Secondary};
-use crate::index::IndexFile;
 use crate::names::{PkgBase, PkgName};
 use crate::pacman::alpm_db::PacmanIndex;
 use std::collections::HashMap;

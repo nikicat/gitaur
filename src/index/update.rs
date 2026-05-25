@@ -3,8 +3,8 @@
 use crate::error::{Error, Result};
 use crate::index::schema::{IndexEntry, IndexFile};
 use crate::index::srcinfo;
-use crate::mirror::fetch::RefUpdate;
 use crate::mirror::MirrorRepo;
+use crate::mirror::fetch::RefUpdate;
 use crate::names::PkgBase;
 use gix::ObjectId;
 use std::collections::HashMap;

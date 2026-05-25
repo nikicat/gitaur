@@ -8,8 +8,8 @@ use crate::mirror::MirrorRepo;
 use crate::ui;
 use gix::ObjectId;
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tracing::{debug, info, instrument, warn};
 

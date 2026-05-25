@@ -8,7 +8,7 @@
 //! integration tests sharing the same process / static.
 
 use gitaur::config::defaults::default_config;
-use gitaur::index::build::{full_build, WORKER_REPO_OPENS};
+use gitaur::index::build::{WORKER_REPO_OPENS, full_build};
 use gitaur::mirror::MirrorRepo;
 use gitaur::testing::git;
 use std::path::Path;

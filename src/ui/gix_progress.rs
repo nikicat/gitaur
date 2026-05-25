@@ -122,13 +122,13 @@ impl GixProgress {
             self.own_name.clone()
         };
         self.restart_leaf(&name);
-        if let Some(m) = self.own_max {
-            if let Some(pb) = self.lock_leaf().as_ref() {
-                if self.own_unit_is_bytes {
-                    promote_byte_bar(pb, m);
-                } else {
-                    promote_count_bar(pb, m);
-                }
+        if let Some(m) = self.own_max
+            && let Some(pb) = self.lock_leaf().as_ref()
+        {
+            if self.own_unit_is_bytes {
+                promote_byte_bar(pb, m);
+            } else {
+                promote_count_bar(pb, m);
             }
         }
     }

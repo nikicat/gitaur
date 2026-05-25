@@ -29,7 +29,7 @@ use gitaur::config::defaults::default_config;
 use gitaur::index::build::full_build;
 use gitaur::mirror::MirrorRepo;
 use gitaur::testing::git;
-use nix::sys::resource::{getrusage, UsageWho};
+use nix::sys::resource::{UsageWho, getrusage};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

@@ -5,14 +5,14 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::mirror::{boxed_http_options, MirrorRepo};
+use crate::mirror::{MirrorRepo, boxed_http_options};
 use crate::ui::GixProgress;
+use gix::ObjectId;
 use gix::bstr::ByteSlice;
 use gix::refs::TargetRef;
 use gix::remote::fetch::refs::update::{Mode, Outcome as UpdateOutcome};
-use gix::remote::fetch::{refmap::Mapping, Status};
-use gix::remote::{ref_map::Options as RefMapOptions, Direction};
-use gix::ObjectId;
+use gix::remote::fetch::{Status, refmap::Mapping};
+use gix::remote::{Direction, ref_map::Options as RefMapOptions};
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 use tracing::{debug, info, instrument};

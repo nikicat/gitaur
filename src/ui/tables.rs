@@ -8,8 +8,8 @@ use crate::pacman::invoke::{PkgUpgrade, REPO_AUR};
 use crate::pacman::verdiff::{self, BumpKind};
 
 use console::style;
-use dialoguer::theme::Theme;
 use dialoguer::MultiSelect;
+use dialoguer::theme::Theme;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::IsTerminal;

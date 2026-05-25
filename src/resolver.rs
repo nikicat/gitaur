@@ -2,8 +2,8 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::index::secondary::{self, Secondary};
 use crate::index::IndexFile;
+use crate::index::secondary::{self, Secondary};
 use crate::names::{PkgBase, PkgName, PkgTarget};
 use crate::pacman::alpm_db::PacmanIndex;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -13,8 +13,8 @@ pub mod classify;
 pub mod pkgbase_expand;
 pub mod topo;
 
-pub use classify::{classify, Source};
-pub use pkgbase_expand::{expand_pkgbase_targets, ExpandedTargets};
+pub use classify::{Source, classify};
+pub use pkgbase_expand::{ExpandedTargets, expand_pkgbase_targets};
 
 /// Resolved install plan partitioned by source.
 ///

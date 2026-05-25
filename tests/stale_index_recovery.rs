@@ -13,14 +13,14 @@
 //! [`ScopedStateRoot`] guard so no env-var mutation is needed and the
 //! override is auto-cleared on test exit.
 
-use gitaur::config::defaults::default_config;
 use gitaur::config::Config;
+use gitaur::config::defaults::default_config;
 use gitaur::index::{self, IndexFile};
 use gitaur::mirror;
 use gitaur::names::PkgBase;
 use gitaur::paths;
 use gitaur::runopts::{self, RunOpts};
-use gitaur::testing::{git, ScopedStateRoot};
+use gitaur::testing::{ScopedStateRoot, git};
 use std::path::Path;
 use tempfile::TempDir;
 

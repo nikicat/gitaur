@@ -10,7 +10,7 @@ use crate::build::{self, Target};
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::index::{self, secondary::Secondary, IndexEntry};
+use crate::index::{self, IndexEntry, secondary::Secondary};
 use crate::names::PkgTarget;
 use crate::pacman::alpm_db::{self, RepoHit};
 use crate::paths;

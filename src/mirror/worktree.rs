@@ -276,9 +276,11 @@ mod tests {
         // OID round-trip: the admin HEAD must point at the same commit we
         // peeled via gix.
         let head_in_admin = fs::read_to_string(bare.join("worktrees/foo/HEAD")).unwrap();
-        assert!(head_in_admin
-            .trim_end()
-            .starts_with(&wt.head_oid.to_string()));
+        assert!(
+            head_in_admin
+                .trim_end()
+                .starts_with(&wt.head_oid.to_string())
+        );
     }
 
     #[test]

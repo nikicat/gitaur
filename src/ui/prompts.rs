@@ -49,10 +49,10 @@ pub fn select_pkgnames(
     noconfirm: bool,
 ) -> std::io::Result<Vec<PkgName>> {
     if pkgnames.len() <= 1 {
-        if let Some(only) = pkgnames.first() {
-            if !pkgbase.matches_pkgname(only) {
-                note(&format!("resolved pkgbase `{pkgbase}` → `{only}`"));
-            }
+        if let Some(only) = pkgnames.first()
+            && !pkgbase.matches_pkgname(only)
+        {
+            note(&format!("resolved pkgbase `{pkgbase}` → `{only}`"));
         }
         return Ok(pkgnames.to_vec());
     }

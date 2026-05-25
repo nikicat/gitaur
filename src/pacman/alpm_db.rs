@@ -248,18 +248,18 @@ impl PacmanIndex {
         if let Some((n, _)) = self.installed.get_key_value(name) {
             return Some((n, true));
         }
-        if let Some(provs) = self.installed_providers.get(name) {
-            if let Some(p) = provs.first() {
-                return Some((p, true));
-            }
+        if let Some(provs) = self.installed_providers.get(name)
+            && let Some(p) = provs.first()
+        {
+            return Some((p, true));
         }
         if let Some((n, _)) = self.sync_versions.get_key_value(name) {
             return Some((n, false));
         }
-        if let Some(provs) = self.sync_providers.get(name) {
-            if let Some(p) = provs.first() {
-                return Some((p, false));
-            }
+        if let Some(provs) = self.sync_providers.get(name)
+            && let Some(p) = provs.first()
+        {
+            return Some((p, false));
         }
         None
     }
@@ -327,16 +327,16 @@ impl PacmanIndex {
         let result = hint
             .and_then(|h| self.counterpart_for_hint(entry, h))
             .or(unhinted);
-        if let (Some(h), Some(r), Some(u)) = (hint, result, unhinted) {
-            if r.pkgname != u.pkgname {
-                tracing::warn!(
-                    pkgbase = %entry.pkgbase,
-                    hint = %h,
-                    hinted = %r.pkgname,
-                    unhinted = %u.pkgname,
-                    "counterpart hint diverged from unhinted lookup",
-                );
-            }
+        if let (Some(h), Some(r), Some(u)) = (hint, result, unhinted)
+            && r.pkgname != u.pkgname
+        {
+            tracing::warn!(
+                pkgbase = %entry.pkgbase,
+                hint = %h,
+                hinted = %r.pkgname,
+                unhinted = %u.pkgname,
+                "counterpart hint diverged from unhinted lookup",
+            );
         }
         result
     }
@@ -431,10 +431,10 @@ impl PacmanIndex {
         let scoped_provs = entry.pkgnames.iter().flat_map(|p| &p.provides);
         for prov in scoped_provs.chain(entry.provides.iter()) {
             let name = strip_version_constraint(prov);
-            if let Some((stored_name, version)) = self.installed.get_key_value(name) {
-                if !provides_matches.iter().any(|(n, _)| *n == stored_name) {
-                    provides_matches.push((stored_name, version.as_ver()));
-                }
+            if let Some((stored_name, version)) = self.installed.get_key_value(name)
+                && !provides_matches.iter().any(|(n, _)| *n == stored_name)
+            {
+                provides_matches.push((stored_name, version.as_ver()));
             }
         }
         if provides_matches.len() > 1 {

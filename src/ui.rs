@@ -18,13 +18,13 @@ mod tables;
 
 pub use gix_progress::GixProgress;
 pub use progress::{
-    bar_bytes, bar_bytes_streaming, bar_count, bar_sideband, promote_byte_bar, promote_count_bar,
-    spinner, tick, TICK_PERIOD,
+    TICK_PERIOD, bar_bytes, bar_bytes_streaming, bar_count, bar_sideband, promote_byte_bar,
+    promote_count_bar, spinner, tick,
 };
 pub use prompts::{confirm, select_pkgnames};
-pub use tables::{install_table, pkg_list, select_upgrades, upgrade_table, UpgradeSelection};
+pub use tables::{UpgradeSelection, install_table, pkg_list, select_upgrades, upgrade_table};
 
-use console::{style, Term};
+use console::{Term, style};
 use std::sync::OnceLock;
 
 /// User preference for terminal color output.
