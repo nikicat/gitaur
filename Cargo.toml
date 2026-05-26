@@ -31,8 +31,12 @@ path = "src/main.rs"
 #    `mark_complete_and_common_ref`'s per-mapping loop into `find_ms`
 #    (packed-ref lookup) vs `commit_ms` (ODB/commit-graph load) — the
 #    dominant cost of `receive` on the AUR mirror (see the `tracing-detail`
-#    feature below).
-gix = { git = "https://github.com/nikicat/gitoxide", rev = "d5b3ee00e", features = [
+#    feature below);
+#  - a `gix-ref` `try_find_packed_only` fast path that lets the fetch have-set
+#    build skip the per-ref loose-ref `open()` syscall for packed refs, cutting
+#    `find_ms` on the AUR mirror from ~2.1s to ~0.6s (loose precedence is still
+#    honored via a one-time loose-name scan).
+gix = { git = "https://github.com/nikicat/gitoxide", rev = "14a8a16f5", features = [
   # curl-rustls (over reqwest-rust-tls) so gix's low_speed_* / lowSpeedLimit
   # config actually fires — only the curl transport implements it, the
   # reqwest blocking transport silently ignores those fields. Adds libcurl
