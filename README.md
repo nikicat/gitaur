@@ -73,10 +73,16 @@ review_default       = "prompt"    # or "skip" / "always-show"
 ~/.local/state/gitaur/
 ├── aur/              bare clone of the AUR mirror (~2 GiB)
 ├── pkgs/<pkgbase>/   per-pkgbase git worktree + cached .pkg.tar.zst, kept until -Sc
-└── index.bin         rkyv-archived index, mmap'd at load (~60–80 MB)
+├── index.bin         rkyv-archived index, mmap'd at load (~60–80 MB)
+├── logs/             per-run debug logs (gitaur-*.log), last 10 runs kept
+└── traces/           per-run Chrome/Perfetto span traces (gitaur-*.json)
 
 ~/.config/gitaur/config.toml  optional
 ```
+
+The `logs/` files are always written at `debug` level regardless of console
+verbosity. `RUST_LOG` (e.g. `RUST_LOG=gitaur=debug`) raises only the *console*
+tracing level — it does not change what lands in `logs/`.
 
 ## How it differs from yay / paru
 
