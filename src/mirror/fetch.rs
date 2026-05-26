@@ -15,7 +15,7 @@ use gix::remote::fetch::{Status, refmap::Mapping};
 use gix::remote::{Direction, ref_map::Options as RefMapOptions};
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, info_span, instrument};
 
 /// One refname change reported by the fetch.
 #[derive(Debug, Clone)]
@@ -46,23 +46,34 @@ pub fn incremental_fetch(cfg: &Config, mirror: &MirrorRepo) -> Result<Vec<RefUpd
             .map_err(|e| Error::Gix(format!("connect: {e}")))?;
         connection.set_transport_options(boxed_http_options(cfg));
 
-        debug!("preparing fetch: handshake + list refs against remote");
-        let t_prepare = Instant::now();
-        let prepared = connection
-            .prepare_fetch(&mut progress, RefMapOptions::default())
-            .map_err(|e| Error::Gix(format!("prepare_fetch: {e}")))?;
-        debug!(
-            elapsed_ms = u64::try_from(t_prepare.elapsed().as_millis()).unwrap_or(u64::MAX),
-            "prepare_fetch returned (ref advertisement complete)"
-        );
+        let prepared = {
+            let _span = info_span!("prepare_fetch").entered();
+            debug!("preparing fetch: handshake + list refs against remote");
+            let t_prepare = Instant::now();
+            let prepared = connection
+                .prepare_fetch(&mut progress, RefMapOptions::default())
+                .map_err(|e| Error::Gix(format!("prepare_fetch: {e}")))?;
+            debug!(
+                elapsed_ms = u64::try_from(t_prepare.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "prepare_fetch returned (ref advertisement complete)"
+            );
+            prepared
+        };
+
+        // gix leaves its phase label stuck on `list refs` through the silent
+        // have-set build below (it doesn't `set_name` again until negotiation),
+        // so close the stale span here. Otherwise the gap is mislabeled as
+        // `list refs` instead of falling under the `receive` span.
+        progress.clear_phase();
 
         // The next ~30–60s on a large mirror are gix-internal and silent:
         //   1. build local "have" set from existing refs (silent ~20s on AUR)
         //   2. negotiate (visible — `set_name=negotiate (round N)`)
         //   3. receive + index pack (visible — `read pack`, `create index file`)
         //   4. update refs / write pack manifest (silent ~15s on AUR)
-        // We bracket the whole thing with start/end logs so the silent gaps
-        // have context even when no gix progress event is firing.
+        // The `receive` span makes the whole thing one timed block; the silent
+        // prelude (1) shows as the gap before gix's first `negotiate` sub-span.
+        let _span = info_span!("receive").entered();
         debug!("entering receive: build have-set, negotiate, fetch pack, update refs");
         let t_receive = Instant::now();
         let outcome = prepared

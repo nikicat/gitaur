@@ -17,12 +17,17 @@ name = "gitaur"
 path = "src/main.rs"
 
 [dependencies]
-# Pinned to nikicat/gitoxide#b-plus-c-integration until the two upstream PRs
-# https://github.com/GitoxideLabs/gitoxide/pull/2604 (gix-ref: skip name validation
-# in packed-refs binary search) and #2605 (gix: cache packed-refs in a HashMap during
-# fetch update_refs) land in a published gix release. Together they bring
-# `gitaur -Sy` against the AUR mirror from ~11s to ~5s (≈ git fetch parity).
-gix = { git = "https://github.com/nikicat/gitoxide", rev = "7606d2ed1", features = [
+# Pinned to nikicat/gitoxide#b-plus-c-integration for changes not yet in a
+# published gix release:
+#  - upstream PRs #2604 (gix-ref: skip name validation in packed-refs binary
+#    search) and #2605 (gix: cache packed-refs in a HashMap during fetch
+#    update_refs), which together bring `gitaur -Sy` against the AUR mirror from
+#    ~11s to ~5s (≈ git fetch parity), plus a follow-up lazy packed-refs name
+#    index;
+#  - a gix-transport patch that wraps the curl worker's `perform()` in a
+#    `gix_http` "http request" span carrying curl's CURLINFO timing — the only
+#    place that timing is reachable (see src/logging/chrome.rs).
+gix = { git = "https://github.com/nikicat/gitoxide", rev = "90a0a85d3", features = [
   # curl-rustls (over reqwest-rust-tls) so gix's low_speed_* / lowSpeedLimit
   # config actually fires — only the curl transport implements it, the
   # reqwest blocking transport silently ignores those fields. Adds libcurl
@@ -51,10 +56,25 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # Per-run span hierarchy → Chrome/Perfetto trace JSON in `traces/`, so the
 # timings of git fetch vs. parallel index rebuild can be inspected as a
-# flamegraph (drag the file into https://ui.perfetto.dev). Pure file output,
-# no collector or async runtime — it just bridges our existing #[instrument]
-# spans into the trace-event format.
-tracing-chrome = "0.7"
+# flamegraph (drag the file into https://ui.perfetto.dev).
+#
+# We bridge our existing `#[instrument]` spans into OpenTelemetry (rather than
+# straight to the trace-event format via tracing-chrome) because OTEL `SpanData`
+# carries *explicit* start/end timestamps and a real parent tree. That's what
+# lets `src/logging/chrome.rs` (our own `SpanExporter`) synthesize the
+# `before/after first byte` sub-spans of each `http request` from curl's
+# CURLINFO timing — tracing-chrome could only stamp spans at open/close
+# wall-clock, never backdate. No collector, no async runtime: a synchronous
+# in-process exporter writes the JSON on shutdown.
+opentelemetry = { version = "0.32", default-features = false, features = [
+  "trace",
+] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = [
+  "trace",
+] }
+tracing-opentelemetry = { version = "0.33", default-features = false }
+# Serializes the OTEL `SpanData` into Chrome trace-event JSON (src/logging/chrome.rs).
+serde_json = "1"
 jiff = "0.2"
 glob = "0.3"
 # Pure-Rust regex backend (fancy-regex) avoids the onig C dep; ~10 transitive
@@ -72,9 +92,6 @@ portable-pty = "0.9"
 tempfile = "3"
 nix = { version = "0.31", features = ["resource"] }
 vt100 = "0.16"
-# Parse the Chrome/Perfetto trace JSON in the gix-progress span test. Already
-# in the lock via tracing-chrome; declared here for the test to use directly.
-serde_json = "1"
 
 [profile.release]
 lto = "thin"

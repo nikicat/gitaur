@@ -46,8 +46,8 @@ pub struct GixProgress {
     /// `set_name` transition so each phase shows up as a timed sub-span of the
     /// enclosing `#[instrument]` span. `None` on children and before the first
     /// phase. Held, *not entered* — the adapter must stay `Send + Sync` so it
-    /// can't keep an `EnteredSpan`; the Async-style `tracing-chrome` layer
-    /// records a span's open→close, so the held span's lifetime is the phase.
+    /// can't keep an `EnteredSpan`; the OTEL bridge records a span's open→close
+    /// (not enter/exit), so the held span's lifetime *is* the phase.
     phase_span: Mutex<Option<tracing::Span>>,
 }
 
@@ -97,6 +97,19 @@ impl GixProgress {
         let mut g = self.phase_span.lock().unwrap();
         *g = None; // close the previous phase span first
         *g = Some(open_phase_span(name));
+    }
+
+    /// Drop the current root-phase span without opening a successor.
+    ///
+    /// gix only transitions the phase label on a `set_name` *change*, so a
+    /// label can outlive the work it named: after the ref advertisement, gix
+    /// leaves the name stuck on `list refs` through the entire silent have-set
+    /// build at the start of `receive`, never calling `set_name` again until
+    /// negotiation begins. Callers use this at a known phase boundary to close
+    /// the stale span so the trace doesn't attribute that gap to the wrong
+    /// phase. No-op on children (their `phase_span` is always `None`).
+    pub fn clear_phase(&self) {
+        *self.phase_span.lock().unwrap() = None;
     }
 
     /// Clear all live bars. Intended for end-of-clone cleanup.
@@ -293,8 +306,8 @@ impl Phase {
 /// from the [`Phase`] (span names must be `'static` literals, so they live in
 /// the match arms); the exact gix string is preserved in the `phase` field.
 /// The returned span is held — not entered — by the root [`GixProgress`] and
-/// dropped on the next transition, so under the Async `tracing-chrome` layer
-/// its open→close marks the phase's duration as a child of the enclosing
+/// dropped on the next transition; the OTEL bridge records its open→close, so
+/// its lifetime marks the phase's duration as a child of the enclosing
 /// `#[instrument]` fetch/clone span.
 fn open_phase_span(name: &str) -> tracing::Span {
     use tracing::debug_span;
@@ -476,34 +489,38 @@ impl NestedProgress for GixProgress {
 #[cfg(test)]
 mod tests {
     use super::*; // also re-exports the `gix::Progress` alias, for `set_name`
+    use crate::logging::chrome::ChromeExporter;
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::SdkTracerProvider;
     use serde_json::Value;
     use std::fs::File;
     use std::io::Read;
     use tempfile::tempdir;
     use tracing::subscriber::with_default;
-    use tracing_chrome::{ChromeLayerBuilder, TraceStyle};
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::{EnvFilter, Layer};
 
     /// Drive the root [`GixProgress`] through the `set_name` sequence a real
     /// fetch produces and assert the chrome trace gains one nested phase span
     /// per transition. This pins *our* span wiring (`swap_phase`,
-    /// `open_phase_span`, the [`Phase`] mapping, Async open→close recording) —
-    /// the phase *names* come from gix and aren't asserted against a live fetch
-    /// (a tiny test repo wouldn't reproduce e.g. "negotiate (round 5)").
+    /// `open_phase_span`, the [`Phase`] mapping) end-to-end through the same
+    /// OTEL bridge + [`ChromeExporter`] `logging::init` uses — the phase *names*
+    /// come from gix and aren't asserted against a live fetch (a tiny test repo
+    /// wouldn't reproduce e.g. "negotiate (round 5)").
     #[test]
     fn root_set_name_transitions_become_nested_phase_spans() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("trace.json");
 
-        // Same layer wiring as `logging::init` (Async + args), to a temp file.
-        let (layer, guard) = ChromeLayerBuilder::new()
-            .writer(File::create(&path).unwrap())
-            .include_args(true)
-            .trace_style(TraceStyle::Async)
+        // Same wiring as `logging::init`: OTEL bridge → our Chrome exporter.
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(ChromeExporter::new(File::create(&path).unwrap()))
             .build();
-        let subscriber =
-            tracing_subscriber::registry().with(layer.with_filter(EnvFilter::new("debug")));
+        let layer = tracing_opentelemetry::layer()
+            .with_tracer(provider.tracer("test"))
+            .with_threads(true)
+            .with_filter(EnvFilter::new("debug"));
+        let subscriber = tracing_subscriber::registry().with(layer);
 
         with_default(subscriber, || {
             // Stand in for the `#[instrument]` fetch span so the phase spans
@@ -524,18 +541,23 @@ mod tests {
             p.finish(); // closes the final ("receiving pack") phase span
         });
 
-        drop(guard); // flush + join the writer thread before reading
+        // Flush buffered spans to the file (exporter writes on shutdown).
+        provider.shutdown().unwrap();
 
         let mut json = String::new();
         File::open(&path)
             .unwrap()
             .read_to_string(&mut json)
             .unwrap();
-        let events: Vec<Value> = serde_json::from_str(&json).unwrap();
-
-        // Async slices open with ph "b" and close with ph "e".
-        let begins: Vec<&Value> = events.iter().filter(|e| e["ph"] == "b").collect();
-        let names: Vec<&str> = begins.iter().filter_map(|e| e["name"].as_str()).collect();
+        let doc: Value = serde_json::from_str(&json).unwrap();
+        // Each span is one `X` (complete) event; skip the `M` track-label events.
+        let spans: Vec<&Value> = doc["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["ph"] == "X")
+            .collect();
+        let names: Vec<&str> = spans.iter().filter_map(|e| e["name"].as_str()).collect();
 
         for expected in [
             "incremental_fetch",
@@ -552,32 +574,38 @@ mod tests {
 
         // The two negotiate rounds collapse to the "negotiate" label but stay
         // distinct spans, each keeping gix's exact string in the `phase` arg.
-        let neg_rounds: Vec<&str> = begins
+        // Order by start time so the assertion doesn't ride on export order.
+        let mut neg: Vec<(u64, &str)> = spans
             .iter()
             .filter(|e| e["name"] == "negotiate")
-            .filter_map(|e| e["args"]["phase"].as_str())
+            .map(|e| {
+                (
+                    e["ts"].as_u64().unwrap(),
+                    e["args"]["phase"].as_str().unwrap(),
+                )
+            })
             .collect();
+        neg.sort_by_key(|&(ts, _)| ts);
+        let neg_rounds: Vec<&str> = neg.into_iter().map(|(_, phase)| phase).collect();
         assert_eq!(neg_rounds, ["negotiate (round 1)", "negotiate (round 2)"]);
 
-        // Every opened slice is closed.
-        let n_begin = events.iter().filter(|e| e["ph"] == "b").count();
-        let n_end = events.iter().filter(|e| e["ph"] == "e").count();
-        assert_eq!(n_begin, n_end, "unbalanced async slices");
-
-        // Phase spans fall inside the enclosing fetch span's time window.
-        let ts = |name: &str, ph: &str| -> f64 {
-            events
+        // Phase spans nest inside the enclosing fetch span's time window —
+        // chrome://tracing / Perfetto build the tree from `X` containment.
+        let window = |name: &str| -> (u64, u64) {
+            let e = spans
                 .iter()
-                .find(|e| e["ph"] == ph && e["name"] == name)
-                .and_then(|e| e["ts"].as_f64())
-                .unwrap_or_else(|| panic!("no {ph} event for {name:?}"))
+                .find(|e| e["name"] == name)
+                .unwrap_or_else(|| panic!("no span for {name:?}"));
+            let ts = e["ts"].as_u64().unwrap();
+            (ts, ts + e["dur"].as_u64().unwrap())
         };
-        let (fetch_start, fetch_end) = (ts("incremental_fetch", "b"), ts("incremental_fetch", "e"));
+        let (fetch_start, fetch_end) = window("incremental_fetch");
         for phase in ["handshake", "receiving pack"] {
-            let start = ts(phase, "b");
+            let (start, end) = window(phase);
             assert!(
-                fetch_start <= start && start <= fetch_end,
-                "{phase:?} span not nested within incremental_fetch",
+                fetch_start <= start && end <= fetch_end,
+                "{phase:?} span [{start}, {end}] not nested within incremental_fetch \
+                 [{fetch_start}, {fetch_end}]",
             );
         }
     }

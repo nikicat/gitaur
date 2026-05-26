@@ -8,13 +8,22 @@
 //!   rebuild) as a flamegraph — drag the `.json` into
 //!   <https://ui.perfetto.dev> (or `chrome://tracing`) to inspect it.
 //!
+//! The trace layer bridges our `#[instrument]` spans into OpenTelemetry
+//! ([`tracing_opentelemetry`]) and exports them through [`chrome::ChromeExporter`],
+//! our own in-process [`SpanExporter`](opentelemetry_sdk::trace::SpanExporter)
+//! that writes the same Chrome JSON `tracing-chrome` used to. OTEL spans carry
+//! explicit start/end timestamps, which is what lets the exporter synthesize
+//! the `before/after first byte` breakdown of each `http request` from curl's
+//! CURLINFO timing (see [`chrome`]).
+//!
 //! Old files in both directories are pruned to the newest few on every startup
 //! via the [`Logs`] / [`Traces`] [`RotationPolicy`] implementations.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use tracing_chrome::ChromeLayerBuilder;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -22,6 +31,8 @@ use tracing_subscriber::{EnvFilter, Layer, fmt};
 
 use crate::paths;
 use crate::rotate::{self, RotationPolicy};
+
+pub mod chrome;
 
 /// File-layer default filter. Baseline is `debug` so gix-progress state
 /// changes (`set_name`, `add_child`, `message`) land in the log, but the very
@@ -33,14 +44,26 @@ const FILE_LOG_FILTER: &str = "debug,h2=info,hyper=info,hyper_util=info,reqwest=
 
 /// Keep-alive for the run's tracing resources.
 ///
-/// Wraps the [`tracing_chrome`] flush guard, which finalizes the trace file on
-/// drop (it buffers events on a background thread and writes the closing JSON
-/// when dropped). `main` must bind this for the whole run — dropping it early
+/// Holds the OTEL [`SdkTracerProvider`]. The provider is also kept alive by the
+/// global subscriber (the bridge layer owns a tracer cloned from it), so it
+/// would never drop on its own — [`Guard`]'s `Drop` is what calls
+/// `provider.shutdown()`, which flushes [`chrome::ChromeExporter`]'s buffered
+/// spans to disk. `main` must bind this for the whole run; dropping it early
 /// truncates the trace.
 #[must_use = "dropping the guard flushes the trace file; keep it alive for the whole run"]
 pub struct Guard {
-    /// Flushes + closes the trace file on drop. Held, never read.
-    _chrome: Option<tracing_chrome::FlushGuard>,
+    /// Flushed via `shutdown()` on drop. `None` if trace setup failed.
+    provider: Option<SdkTracerProvider>,
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        if let Some(provider) = self.provider.take()
+            && let Err(e) = provider.shutdown()
+        {
+            eprintln!("gitaur: failed to flush span trace: {e}");
+        }
+    }
 }
 
 /// Initialize tracing. Returns a [`Guard`] that must be kept alive for the
@@ -78,29 +101,23 @@ pub fn init() -> Guard {
         }
     };
 
-    // Chrome trace layer: same span/event stream as the file log, but emitted
-    // as trace-events. `include_args(true)` folds the `#[instrument]`
-    // `fields(...)` (branch, counts, version, …) into each span's args so they
-    // show up in the Perfetto detail pane.
-    //
-    // `TraceStyle::Async` (not the default Threaded): it records a span on
-    // open→close (`on_new_span`/`on_close`) and nests by parent scope, rather
-    // than on enter/exit per thread. That's what lets the gix fetch-phase
-    // sub-spans work — they're *held, not entered* (the progress adapter must
-    // stay `Send + Sync`, so it can't keep an `EnteredSpan`), and it keeps
-    // spans that open and close on different threads intact.
-    let (chrome_layer, chrome_guard, trace_path) = match Traces.create(&basename) {
+    // Chrome trace layer: the same span/event stream as the file log, bridged
+    // into OpenTelemetry and exported as trace-events by `chrome::ChromeExporter`.
+    // `with_threads(true)` tags each span with `thread.id`/`thread.name`, which
+    // the exporter maps to Chrome track (`tid`) so parallel rayon index work and
+    // the gix curl worker each get their own lane. The fetch-phase sub-spans are
+    // *held, not entered* (the progress adapter stays `Send + Sync`), but OTEL
+    // records open→close with explicit timestamps regardless, so they survive.
+    let (chrome_layer, provider, trace_path) = match Traces.create(&basename) {
         Ok((file, path)) => {
-            let (layer, guard) = ChromeLayerBuilder::new()
-                .writer(file)
-                .include_args(true)
-                .trace_style(tracing_chrome::TraceStyle::Async)
+            let provider = SdkTracerProvider::builder()
+                .with_simple_exporter(chrome::ChromeExporter::new(file))
                 .build();
-            (
-                Some(layer.with_filter(EnvFilter::new(FILE_LOG_FILTER))),
-                Some(guard),
-                Some(path),
-            )
+            let layer = tracing_opentelemetry::layer()
+                .with_tracer(provider.tracer("gitaur"))
+                .with_threads(true)
+                .with_filter(EnvFilter::new(FILE_LOG_FILTER));
+            (Some(layer), Some(provider), Some(path))
         }
         Err(e) => {
             eprintln!("gitaur: span tracing disabled: {e}");
@@ -123,9 +140,7 @@ pub fn init() -> Guard {
         Traces.prune();
     }
 
-    Guard {
-        _chrome: chrome_guard,
-    }
+    Guard { provider }
 }
 
 /// The per-run text log in `state_dir()/logs/` (`gitaur-*.log`).
