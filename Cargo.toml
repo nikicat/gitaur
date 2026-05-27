@@ -41,8 +41,13 @@ path = "src/bin/trace.rs"
 #  - a `gix-ref` `try_find_packed_only` fast path that lets the fetch have-set
 #    build skip the per-ref loose-ref `open()` syscall for packed refs, cutting
 #    `find_ms` on the AUR mirror from ~2.1s to ~0.6s (loose precedence is still
-#    honored via a one-time loose-name scan).
-gix = { git = "https://github.com/nikicat/gitoxide", rev = "14a8a16f5", features = [
+#    honored via a one-time loose-name scan);
+#  - a `mark_all_refs` fast path that resolves each local ref through the
+#    commit-graph (via `get_or_insert_commit`) instead of inflating the object
+#    just to check it isn't a tag — only annotated tags / symrefs still peel.
+#    Cuts `mark_all_refs` on the AUR mirror from ~3.3s to ~0.3s (depends on the
+#    commit-graph gitaur now writes after each fetch; see src/git.rs).
+gix = { git = "https://github.com/nikicat/gitoxide", rev = "c1386c33e", features = [
   # curl-rustls (over reqwest-rust-tls) so gix's low_speed_* / lowSpeedLimit
   # config actually fires — only the curl transport implements it, the
   # reqwest blocking transport silently ignores those fields. Adds libcurl
