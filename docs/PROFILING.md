@@ -60,3 +60,10 @@ gix-ref = { path = "../gitoxide/gix-ref" }
 
 Add only the crates you're actively patching — cargo will rebuild the
 whole gix graph against the path versions.
+
+## What's already been optimized
+
+The two phases above have been heavily reworked in the gix fork. See
+[`FETCH_OPTIMIZATION.md`](FETCH_OPTIMIZATION.md) for the full record —
+every change with before/after numbers, the one known dead end, and the
+remaining candidates.
