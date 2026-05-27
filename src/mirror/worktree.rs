@@ -23,11 +23,11 @@
 //! exactly the trade we're trying to back out of.
 
 use crate::error::{Error, Result};
+use crate::git;
 use crate::mirror::MirrorRepo;
 use crate::names::PkgBase;
 use gix::ObjectId;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tracing::{debug, instrument};
 
 /// One pkgbase's build directory plus the commit it was materialized from.
@@ -172,27 +172,11 @@ fn peel_branch(mirror: &MirrorRepo, refname: &str) -> Result<ObjectId> {
     Ok(commit.detach())
 }
 
-/// Run `git <args>` and convert non-zero exits into a contextful `Error::Gix`.
-/// Stderr is captured so the message points at the actual git failure rather
-/// than a bare "io: ... os error N".
+/// Run `git <args>` via the instrumented [`crate::git::run`] (each call becomes
+/// a `git` span; non-zero exits carry git's stderr). These call sites pass their
+/// own `-C <dir>`, so no working directory is set here.
 fn run_git(args: &[&std::ffi::OsStr]) -> Result<()> {
-    let out = Command::new("git")
-        .args(args)
-        .output()
-        .map_err(|e| Error::other(format!("spawn git: {e}")))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let displayed: Vec<String> = args
-            .iter()
-            .map(|s| s.to_string_lossy().into_owned())
-            .collect();
-        return Err(Error::Gix(format!(
-            "git {} failed: {}",
-            displayed.join(" "),
-            stderr.trim(),
-        )));
-    }
-    Ok(())
+    git::run(args.iter().copied(), None).map(|_stdout| ())
 }
 
 #[cfg(test)]
@@ -202,6 +186,7 @@ mod tests {
     use crate::testing::git;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
     use tempfile::TempDir;
 
     /// `add_or_reset` calls a checkout/reset on a branch whose name happens

@@ -7,6 +7,7 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::git;
 use crate::index;
 use crate::paths;
 use crate::ui;
@@ -56,6 +57,14 @@ impl MirrorRepo {
             repo,
         })
     }
+
+    /// Refresh the mirror's commit-graph so the *next* fetch's negotiation can
+    /// read commit times from an mmap'd file instead of inflating every commit
+    /// from the pack (the dominant remaining cost of building the have-set).
+    /// Best-effort — see [`crate::git::write_commit_graph`].
+    pub fn write_commit_graph(&self) {
+        git::write_commit_graph(&self.path);
+    }
 }
 
 /// Fetch mirror updates and incrementally refresh the on-disk index.
@@ -85,6 +94,8 @@ pub fn cmd_refresh(cfg: &Config, force_reclone: bool) -> Result<()> {
         let idx = index::build::full_build(cfg, &mirror)?;
         index::save(&idx, &paths::index_path())?;
         ui::info("index built");
+        // Seed the commit-graph so the first incremental `-Sy` negotiates fast.
+        mirror.write_commit_graph();
         return Ok(());
     }
 
@@ -118,8 +129,11 @@ pub fn cmd_refresh(cfg: &Config, force_reclone: bool) -> Result<()> {
             index::update::incremental_update(&mirror, &updates, &mut idx)?;
             index::save(&idx, &idx_path)?;
             ui::note(&format!("{} ref(s) updated", updates.len()));
+            // New commits arrived; fold them into the commit-graph for next time.
+            mirror.write_commit_graph();
         }
         Some(_) => {
+            // Nothing changed on the mirror, so the commit-graph is still current.
             ui::note("no ref updates");
         }
         None => {
@@ -127,6 +141,7 @@ pub fn cmd_refresh(cfg: &Config, force_reclone: bool) -> Result<()> {
             let idx = index::build::full_build(cfg, &mirror)?;
             index::save(&idx, &idx_path)?;
             ui::info("index built");
+            mirror.write_commit_graph();
         }
     }
     Ok(())

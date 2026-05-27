@@ -21,7 +21,7 @@ use dialoguer::Select;
 use gix::ObjectId;
 use std::path::Path;
 use std::process::Command;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, info_span, instrument};
 
 // History walk bound is now configurable via
 // `Config::review_history_scan_max` — plumbed through `cmd_install` →
@@ -314,7 +314,10 @@ fn show_diff(
 ) -> Result<()> {
     // `git diff` exits 0 when there are no differences and 1 when there are
     // — both are success. Any other status (or a spawn failure) is a real
-    // error worth surfacing.
+    // error worth surfacing. The diff streams to the terminal (a pager), so it
+    // runs directly rather than through `git::run`; the span keeps it visible
+    // in the trace alongside the captured-output git calls.
+    let _span = info_span!("git", subcommand = "diff").entered();
     let status = diff_command(&mirror.path, base, wt.head_oid, context)
         .status()
         .map_err(|e| Error::other(format!("spawn git diff: {e}")))?;
