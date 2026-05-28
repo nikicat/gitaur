@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bare `gitaur <term>` is the yay parity shortcut for AUR fuzzy search →
+# Bare `gaur <term>` is the yay parity shortcut for AUR fuzzy search →
 # interactive multi-select → install. With no TTY (the container runs
 # headless), the picker degrades to "print matches and exit 0" instead of
 # auto-installing every regex hit — an explicit safety call. This test
@@ -8,10 +8,10 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
+gaur -Sy
 assert_exit 0
 
-gitaur "^test-trivial$"
+gaur "^test-trivial$"
 assert_exit 0
 assert_stdout_contains "aur/test-trivial"
 

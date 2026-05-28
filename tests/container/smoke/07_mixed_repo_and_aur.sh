@@ -4,8 +4,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
-gitaur -S --noconfirm repo-base test-trivial
+gaur -Sy
+gaur -S --noconfirm repo-base test-trivial
 assert_exit 0
 assert_pkg_installed repo-base
 assert_pkg_explicit repo-base

@@ -77,7 +77,7 @@ pub struct IndexEntry {
     pub srcinfo_blob_oid: [u8; 20],
     /// Committer timestamp (seconds since the Unix epoch) of the branch tip
     /// that produced this entry. Drives the "freshest first" ordering of the
-    /// `gitaur <term>` picker — recently-pushed AUR packages float to the top.
+    /// `gaur <term>` picker — recently-pushed AUR packages float to the top.
     /// `0` for entries built before this field existed or whose commit time
     /// couldn't be read.
     pub commit_time_unix: i64,
@@ -166,7 +166,7 @@ impl IndexFile {
     /// underlying bytes match, and a new field shifts the layout, so loading an
     /// older file with newer types would silently mis-shape the deserialized
     /// struct without the version gate. Older archives must be rebuilt via
-    /// `gitaur -Sy`.
+    /// `gaur -Sy`.
     pub const FORMAT_VERSION: u32 = 5;
 
     /// Empty in-memory index. Used when no on-disk file exists yet.

@@ -3,8 +3,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
-gitaur -S --noconfirm test-with-aur-dep
+gaur -Sy
+gaur -S --noconfirm test-with-aur-dep
 assert_exit 0
 assert_pkg_installed test-with-aur-dep
 assert_pkg_explicit test-with-aur-dep

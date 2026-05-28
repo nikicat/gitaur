@@ -11,7 +11,7 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur --noconfirm
+gaur --noconfirm
 assert_exit 0
 grep -qE 'about to elevate via sudo|nothing to do' "$LAST_STDERR" || {
     echo "expected upgrade-branch marker (sudo elevation or 'nothing to do') in stderr" >&2

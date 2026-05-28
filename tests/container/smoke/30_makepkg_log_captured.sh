@@ -2,7 +2,7 @@
 # Each makepkg invocation tees its stdout+stderr into <worktree>/build.log
 # so a user can re-read a failure after the fact. Regression target: when
 # resilience landed, a build failure must leave the captured log behind
-# (alongside the worktree, which is kept until `gitaur -Sc`).
+# (alongside the worktree, which is kept until `gaur -Sc`).
 #
 # Assertions: build.log exists, is non-empty, and contains both the
 # fixture's sentinel and a makepkg banner — proving both stdout and
@@ -10,8 +10,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
-gitaur -S --noconfirm test-fail-build
+gaur -Sy
+gaur -S --noconfirm test-fail-build
 assert_exit 1
 
 log="$STATE_DIR/pkgs/test-fail-build/build.log"

@@ -2,7 +2,7 @@
 # staged as a `.pkg.tar.zst` under /srv/foreign-pkgs/. The smoke test
 # applies it with `pacman -U` to seed an older install of the same
 # pkgname the AUR fixture ships at v2.0 — so the trigger
-# `gitaur -S test-stale-replaces` exercises the Pkgname-beats-stale-Replaces
+# `gaur -S test-stale-replaces` exercises the Pkgname-beats-stale-Replaces
 # guard end-to-end through alpm → counterpart → review trace.
 #
 # Directory name diverges from pkgname on purpose: setup-fixtures iterates

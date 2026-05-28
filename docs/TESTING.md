@@ -55,7 +55,7 @@ Image build: ~2 min one-time. Smoke suite: ~30 s on 8 cores.
 tests/container/
 ├── Dockerfile               base-devel + builder user + baked fixtures
 ├── setup-fixtures.sh        builds repo-* pkgs, publishes AUR-* branches
-├── lib.sh                   bash helpers: gitaur, assert_*, bootstrap, reset_state
+├── lib.sh                   bash helpers: gaur, assert_*, bootstrap, reset_state
 ├── run.sh                   the harness — parallel containers + xargs -P
 ├── fixtures/<pkgbase>/      one PKGBUILD per fixture, optional .install / repo
 ├── smoke/NN_*.sh            ~20 everyday cases (always run in CI)
@@ -70,8 +70,8 @@ Each smoke test is a self-contained bash script:
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
-gitaur -S --noconfirm test-trivial
+gaur -Sy
+gaur -S --noconfirm test-trivial
 assert_exit 0
 assert_pkg_installed test-trivial
 assert_pkg_explicit  test-trivial
@@ -154,7 +154,7 @@ bash tests/container/run.sh smoke/23_my_case.sh
 Available helpers (defined in `lib.sh`):
 
 ```
-gitaur <args...>              # runs $GITAUR with args; captures stdout/stderr/exit
+gaur <args...>                # runs $GITAUR with args; captures stdout/stderr/exit
 LAST_STDOUT / LAST_STDERR     # captured-output file paths
 LAST_EXIT                     # captured exit code
 assert_exit N
@@ -181,7 +181,7 @@ podman run --rm -it -v "$PWD:/work:ro" -v "$(mktemp -d):/tmp/target" \
     gitaur-test:latest bash
 ```
 
-Inside the container the gitaur binary is at `/work/target/debug/gitaur`,
+Inside the container the gaur binary is at `/work/target/debug/gaur`,
 `RUST_LOG=gitaur=debug` is the helpful verbosity level.
 
 ### Common pitfalls
@@ -221,8 +221,8 @@ unless you also edit the fixture's `PKGBUILD`.
 The unit + container suites use synthetic fixtures by design, so they
 exercise the code paths but not the messy shape of real-world AUR data.
 For sanity-checking changes to `resolver/` or to plan-rendering, run
-`gitaur -S <pkgbase>` against representative entries from a populated
-index (`gitaur -Sy` first) and decline the `Proceed with installation?`
+`gaur -S <pkgbase>` against representative entries from a populated
+index (`gaur -Sy` first) and decline the `Proceed with installation?`
 prompt — the resolver prints the full Plan up front, so `n` exits
 cleanly without touching `makepkg` or `pacman`.
 
@@ -245,7 +245,7 @@ negative-test target for the missing-deps error path, but not for plan
 rendering.
 
 `examples/deep_strata.rs` is the scanner that produced this list — run
-it after `gitaur -Sy` to refresh the candidates if the index drifts:
+it after `gaur -Sy` to refresh the candidates if the index drifts:
 
 ```sh
 cargo run --example deep_strata

@@ -38,7 +38,7 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
         Some(other) => Err(Error::other(format!(
             "unsupported gitaur op `-{other}` (pacman pass-through goes via the pre-scan, this dispatch is `-S` / `-Qu` only)"
         ))),
-        // yay parity: `gitaur <term>...` with no operation letter is a
+        // yay parity: `gaur <term>...` with no operation letter is a
         // fuzzy search across the AUR index → interactive multi-select →
         // install. The empty-positional branch above already absorbed the
         // no-op-and-no-target case, so reaching here means we have terms.
@@ -49,7 +49,7 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
 /// Handle the `-S` family (`-S`, `-Sy`, `-Syu`, `-Ss`, `-Si`, `-Sc`).
 fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8> {
     // `--noconfirm` / `--asdeps` / `--devel` may appear before *or* after the
-    // operation (`gitaur --noconfirm -S foo` vs `gitaur -S --noconfirm foo`).
+    // operation (`gaur --noconfirm -S foo` vs `gaur -S --noconfirm foo`).
     // clap's `trailing_var_arg` captures everything after `-S`, so flags that
     // followed the op are inside `argv` and never reach `cli.*`. Merge here.
     let noconfirm = cli.noconfirm || f.has_long("noconfirm");
@@ -57,7 +57,7 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
     let devel = cli.devel || f.has_long("devel");
 
     if f.has('h') || f.has_long("help") {
-        // Same auto-generated help as `gitaur --help` — clap already lists
+        // Same auto-generated help as `gaur --help` — clap already lists
         // every gitaur-owned flag (with its doc comment) plus the operations
         // section from `after_help`. No reason to maintain a separate copy.
         use clap::CommandFactory;

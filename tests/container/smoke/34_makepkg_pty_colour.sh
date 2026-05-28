@@ -11,8 +11,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
-gitaur -S --noconfirm test-trivial
+gaur -Sy
+gaur -S --noconfirm test-trivial
 assert_exit 0
 
 log="$STATE_DIR/pkgs/test-trivial/build.log"

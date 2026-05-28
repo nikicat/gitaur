@@ -6,12 +6,12 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
+gaur -Sy
 assert_exit 0
 echo "this is not a valid rkyv archive" > "$STATE_DIR/index.bin"
 before="$(cat "$STATE_DIR/index.bin")"
 
-gitaur --noresync test-trivial
+gaur --noresync test-trivial
 [[ "$LAST_EXIT" != "0" ]] || { echo "expected nonzero exit under --noresync" >&2; _dump >&2; exit 1; }
 assert_stderr_contains "noresync"
 

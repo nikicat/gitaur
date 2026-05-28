@@ -11,7 +11,7 @@ AUR_DIR="$STATE_DIR/aur"
 INFO_DIR="$AUR_DIR/objects/info"
 
 # First refresh bootstraps the bare clone + index, then seeds the commit-graph.
-gitaur -Sy
+gaur -Sy
 assert_exit 0
 
 # A commit-graph landed — either a single `commit-graph` file or a `--split`
@@ -30,7 +30,7 @@ fi
 
 # A second refresh with the graph present must still succeed (the negotiation
 # reads the graph; a broken read would error or change results).
-gitaur -Sy
+gaur -Sy
 assert_exit 0
 assert_stderr_contains "no ref updates"
 

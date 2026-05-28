@@ -4,8 +4,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
-gitaur -S --noconfirm test-split-as-makedep-client
+gaur -Sy
+gaur -S --noconfirm test-split-as-makedep-client
 assert_exit 0
 assert_pkg_installed test-split-as-makedep-client
 assert_pkg_explicit  test-split-as-makedep-client

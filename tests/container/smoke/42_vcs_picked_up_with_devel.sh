@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `gitaur -Qu --devel` MUST list every installed VCS pkgbase
+# `gaur -Qu --devel` MUST list every installed VCS pkgbase
 # (`-git`/`-svn`/`-hg`/`-bzr`) regardless of vercmp. With --devel the
 # user has explicitly asked gitaur to treat VCS pkgs as
 # always-outdated — `pkgver()` only refreshes when makepkg runs, so the
@@ -10,13 +10,13 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
+gaur -Sy
 
-gitaur -S --noconfirm test-vcs-git
+gaur -S --noconfirm test-vcs-git
 assert_exit 0
 assert_pkg_installed test-vcs-git
 
-gitaur -Qu --devel
+gaur -Qu --devel
 assert_exit 0
 
 # upgrade_table writes the rows to stderr. With --devel, test-vcs-git

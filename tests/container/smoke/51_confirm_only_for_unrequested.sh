@@ -16,7 +16,7 @@ gitaur_prompted() { grep -qE '^Proceed with installation\?' "$LAST_STDOUT"; }
 # repo-base resolves to a single named repo pkg → only_requested(). Empty
 # stdin = EOF = "yes" default, so the sudo gate auto-accepts and the install
 # completes.
-gitaur_input "" -S repo-base
+gaur_input "" -S repo-base
 assert_exit 0
 assert_pkg_installed repo-base
 assert_pkg_explicit repo-base
@@ -36,8 +36,8 @@ assert_stdout_contains "Continue?"
 # run must abort before installing anything (the prompt precedes both the
 # repo phase and any AUR review).
 reset_state
-gitaur -Sy
-gitaur_input $'n\n' -S test-with-makedep
+gaur -Sy
+gaur_input $'n\n' -S test-with-makedep
 assert_exit 1
 gitaur_prompted || {
     echo "plan with an unrequested dep should show gitaur's plan prompt" >&2

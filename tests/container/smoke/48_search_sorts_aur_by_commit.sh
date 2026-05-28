@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bare `gitaur <term>` lists AUR matches freshest-commit-first (not
+# Bare `gaur <term>` lists AUR matches freshest-commit-first (not
 # alphabetically). The three test-csort-* fixtures share the unique
 # 'csortprobe' token but carry pinned, deliberately non-alphabetical commit
 # dates (a=2020, b=2023, c=2021). Alphabetical order would be a,b,c; freshest
@@ -8,10 +8,10 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
+gaur -Sy
 assert_exit 0
 
-gitaur csortprobe
+gaur csortprobe
 assert_exit 0
 
 # Extract the pkgbase suffix of each csort row in listing order. The bare-term

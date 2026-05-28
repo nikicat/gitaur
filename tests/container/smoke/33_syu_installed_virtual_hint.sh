@@ -31,7 +31,7 @@ bootstrap; reset_state
 # Enable the yay/paru-style auto-select for this test.
 echo 'aur_default_select = true' >> "$CONFIG_DIR/config.toml"
 
-gitaur -Sy
+gaur -Sy
 
 # Seed: install BOTH legacy halves as FOREIGN — staged .pkg.tar.zst files
 # baked into the test image, applied via pacman -U. They land in localdb but
@@ -51,7 +51,7 @@ assert_pkg_installed test-syu-hint-older
 # is NOT in the picker; test-syu-hint-older (installed 1.0 < available
 # 2.0) IS. So the only AUR row picked maps to pkgbase test-syu-hint-new
 # with hint=test-syu-hint-older.
-RUST_LOG=gitaur=warn,gitaur=info gitaur -Su --noconfirm
+RUST_LOG=gitaur=warn,gitaur=info gaur -Su --noconfirm
 assert_exit 0
 assert_pkg_installed test-syu-hint-new
 

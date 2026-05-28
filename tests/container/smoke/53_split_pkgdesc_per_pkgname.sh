@@ -6,30 +6,30 @@
 # bare-term picker, and that it's reachable by a regex search over the desc.
 source /work/tests/container/lib.sh
 bootstrap; reset_state
-gitaur -Sy
+gaur -Sy
 assert_exit 0
 
 # -Ss: the row's description falls back to the pkgname matching the pkgbase
 # (the "canonical" member), not a blank line and not the sibling's desc.
-gitaur -Ss "^test-splitdesc$"
+gaur -Ss "^test-splitdesc$"
 assert_exit 0
 assert_stdout_contains "aur/test-splitdesc"
 assert_stdout_contains "the main splitdesc package"
 
 # -Si: same headline description for the pkgbase.
-gitaur -Si test-splitdesc
+gaur -Si test-splitdesc
 assert_exit 0
 assert_stdout_contains "Description     : the main splitdesc package"
 
 # Regex search now spans per-pkgname descriptions too: a term that only
 # appears in the sibling's desc still finds the pkgbase.
-gitaur -Ss "splitdesc client libraries"
+gaur -Ss "splitdesc client libraries"
 assert_exit 0
 assert_stdout_contains "aur/test-splitdesc"
 
 # Bare-term picker (headless = print matches): the AUR row carries its
 # canonical description rather than rendering name + version only.
-gitaur test-splitdesc
+gaur test-splitdesc
 assert_exit 0
 assert_stdout_contains "aur/test-splitdesc"
 assert_stdout_contains "the main splitdesc package"

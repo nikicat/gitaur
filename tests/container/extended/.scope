@@ -1,6 +1,6 @@
 # Extended-tier test suite — rare combinations, edge cases, regression bait.
 # Each entry is a planned test file. Add the .sh, follow the smoke-tier
-# pattern (source lib.sh; bootstrap; reset_state; gitaur …; assert_*).
+# pattern (source lib.sh; bootstrap; reset_state; gaur …; assert_*).
 #
 # PKGBUILD-driven cases:
 #   - provides_virtual_resolves.sh       (`-S myvirt` → test-provides-virt)
@@ -16,7 +16,7 @@
 #   - dep_constraint_versioned.sh        (`depends=('foo>=2')`)
 #   - dep_constraint_excluded.sh         (`depends=('foo<2')`)
 #   - duplicate_targets_dedup.sh
-#   - target_with_version_constraint.sh  (`gitaur -S foo>=1`)
+#   - target_with_version_constraint.sh  (`gaur -S foo>=1`)
 #   - asdeps_overrides_direct.sh         (`-S --asdeps` even for direct)
 #
 # State / idempotency:

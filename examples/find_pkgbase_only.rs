@@ -14,7 +14,7 @@ use gitaur::paths;
 use std::borrow::Borrow;
 
 fn main() {
-    let idx = index::load(&paths::index_path()).expect("load index — run `gitaur -Sy` first");
+    let idx = index::load(&paths::index_path()).expect("load index — run `gaur -Sy` first");
     let by = Secondary::build(&idx);
 
     let mut hits: Vec<(PkgBase, Vec<PkgName>)> = Vec::new();

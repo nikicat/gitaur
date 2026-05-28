@@ -13,12 +13,12 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
+gaur -Sy
 
 # Seed: install the legacy pkg under its own name. From pacman's view this is
 # now a "foreign" install (the legacy pkgbase isn't in any sync DB), which is
 # exactly the dotnet-shaped starting state.
-gitaur -S --noconfirm test-provides-rename-legacy
+gaur -S --noconfirm test-provides-rename-legacy
 assert_exit 0
 assert_pkg_installed test-provides-rename-legacy
 
@@ -26,7 +26,7 @@ assert_pkg_installed test-provides-rename-legacy
 # the localdb, but it declares `provides=test-provides-rename-legacy`. The
 # counterpart helper must find the legacy install via Provides; the noconfirm
 # trace records that.
-RUST_LOG=gitaur=info gitaur -S --noconfirm test-provides-rename-new
+RUST_LOG=gitaur=info gaur -S --noconfirm test-provides-rename-new
 assert_exit 0
 assert_pkg_installed test-provides-rename-new
 

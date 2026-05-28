@@ -170,7 +170,7 @@ pub fn resolve(
             }
             Source::Repo(concrete) => {
                 // direct_set is keyed on the **user-typed** name so explicit
-                // `gitaur -S cargo` flips the resolved provider (`rust`) into
+                // `gaur -S cargo` flips the resolved provider (`rust`) into
                 // direct_repo even when it also appears as another pkg's dep.
                 let direct = is_direct || direct_set.contains(&bare);
                 let bucket = if direct {

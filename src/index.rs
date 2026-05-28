@@ -77,7 +77,7 @@ pub fn load_or_resync(cfg: &Config, path: &Path) -> Result<IndexFile> {
         Err(Error::IndexIncompatible(reason)) => {
             if runopts::noresync() {
                 return Err(Error::IndexIncompatible(format!(
-                    "{reason}; --noresync set, run `gitaur -Sy` to rebuild"
+                    "{reason}; --noresync set, run `gaur -Sy` to rebuild"
                 )));
             }
             ui::info(&format!("AUR index {reason}; resyncing database"));
@@ -103,7 +103,7 @@ pub fn save(idx: &IndexFile, path: &Path) -> Result<()> {
 pub fn cmd_search(cfg: &Config, terms: &[String]) -> Result<u8> {
     let path = paths::index_path();
     if !path.exists() {
-        ui::warn("no index; run `gitaur -Sy` first");
+        ui::warn("no index; run `gaur -Sy` first");
         return Ok(1);
     }
     let idx = load_or_resync(cfg, &path)?;
@@ -124,7 +124,7 @@ pub fn cmd_search(cfg: &Config, terms: &[String]) -> Result<u8> {
 
 /// Render one search hit in pacman's `-Ss` format to `out`.
 ///
-/// Stdout (not stderr) so `gitaur -Ss foo | head` works — the equivalent
+/// Stdout (not stderr) so `gaur -Ss foo | head` works — the equivalent
 /// `pacman -Ss` also writes results to stdout. Lifted out of `cmd_search`
 /// so the exact byte layout can be tested without spawning a process.
 fn write_search_result<W: std::io::Write>(out: &mut W, entry: &IndexEntry) -> std::io::Result<()> {

@@ -9,8 +9,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
-gitaur -S --noconfirm test-needs-fail
+gaur -Sy
+gaur -S --noconfirm test-needs-fail
 assert_exit 1
 assert_pkg_not_installed test-fail-build
 assert_pkg_not_installed test-needs-fail

@@ -115,7 +115,7 @@ Search (`-Ss`) walks `entries` linearly with rayon (~50 ms for 155k regex matche
 
 ### 2. Sync / fetch flow
 
-`gitaur` (no args) and `gitaur -Sy`:
+`gaur` (no args) and `gaur -Sy`:
 
 1. `mirror::open_or_bootstrap()`:
    - If `~/.local/state/gitaur/aur/` missing: full bare clone from `https://github.com/archlinux/aur.git` via `git2::build::RepoBuilder::new().bare(true).clone(...)`, with `RemoteCallbacks::transfer_progress` reporting bytes + objects to the terminal.
@@ -202,7 +202,7 @@ For each `pkgbase` in `aur_order`:
 
 14. **Record success** in `state.db.builds`: upsert `(pkgbase, last_built_commit_oid = HEAD oid, last_built_version = "<epoch>:<pkgver>-<pkgrel>", built_at = now())`. Write in a single `INSERT … ON CONFLICT(pkgbase) DO UPDATE` statement.
 
-15. **Worktree retention**: kept under `pkgs/<pkgbase>/` so the next update can diff against it via `state.last_built_tree`. The `state_db` row is the source of truth for "last built revision"; the worktree is convenience. `gitaur -Sc` clears worktrees but preserves `state.db`; `gitaur -Scc` clears both.
+15. **Worktree retention**: kept under `pkgs/<pkgbase>/` so the next update can diff against it via `state.last_built_tree`. The `state_db` row is the source of truth for "last built revision"; the worktree is convenience. `gaur -Sc` clears worktrees but preserves `state.db`; `gaur -Scc` clears both.
 
 #### Failure handling within Phase D
 
@@ -219,7 +219,7 @@ A single `pkgbase` PKGBUILD can produce N pkgnames. The dep graph treats pkgbase
 
 Order: **pacman first, then AUR** (AUR builds may link against freshly-upgraded repo libs).
 
-1. `gitaur -Sy` (refresh mirror + index).
+1. `gaur -Sy` (refresh mirror + index).
 2. `exec_pacman(["-Syu", ...passthrough_args])`.
 3. AUR upgrade detection:
    - `alpm.localdb().pkgs()` filtered to those NOT in any syncdb → foreign candidates.
@@ -342,8 +342,8 @@ Test harness:
 - `tests/fake_mirror.rs` — local bare repo with hand-crafted branches, no network. Drives index build, fetch-detection, dep resolution offline.
 - `tests/srcinfo_parser.rs` — golden files in `tests/fixtures/srcinfo/` (~20 real `.SRCINFO`s, including split + arch-specific + VCS examples).
 - `criterion` benches: `bench_index_build` (target ≤2.2 s), `bench_index_load` (target ≤500 ms incl. secondary indexes).
-- **Sandbox dogfooding**: real `gitaur -S <fixture>` runs inside `systemd-nspawn` Arch container so host stays clean. Script kept at `scripts/smoke.sh` once we have something to test (not created up front).
-- Pre-v0.3 release gate: 2 weeks of `gitaur -Syu` on the dev box alongside yay, gitaur first, log mismatches.
+- **Sandbox dogfooding**: real `gaur -S <fixture>` runs inside `systemd-nspawn` Arch container so host stays clean. Script kept at `scripts/smoke.sh` once we have something to test (not created up front).
+- Pre-v0.3 release gate: 2 weeks of `gaur -Syu` on the dev box alongside yay, gitaur first, log mismatches.
 
 ## Critical files to be created
 
@@ -397,9 +397,9 @@ Test harness:
 
 ### Not yet exercised end-to-end
 
-- A real `gitaur -S cower` against the live AUR mirror — clone has been started but never fully completed during a session (~8–9 min on this connection); the post-clone `gitaur::index::build::full_build` against 155k branches has not been measured in-tree.
+- A real `gaur -S cower` against the live AUR mirror — clone has been started but never fully completed during a session (~8–9 min on this connection); the post-clone `gitaur::index::build::full_build` against 155k branches has not been measured in-tree.
 - `pacman::alpm_db` is compile-tested but not run against the real `/var/lib/pacman` (it will be, the moment a `-S` succeeds).
-- `gitaur -Syu` end-to-end against installed foreign pkgs.
+- `gaur -Syu` end-to-end against installed foreign pkgs.
 - Split-package install (e.g. `mingw-w64-gcc`).
 - `--devel` flow against an actual `-git` pkg.
 

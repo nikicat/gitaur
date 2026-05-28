@@ -1,4 +1,4 @@
-//! `gitaur <term>...` — yay-style fuzzy search → multi-select → install.
+//! `gaur <term>...` — yay-style fuzzy search → multi-select → install.
 //!
 //! Wired up from [`crate::cli::dispatch`] for the no-operation-letter case.
 //! Shows sync-repo packages alongside AUR ones (like yay/paru): repo hits
@@ -50,7 +50,7 @@ impl Row<'_> {
 /// caller must dispatch on differently:
 ///   * `Listed` — non-interactive (no TTY or `--noconfirm`); the search hits
 ///     were printed to stdout, nothing to install. The caller returns `Ok(0)`
-///     so `gitaur foo | head` is a legitimate "search" pipeline.
+///     so `gaur foo | head` is a legitimate "search" pipeline.
 ///   * `Picked` — interactive: the user kept at least one row. Caller routes
 ///     into `build::cmd_install`.
 ///   * `Aborted` — interactive: the user explicitly cleared every row. Caller
@@ -94,7 +94,7 @@ pub fn cmd_search_install(cfg: &Config, cli: &Cli, terms: &[String]) -> Result<u
     let repo_hits = repo_res?;
     let idx = aur_res?;
     if idx.is_none() {
-        ui::warn("no AUR index; showing repo matches only (run `gitaur -Sy` to index the AUR)");
+        ui::warn("no AUR index; showing repo matches only (run `gaur -Sy` to index the AUR)");
     }
 
     let aur_hits: Vec<&IndexEntry> = match idx.as_ref() {
@@ -156,7 +156,7 @@ fn pick(rows: &[Row<'_>], noconfirm: bool) -> Result<PickOutcome> {
 
     let interactive = !noconfirm && std::io::stdin().is_terminal();
     if !interactive {
-        // Pipelines (`gitaur foo | grep …`) and `--noconfirm` callers both
+        // Pipelines (`gaur foo | grep …`) and `--noconfirm` callers both
         // land here. We print the matches so the search itself is useful and
         // exit cleanly so the shell doesn't treat the listing as a failure.
         for l in &labels_plain {

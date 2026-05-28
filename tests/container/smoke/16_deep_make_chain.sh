@@ -5,8 +5,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
-gitaur -S --noconfirm test-make-chain-a
+gaur -Sy
+gaur -S --noconfirm test-make-chain-a
 assert_exit 0
 assert_pkg_installed test-make-chain-a
 assert_pkg_explicit  test-make-chain-a

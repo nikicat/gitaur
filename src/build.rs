@@ -84,7 +84,7 @@ impl Target {
     }
 }
 
-/// Entry point for `gitaur -S <targets>`.
+/// Entry point for `gaur -S <targets>`.
 ///
 /// Loads the pacman snapshot and (optionally) the AUR index in parallel, then
 /// classifies every target. After printing the unified plan and getting a

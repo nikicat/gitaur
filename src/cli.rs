@@ -24,7 +24,7 @@ pub mod search;
 /// are forwarded to `pacman` unchanged — run them with `pacman -Sh` / `-Qh`
 /// for their own option lists. Two yay parity shortcuts:
 ///   * `gitaur`            → `-Syu` (refresh + upgrade with picker)
-///   * `gitaur <term>...`  → AUR fuzzy search + interactive install picker
+///   * `gaur <term>...`  → AUR fuzzy search + interactive install picker
 #[derive(Parser, Debug)]
 #[command(
     name = "gitaur",
@@ -47,7 +47,7 @@ pub struct Cli {
     pub noconfirm: bool,
 
     /// Don't auto-rebuild the AUR index when it's from an older gitaur; error
-    /// out instead (rerun `gitaur -Sy` yourself to rebuild).
+    /// out instead (rerun `gaur -Sy` yourself to rebuild).
     #[arg(long, global = true)]
     pub noresync: bool,
 
@@ -76,8 +76,8 @@ const AFTER_HELP: &str = "GITAUR-OWNED OPERATIONS:\n\
   -Qu            list upgrades from repos + AUR, no sudo (dry-run for -Syu)\n\
 \n\
 YAY PARITY SHORTCUTS:\n\
-  gitaur               run -Syu (refresh + upgrade)\n\
-  gitaur <term>...     fuzzy AUR search → multi-select picker → install\n\
+  gaur                 run -Syu (refresh + upgrade)\n\
+  gaur <term>...       fuzzy AUR search → multi-select picker → install\n\
 \n\
 PASS-THROUGH (raw `pacman` — clap doesn't parse these):\n\
   -Q (except -Qu), -R, -T, -D, -F, -U, and any flags they accept\n\
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn long_flag_before_pacman_op_still_routes_to_pacman() {
-        // `gitaur --noconfirm -Rns vim` must detect the `-R` even when a
+        // `gaur --noconfirm -Rns vim` must detect the `-R` even when a
         // long flag precedes it, so the full argv (including `--noconfirm`,
         // which pacman also accepts) goes through to pacman unmodified.
         assert_eq!(

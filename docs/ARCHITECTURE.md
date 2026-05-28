@@ -74,7 +74,7 @@ src/
 └── testing.rs       #[doc(hidden)] shared test helpers (git CLI runner)
 ```
 
-## Data flow: `gitaur -S <pkg>` end-to-end
+## Data flow: `gaur -S <pkg>` end-to-end
 
 ```
 argv ──► cli::pre-scan ──► clap ──► dispatch::handle_s
@@ -547,7 +547,7 @@ that don't help when most queries are regex over `pkgname` + `pkgdesc`.
 
 The catalog is rebuilt incrementally — `index::update::incremental_update`
 applies the `RefUpdate` deltas produced by `mirror::fetch::incremental_fetch`,
-so a `gitaur -Sy` doesn't re-parse the 99 % of pkgbases that didn't move.
+so a `gaur -Sy` doesn't re-parse the 99 % of pkgbases that didn't move.
 
 ### Why a state DB (SQLite) for builds?
 

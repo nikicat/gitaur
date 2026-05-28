@@ -7,6 +7,6 @@ bootstrap; reset_state
 # Ensure no AUR index on disk.
 rm -f "$STATE_DIR/index.bin"
 
-gitaur -S --noconfirm repo-base
+gaur -S --noconfirm repo-base
 assert_exit 0
 assert_pkg_installed repo-base

@@ -14,7 +14,7 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
+gaur -Sy
 
 # Seed: foreign install of test-stale-replaces at v1.0. Same pkgname the
 # AUR fixture publishes at v2.0, but staged as a foreign artifact so the
@@ -25,7 +25,7 @@ assert_pkg_installed test-stale-replaces
 
 # Trigger: build the AUR pkgbase at v2.0. Its PKGBUILD declares
 # `replaces=('test-stale-replaces')` — the load-bearing stale rename.
-RUST_LOG=gitaur=warn,gitaur=info gitaur -S --noconfirm test-stale-replaces
+RUST_LOG=gitaur=warn,gitaur=info gaur -S --noconfirm test-stale-replaces
 assert_exit 0
 assert_pkg_installed test-stale-replaces
 

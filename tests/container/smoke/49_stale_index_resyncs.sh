@@ -10,13 +10,13 @@ bootstrap; reset_state
 # Build a good index, then clobber it with bytes rkyv can't validate — the
 # exact failure mode after a FORMAT_VERSION bump (file present, owned by us,
 # layout no longer parses).
-gitaur -Sy
+gaur -Sy
 assert_exit 0
 echo "this is not a valid rkyv archive" > "$STATE_DIR/index.bin"
 
 # Bare-term search (no TTY → lists matches, exit 0). Must recover transparently
 # and still surface the AUR hit, with a one-line resync notice on stderr.
-gitaur test-trivial
+gaur test-trivial
 assert_exit 0
 assert_stdout_contains "aur/test-trivial"
 assert_stderr_contains "resyncing"
@@ -29,7 +29,7 @@ assert_stderr_not_contains "rebuilding from scratch"
 
 # Recovery is durable: the rebuilt index loads cleanly next time, with no
 # further resync notice.
-gitaur test-trivial
+gaur test-trivial
 assert_exit 0
 assert_stdout_contains "aur/test-trivial"
 if grep -qF "resyncing" "$LAST_STDERR"; then

@@ -20,7 +20,7 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
+gaur -Sy
 
 # Seed: install BOTH legacy pkgs as FOREIGN — staged .pkg.tar.zst files
 # baked into the test image, applied via pacman -U. They land in localdb but
@@ -39,7 +39,7 @@ assert_pkg_installed test-multi-provides-legacy-b
 # The PKGBUILD lists legacy-a first, then legacy-b, so the unhinted walk
 # would pick legacy-a. The hint plumbing must override that and pin the
 # counterpart to legacy-b.
-RUST_LOG=gitaur=warn,gitaur=info gitaur -S --noconfirm test-multi-provides-legacy-b
+RUST_LOG=gitaur=warn,gitaur=info gaur -S --noconfirm test-multi-provides-legacy-b
 assert_exit 0
 assert_pkg_installed test-multi-provides-new
 

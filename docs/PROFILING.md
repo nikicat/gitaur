@@ -1,6 +1,6 @@
 # Profiling gitaur refreshes
 
-A plain `gitaur -Sy` against the AUR mirror takes ~10 s on a warm cache;
+A plain `gaur -Sy` against the AUR mirror takes ~10 s on a warm cache;
 most of that is gix-internal time on a ref store with 154k branches.
 `scripts/profile-refresh.sh` captures a samply CPU profile and prints a
 flat self/total time table so you can see which gix functions dominate.
@@ -20,7 +20,7 @@ ring-buffer allowance samply needs.
 ## Run
 
 ```sh
-scripts/profile-refresh.sh                       # profiles `gitaur -Sy`
+scripts/profile-refresh.sh                       # profiles `gaur -Sy`
 scripts/profile-refresh.sh -- -S some-package    # any args after --
 scripts/profile-refresh.sh -o /tmp/p.json.gz     # custom output path
 ```

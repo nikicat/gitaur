@@ -7,13 +7,13 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
-gitaur -S --noconfirm test-split
+gaur -Sy
+gaur -S --noconfirm test-split
 assert_exit 0
 assert_pkg_installed test-split-core
 assert_pkg_installed test-split-extras
 
 # -Si by pkgbase should also resolve via the same fallback.
-gitaur -Si test-split
+gaur -Si test-split
 assert_exit 0
 assert_stdout_contains "Name            : test-split"

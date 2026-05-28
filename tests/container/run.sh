@@ -56,9 +56,9 @@ fi
 # the orchestrator has already produced an instrumented binary, so we skip.
 if [[ -z "$coverage_dir" ]]; then
     # `tarpit` is the HTTP-stall example used by the idle-timeout test in
-    # extended/. Building it alongside gitaur is cheap and keeps the test
+    # extended/. Building it alongside gaur is cheap and keeps the test
     # script container-side (no host cargo inside the container).
-    ( cd "$REPO_ROOT" && cargo build --bin gitaur --example tarpit )
+    ( cd "$REPO_ROOT" && cargo build --bin gaur --example tarpit )
 else
     mkdir -p "$coverage_dir"
 fi

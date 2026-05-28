@@ -4,8 +4,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
-gitaur -S --noconfirm test-make-via-repo
+gaur -Sy
+gaur -S --noconfirm test-make-via-repo
 assert_exit 0
 assert_pkg_installed test-make-via-repo
 assert_pkg_explicit  test-make-via-repo

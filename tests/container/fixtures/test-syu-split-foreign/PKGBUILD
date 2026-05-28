@@ -8,7 +8,7 @@
 # and rewrites it onto THIS pkgbase. The picker auto-selects the
 # resulting upgrade row.
 #
-# Regression target: `gitaur -Syu` of a foreign-installed pkgname in a
+# Regression target: `gaur -Syu` of a foreign-installed pkgname in a
 # split pkgbase used to install every sibling. expand_pkgbase_targets's
 # pacman shortcut (`pac.is_installed(bare) || pac.in_sync(bare)`) fired
 # before the by_name rewrite branch could record a selection, so

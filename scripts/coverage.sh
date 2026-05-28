@@ -85,7 +85,7 @@ in_image '
     mkdir -p "$DIR/profraw/rust" "$DIR/profraw/podman"
     LLVM_PROFILE_FILE="$DIR/profraw/rust/%p-%m.profraw" \
         cargo test --all-features --locked --no-fail-fast
-    cargo build --bin gitaur --locked
+    cargo build --bin gaur --locked
 '
 [[ $? -eq 0 ]] || { echo "scripts/coverage.sh: rust tests or instrumented build failed" >&2; overall_status=1; }
 set -e
@@ -94,9 +94,9 @@ set -e
 # step 1. The --coverage flag tells tests/container/run.sh to bind-mount
 # $PROFRAW_PODMAN into each test container and set LLVM_PROFILE_FILE; we set
 # GITAUR so the suite invokes the instrumented binary rather than the
-# default target/debug/gitaur path.
+# default target/debug/gaur path.
 set +e
-GITAUR="/work/target/coverage-build/debug/gitaur" \
+GITAUR="/work/target/coverage-build/debug/gaur" \
     bash tests/container/run.sh --coverage "$PROFRAW_PODMAN" smoke
 [[ $? -eq 0 ]] || { echo "scripts/coverage.sh: podman tests failed" >&2; overall_status=1; }
 set -e

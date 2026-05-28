@@ -24,30 +24,30 @@ cargo install --path . --locked
 
 ## Usage
 
-`gitaur` accepts pacman's flag syntax. Operations it doesn't own (`-Q`, `-R`, `-T`, `-D`, `-F`, `-U`) are forwarded to `pacman` unchanged, so you can use it as a drop-in replacement.
+`gaur` accepts pacman's flag syntax. Operations it doesn't own (`-Q`, `-R`, `-T`, `-D`, `-F`, `-U`) are forwarded to `pacman` unchanged, so you can use it as a drop-in replacement.
 
-| Command                 | What it does                                                  |
-| ----------------------- | ------------------------------------------------------------- |
-| `gitaur`                | Refresh the AUR mirror + index (same as `-Sy`)                |
-| `gitaur -S <pkg>...`    | Install AUR packages (recursive deps, batched sudo)           |
-| `gitaur -Sy`            | Incremental fetch of the AUR mirror                           |
-| `gitaur -Syy`           | Force a full re-clone (~8–9 min)                              |
-| `gitaur -Syu`           | `pacman -Syu`, then AUR upgrades                              |
-| `gitaur -Ss <regex>`    | Search the AUR by name / desc / provides                      |
-| `gitaur -Si <pkg>`      | Show package info                                             |
-| `gitaur -Sc` / `-Scc`   | Remove built worktrees + pass `-Sc`/`-Scc` through to `pacman` |
-| `gitaur -Rns <pkg>`     | Forwarded to `pacman` unchanged                               |
+| Command               | What it does                                                  |
+| --------------------- | ------------------------------------------------------------- |
+| `gaur`                | Refresh the AUR mirror + index (same as `-Sy`)                |
+| `gaur -S <pkg>...`    | Install AUR packages (recursive deps, batched sudo)           |
+| `gaur -Sy`            | Incremental fetch of the AUR mirror                           |
+| `gaur -Syy`           | Force a full re-clone (~8–9 min)                              |
+| `gaur -Syu`           | `pacman -Syu`, then AUR upgrades                              |
+| `gaur -Ss <regex>`    | Search the AUR by name / desc / provides                      |
+| `gaur -Si <pkg>`      | Show package info                                             |
+| `gaur -Sc` / `-Scc`   | Remove built worktrees + pass `-Sc`/`-Scc` through to `pacman` |
+| `gaur -Rns <pkg>`     | Forwarded to `pacman` unchanged                               |
 
 Global flags: `--devel` (include `-git`/`-svn`/`-hg`/`-bzr` in `-Syu`), `--noconfirm`, `--asdeps`, `--color {auto,always,never}`.
 
 ### Examples
 
 ```sh
-gitaur -S yay-bin
-gitaur -Syu --devel
-gitaur -Ss '^claude-'
-gitaur -Rns gitaur          # forwarded to pacman
-RUST_LOG=gitaur=debug gitaur -Sy
+gaur -S yay-bin
+gaur -Syu --devel
+gaur -Ss '^claude-'
+gaur -Rns gitaur          # forwarded to pacman
+RUST_LOG=gitaur=debug gaur -Sy
 ```
 
 ## Configuration

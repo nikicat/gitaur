@@ -1,6 +1,6 @@
 # Optimizing the AUR mirror fetch
 
-A record of the work that brought `gitaur -Sy` against the AUR mirror from
+A record of the work that brought `gaur -Sy` against the AUR mirror from
 ~11 s to ~3.5–5 s (warm cache). Most of the time was, and to some extent
 still is, spent inside `gix` doing per-ref work on a ref store with ~155k
 branches (one per AUR package).
@@ -93,7 +93,7 @@ nothing.
 ### 3. Cache packed-refs in a HashMap during `update_refs`
 `gix` · upstream PR #2605
 
-Companion to #2. Together #1–#3 brought `gitaur -Sy` from ~11 s to ~5 s
+Companion to #2. Together #1–#3 brought `gaur -Sy` from ~11 s to ~5 s
 (roughly `git fetch` parity at the time).
 
 ### 4. Skip the loose-ref probe when building the have-set

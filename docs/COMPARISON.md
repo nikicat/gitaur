@@ -214,7 +214,7 @@ and does *not* propose an upgrade. Conservative.
    ```
    Foreign pkgs with AUR providers (not auto-proposed):
        dotnet-runtime-7.0  7.0.20.sdk120-2  →  dotnet-core-7.0-bin 7.0.20.sdk410-2  [provides]
-   Run `gitaur -S dotnet-core-7.0-bin` to migrate.
+   Run `gaur -S dotnet-core-7.0-bin` to migrate.
    ```
 3. Keep the existing `-S <name>` flow unchanged — explicit naming is
    already an opt-in to the migration.

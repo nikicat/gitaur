@@ -75,7 +75,7 @@ pub struct RepoHit {
 ///
 /// Mirrors `pacman -Ss`: the first sync DB (pacman.conf order) that carries a
 /// pkgname wins, so a name shadowed in a later repo isn't listed twice. Used
-/// by the `gitaur <term>` picker to show repo packages alongside AUR ones the
+/// by the `gaur <term>` picker to show repo packages alongside AUR ones the
 /// way yay/paru do.
 #[instrument]
 pub fn search_sync(terms: &[String]) -> Result<Vec<RepoHit>> {

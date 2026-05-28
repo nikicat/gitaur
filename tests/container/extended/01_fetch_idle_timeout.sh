@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `gitaur -Sy` against an HTTP tarpit must abort once curl's lowSpeedTime
+# `gaur -Sy` against an HTTP tarpit must abort once curl's lowSpeedTime
 # elapses, not hang forever on the dead socket. Verifies:
 #   * exit non-zero
 #   * total wall-clock is within ~2× the configured idle window
@@ -29,7 +29,7 @@ for _ in $(seq 1 50); do
 done
 
 START=$EPOCHREALTIME
-gitaur -Sy --noconfirm
+gaur -Sy --noconfirm
 END=$EPOCHREALTIME
 ELAPSED_MS=$(awk -v s="$START" -v e="$END" 'BEGIN { printf "%d", (e - s) * 1000 }')
 

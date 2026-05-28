@@ -1,4 +1,4 @@
-//! `gitaur -Qu` and the shared upgrade-query plumbing that also feeds the
+//! `gaur -Qu` and the shared upgrade-query plumbing that also feeds the
 //! `-Syu` interactive picker. Read-only: walks alpm + the AUR index file,
 //! never shells out to `pacman -S` or asks for sudo.
 
@@ -12,7 +12,7 @@ use crate::paths;
 use crate::ui;
 use tracing::{instrument, warn};
 
-/// `gitaur -Qu` — show the union of pacman-repo and AUR upgrade candidates.
+/// `gaur -Qu` — show the union of pacman-repo and AUR upgrade candidates.
 ///
 /// One flat, severity-sorted table grouped by `repo` column. Read-only and
 /// unprivileged (no sudo), so safe to call both as the bare `-Qu` and as a

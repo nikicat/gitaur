@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-GITAUR="${GITAUR:-/work/target/debug/gitaur}"
+GITAUR="${GITAUR:-/work/target/debug/gaur}"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/gitaur"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gitaur"
 LOCAL_REPO="${LOCAL_REPO:-/srv/local-repo}"
@@ -45,8 +45,8 @@ reset_state() {
     mkdir -p "$STATE_DIR"
 }
 
-# Run gitaur, capturing stdout/stderr/exit into LAST_*.
-gitaur() {
+# Run gaur, capturing stdout/stderr/exit into LAST_*.
+gaur() {
     LAST_STDOUT="$(mktemp)"
     LAST_STDERR="$(mktemp)"
     set +e
@@ -55,12 +55,12 @@ gitaur() {
     set -e
 }
 
-# Like `gitaur`, but feeds the first argument to stdin so the interactive
+# Like `gaur`, but feeds the first argument to stdin so the interactive
 # confirm path is exercised (no `--noconfirm`). stdin is not a TTY here, so
 # `ui::confirm` takes its line-read fallback: each prompt consumes one input
 # line, and an empty string (EOF on the first read) is treated as the "yes"
 # default. Use "y"/"n" lines to answer successive prompts deterministically.
-gitaur_input() {
+gaur_input() {
     local input="$1"; shift
     LAST_STDOUT="$(mktemp)"
     LAST_STDERR="$(mktemp)"

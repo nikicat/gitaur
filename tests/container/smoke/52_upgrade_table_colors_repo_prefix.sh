@@ -19,7 +19,7 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
+gaur -Sy
 install_foreign test-syu-split-foreign-cli
 assert_pkg_installed test-syu-split-foreign-cli
 
@@ -28,7 +28,7 @@ aur_colored="${esc}[34m${esc}[1maur"   # bold blue — the ColorHash of "aur"
 
 # Negative control: default (Auto) with stderr redirected to a file is non-TTY
 # → no color, prefix is the bare word.
-gitaur -Qu
+gaur -Qu
 assert_exit 0
 assert_stderr_contains "aur"
 if grep -qF -- "$aur_colored" "$LAST_STDERR"; then
@@ -40,7 +40,7 @@ fi
 # Force color on via config — the same row must now carry the bold-blue prefix
 # even though stderr is still a pipe.
 echo 'color = "always"' >> "$CONFIG_DIR/config.toml"
-gitaur -Qu
+gaur -Qu
 assert_exit 0
 grep -qF -- "$aur_colored" "$LAST_STDERR" || {
     echo "expected bold-blue 'aur' prefix (${esc}[34m${esc}[1maur) with color = always" >&2

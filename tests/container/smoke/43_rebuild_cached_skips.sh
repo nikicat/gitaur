@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build idempotency: a second `gitaur -S <pkg>` for the same pkgbase at
+# Build idempotency: a second `gaur -S <pkg>` for the same pkgbase at
 # the same version must reuse the cached `.pkg.tar.zst` rather than
 # rerunning makepkg. The check in `prepare_one` (`src/build.rs`)
 # derives "already built" from whether a tarball at exactly `new_ver`
@@ -14,9 +14,9 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
+gaur -Sy
 
-gitaur -S --noconfirm test-trivial
+gaur -S --noconfirm test-trivial
 assert_exit 0
 assert_pkg_installed test-trivial
 
@@ -29,7 +29,7 @@ pkg_file=$(ls "$STATE_DIR"/pkgs/test-trivial/*.pkg.tar.zst 2>/dev/null | head -1
 initial_mtime=$(stat -c '%Y' "$pkg_file")
 
 # Second run — must hit the cached path.
-gitaur -S --noconfirm test-trivial
+gaur -S --noconfirm test-trivial
 assert_exit 0
 
 grep -qF 'test-trivial: already built' "$LAST_STDERR" || {

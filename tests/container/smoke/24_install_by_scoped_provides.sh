@@ -12,8 +12,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
-gitaur -S --noconfirm scoped-virt
+gaur -Sy
+gaur -S --noconfirm scoped-virt
 assert_exit 0
 
 # Only the providing pkgname is installed, and as Explicit (the user named it

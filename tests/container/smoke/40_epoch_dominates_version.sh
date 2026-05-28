@@ -12,7 +12,7 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
+gaur -Sy
 
 # Seed: foreign install at 0.1-1 (no epoch). Same pkgname as the AUR
 # fixture so the new pkgbase will be a canonical Pkgname-tier match.
@@ -26,7 +26,7 @@ pacman -Q test-epoch | grep -qF '0.1-1' || {
 }
 
 # Trigger: install the AUR pkgbase at epoch=2, pkgver=0.1.
-RUST_LOG=gitaur=info gitaur -S --noconfirm test-epoch
+RUST_LOG=gitaur=info gaur -S --noconfirm test-epoch
 assert_exit 0
 assert_pkg_installed test-epoch
 

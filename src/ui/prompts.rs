@@ -9,7 +9,7 @@ use std::io::{BufRead, IsTerminal, Write};
 /// Y/n confirmation prompt with `Y` default. Honors `noconfirm` to auto-accept.
 ///
 /// Falls back to a plain `stdin.read_line` when stdin is not a TTY so callers
-/// can pipe an answer (`echo n | gitaur -S foo`), matching pacman/yay UX.
+/// can pipe an answer (`echo n | gaur -S foo`), matching pacman/yay UX.
 pub fn confirm(prompt: &str, noconfirm: bool) -> std::io::Result<bool> {
     if noconfirm {
         return Ok(true);

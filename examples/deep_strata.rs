@@ -1,5 +1,5 @@
 //! Find AUR pkgbases that resolve to the deepest stratum stack — i.e. the
-//! biggest build pipeline `gitaur -S <pkg>` would print (decline the
+//! biggest build pipeline `gaur -S <pkg>` would print (decline the
 //! confirmation prompt for a dry run).
 //!
 //! Uses the real resolver, so the strata count matches what gitaur would
@@ -13,7 +13,7 @@ use gitaur::paths;
 use gitaur::resolver;
 
 fn main() {
-    let idx = index::load(&paths::index_path()).expect("load index — run `gitaur -Sy` first");
+    let idx = index::load(&paths::index_path()).expect("load index — run `gaur -Sy` first");
     let by = Secondary::build(&idx);
     let alpm = alpm_db::open().expect("open alpm");
     let pac = PacmanIndex::build(&alpm);

@@ -19,7 +19,7 @@
 #     `--asdeps` except the one in `direct_targets`.
 #
 # Twin to smoke/26 (which exercises the same selection logic on the
-# `gitaur -S <pkgname>` branch); 26 didn't catch this because that path
+# `gaur -S <pkgname>` branch); 26 didn't catch this because that path
 # goes through the by_name *rewrite* branch (which already recorded the
 # selection). The shortcut at `pac.is_installed || pac.in_sync` was the
 # blind spot.
@@ -33,7 +33,7 @@ bootstrap; reset_state
 # cmd_install — that's what reproduces the original bug.
 echo 'aur_default_select = true' >> "$CONFIG_DIR/config.toml"
 
-gitaur -Sy
+gaur -Sy
 
 # Seed: install test-syu-split-foreign-cli at v1.0 as FOREIGN (in localdb,
 # not in any sync repo, not an AUR pkgbase). Mirrors the user's
@@ -44,7 +44,7 @@ assert_pkg_installed test-syu-split-foreign-cli
 # Trigger: full `-Syu` cycle. The picker auto-selects the AUR upgrade
 # row for test-syu-split-foreign-cli (1.0 → 2.0), which carries an
 # explicit hint = test-syu-split-foreign-cli through cmd_install.
-gitaur -Su --noconfirm
+gaur -Su --noconfirm
 assert_exit 0
 
 # The requested sibling must be upgraded to v2.0 (was foreign 1.0).

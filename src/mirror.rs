@@ -123,7 +123,7 @@ fn loose_branch_ref_count(path: &Path) -> usize {
 
 /// Fetch mirror updates and incrementally refresh the on-disk index.
 ///
-/// `force_reclone` (set by `gitaur -Syy`) blows away the existing bare clone
+/// `force_reclone` (set by `gaur -Syy`) blows away the existing bare clone
 /// and re-bootstraps from scratch, regardless of whether the current clone
 /// looks healthy. Use when the on-disk repo is suspected to be corrupted or
 /// when you want a clean baseline.

@@ -2,7 +2,7 @@
 name = "gitaur"
 version = "0.1.0"
 edition = "2024"
-description = "yay-like AUR helper backed by the github.com/archlinux/aur mirror"
+description = "AUR helper backed by the github.com/archlinux/aur mirror"
 license = "MIT"
 repository = "https://github.com/nikicat/gitaur"
 keywords = ["aur", "archlinux", "pacman", "package-manager"]
@@ -13,7 +13,7 @@ name = "gitaur"
 path = "src/lib.rs"
 
 [[bin]]
-name = "gitaur"
+name = "gaur"
 path = "src/main.rs"
 
 # Dev/profiling helper: reads the per-run span traces in state_dir()/traces/

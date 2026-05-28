@@ -10,8 +10,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
-gitaur -S --noconfirm test-trivial test-fail-build
+gaur -Sy
+gaur -S --noconfirm test-trivial test-fail-build
 assert_exit 1
 assert_pkg_installed     test-trivial
 assert_pkg_not_installed test-fail-build

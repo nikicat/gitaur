@@ -5,8 +5,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
-gitaur -S --noconfirm test-with-makedep
+gaur -Sy
+gaur -S --noconfirm test-with-makedep
 assert_exit 0
 assert_pkg_installed test-with-makedep
 assert_pkg_explicit test-with-makedep

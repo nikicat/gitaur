@@ -19,8 +19,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gitaur -Sy
-gitaur -S --noconfirm test-collision-multi
+gaur -Sy
+gaur -S --noconfirm test-collision-multi
 assert_exit 0
 
 # Both split pkgnames from the multi pkgbase must be installed.
