@@ -3,14 +3,10 @@
 //!
 //! It's fed from OTEL [`SpanData`] (which carries *explicit* start/end
 //! timestamps) instead of `tracing-chrome`, which could only stamp a span at
-//! its open/close wall-clock. Two things the switch buys:
-//! - the `http request` spans (emitted by the gix curl worker with curl's
-//!   CURLINFO timing recorded in `ttfb_ms`/`total_ms`) get `before first byte`
-//!   / `after first byte` child slices synthesized here from *backdated*
-//!   timestamps — impossible with a stamp-on-close sink.
-//! - spans that are held-but-never-entered (the gix fetch-phase progress spans,
-//!   see [`crate::ui::gix_progress`]) carry real start/end times, so we no
-//!   longer depend on `tracing-chrome`'s fragile Async-style LIFO id-nesting.
+//! its open/close wall-clock. The win: the `http request` spans (emitted by the
+//! gix curl worker with curl's CURLINFO timing recorded in `ttfb_ms`/`total_ms`)
+//! get `before first byte` / `after first byte` child slices synthesized here
+//! from *backdated* timestamps — impossible with a stamp-on-close sink.
 //!
 //! Layout: one Chrome `X` (complete) event per span, `pid=1`, `tid` taken from
 //! the `thread.id` attribute the `tracing-opentelemetry` bridge records under
