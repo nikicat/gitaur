@@ -115,23 +115,34 @@ fn write_trace(file: &mut BufWriter<File>, spans: &[SpanData]) -> io::Result<()>
         );
         events.push(complete_event(&span.name, ts, dur, tid, args_of(span)));
 
-        // Break an `http request` into its waiting/receiving halves using curl's
-        // own TTFB vs. total timing. Same tid → nests under the parent by
-        // containment in the Perfetto/chrome view.
+        // Break an `http request` into its waiting/receiving halves at curl's
+        // TTFB. Same tid → nests under the parent by containment in the
+        // Perfetto/chrome view. Skip a half that rounds to nothing — a
+        // zero-length slice is noise, and an empty receiving half means the
+        // whole request was first-byte wait.
         if span.name == HTTP_REQUEST
-            && let (Some(ttfb_ms), Some(total_ms)) =
-                (attr_i64(span, "ttfb_ms"), attr_i64(span, "total_ms"))
+            && let Some(ttfb_ms) = attr_i64(span, "ttfb_ms")
         {
             let ttfb = micros_of(Duration::from_millis(ttfb_ms.max(0).unsigned_abs()));
-            let total = micros_of(Duration::from_millis(total_ms.max(0).unsigned_abs()));
-            events.push(complete_event(BEFORE_FIRST_BYTE, ts, ttfb, tid, Json::Null));
-            events.push(complete_event(
-                AFTER_FIRST_BYTE,
-                ts + ttfb,
-                total.saturating_sub(ttfb),
-                tid,
-                Json::Null,
-            ));
+            let ((b_ts, b_dur), (a_ts, a_dur)) = first_byte_split(ts, dur, ttfb);
+            if b_dur > 0 {
+                events.push(complete_event(
+                    BEFORE_FIRST_BYTE,
+                    b_ts,
+                    b_dur,
+                    tid,
+                    Json::Null,
+                ));
+            }
+            if a_dur > 0 {
+                events.push(complete_event(
+                    AFTER_FIRST_BYTE,
+                    a_ts,
+                    a_dur,
+                    tid,
+                    Json::Null,
+                ));
+            }
         }
     }
 
@@ -148,6 +159,25 @@ fn write_trace(file: &mut BufWriter<File>, spans: &[SpanData]) -> io::Result<()>
     let doc = json!({ "traceEvents": events });
     serde_json::to_writer(&mut *file, &doc)?;
     file.flush()
+}
+
+/// Split an `http request`'s window into its before/after-first-byte halves.
+///
+/// `ttfb` is curl's time-to-first-byte; `dur` is the parent slice's *own*
+/// measured length — both in microseconds. The waiting half is `[ts, ts+split]`
+/// and the receiving half `[ts+split, ts+dur]`, where `split = min(ttfb, dur)`.
+/// They tile the parent: `before` shares the parent's start, `after` shares its
+/// end, and they meet at the split. That's fine — Perfetto only drops a complete
+/// slice that *crosses* another's end (`slice_drop_overlapping_complete_event`);
+/// shared boundaries and bare touches nest or pop cleanly. The split is clamped
+/// to the parent's own `dur` (never curl's ms-rounded `total_ms`, a different
+/// clock) precisely so `after` can't run past the parent's end and cross it.
+///
+/// The receiving half is zero-length when `ttfb >= dur`; the caller skips it.
+/// Returns `((before_ts, before_dur), (after_ts, after_dur))`.
+fn first_byte_split(ts: u64, dur: u64, ttfb: u64) -> ((u64, u64), (u64, u64)) {
+    let split = ttfb.min(dur);
+    ((ts, split), (ts + split, dur - split))
 }
 
 /// One Chrome `X` (complete) event. `ts`/`dur` are microseconds.
@@ -230,12 +260,13 @@ fn micros_of(d: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::fs::File;
-    use std::io::Read;
+    use std::time::Duration;
 
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::SdkTracerProvider;
-    use serde_json::Value;
     use tempfile::tempdir;
+
+    use crate::trace;
     use tracing::field::Empty;
     use tracing::subscriber::with_default;
     use tracing_subscriber::layer::SubscriberExt;
@@ -245,9 +276,19 @@ mod tests {
 
     /// Emit a real `http request` span through the OTEL bridge (the gix worker's
     /// exact shape: `ttfb_ms`/`total_ms` recorded as `u64`) and assert the
-    /// exporter synthesizes the two first-byte child slices with the right
-    /// timing. This rides the full bridge, so it also guards the `u64`→string
-    /// attribute encoding that [`super::attr_i64`] has to tolerate.
+    /// exporter synthesizes the first-byte breakdown *contained* within the
+    /// parent. The bridge span lasts only microseconds, so the 100 ms `ttfb_ms`
+    /// always exceeds it: this exercises the clamp ([`first_byte_split`] folds the
+    /// overrun back to the parent's end), leaving an empty receiving half that's
+    /// `slice_drop_overlapping_complete_event`. Riding the full bridge also guards
+    /// the `u64`→string attribute encoding that [`super::attr_i64`] has to
+    /// tolerate.
+    ///
+    /// The span sleeps 10 ms with `ttfb_ms = 1`, so the waiting half (1 ms) sits
+    /// well inside the parent and both children are emitted — the real two-phase
+    /// shape. The headline assertion runs the result back through the reader's
+    /// [`crate::trace::overlaps`] (Perfetto's own rule) and demands zero drops,
+    /// guarding every boundary trim at once: drop any of them and this fails.
     #[test]
     fn http_request_span_gets_first_byte_children() {
         let tmp = tempdir().unwrap();
@@ -271,50 +312,88 @@ mod tests {
                 total_ms = Empty,
             );
             let entered = span.enter();
-            // Same recording path as the gix curl worker: CURLINFO as u64.
-            span.record("ttfb_ms", 100_u64);
-            span.record("total_ms", 250_u64);
+            // Same recording path as the gix curl worker: CURLINFO as u64. The
+            // sleep makes the parent's measured dur (~10 ms) dwarf ttfb (1 ms),
+            // so the split lands inside and both halves are emitted.
+            span.record("ttfb_ms", 1_u64);
+            span.record("total_ms", 10_u64);
+            std::thread::sleep(Duration::from_millis(10));
             drop(entered);
         });
 
         provider.shutdown().unwrap();
 
-        let mut json = String::new();
-        File::open(&path)
-            .unwrap()
-            .read_to_string(&mut json)
-            .unwrap();
-        let doc: Value = serde_json::from_str(&json).unwrap();
-        let spans: Vec<&Value> = doc["traceEvents"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|e| e["ph"] == "X")
-            .collect();
-
-        let parent = spans.iter().find(|e| e["name"] == "http request").unwrap();
-        let (p_ts, p_tid) = (
-            parent["ts"].as_u64().unwrap(),
-            parent["tid"].as_i64().unwrap(),
+        let events = trace::load(&path).unwrap();
+        let over = trace::overlaps(&events);
+        assert!(
+            over.is_empty(),
+            "exporter emitted overlapping slices: {over:?}"
         );
 
-        let before = spans
-            .iter()
-            .find(|e| e["name"] == "before first byte")
-            .expect("before-first-byte child missing");
-        let after = spans
-            .iter()
-            .find(|e| e["name"] == "after first byte")
-            .expect("after-first-byte child missing");
+        let span_of = |name: &str| {
+            events
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("missing {name:?} span"))
+        };
+        let parent = span_of("http request");
+        let before = span_of("before first byte");
+        let after = span_of("after first byte");
 
-        // Synthesized from CURLINFO: waiting = ttfb (100ms), receiving =
-        // total − ttfb (150ms); both on the parent's track, the receiving half
-        // starting exactly where the waiting half ends.
-        assert_eq!(before["ts"].as_u64().unwrap(), p_ts);
-        assert_eq!(before["dur"].as_u64().unwrap(), 100_000);
-        assert_eq!(after["ts"].as_u64().unwrap(), p_ts + 100_000);
-        assert_eq!(after["dur"].as_u64().unwrap(), 150_000);
-        assert_eq!(before["tid"].as_i64().unwrap(), p_tid);
-        assert_eq!(after["tid"].as_i64().unwrap(), p_tid);
+        // The halves tile the parent: `before` is exactly curl's ttfb (1 ms) and
+        // shares the parent's start, `after` runs from the split to the parent's
+        // end. Shared boundaries are fine — only a true crossing is dropped, and
+        // the overlaps() check above already confirmed there is none.
+        assert_eq!(before.dur, 1_000);
+        assert_eq!(before.ts, parent.ts);
+        assert_eq!(before.tid, parent.tid);
+        assert_eq!(after.ts, before.ts + before.dur);
+        assert_eq!(after.ts + after.dur, parent.ts + parent.dur);
+    }
+
+    /// `ttfb` inside the parent window: `before` is exactly `ttfb`, `after` is the
+    /// remainder; together they tile `[1000, 1250)`.
+    #[test]
+    fn first_byte_split_divides_at_ttfb() {
+        assert_eq!(
+            super::first_byte_split(1000, 250, 100),
+            ((1000, 100), (1100, 150)),
+        );
+    }
+
+    /// curl's ms-rounded `ttfb` exceeds the parent's measured `dur`: clamp the
+    /// split to `dur` so `before` fills the parent and the receiving half is empty
+    /// (the caller drops it), rather than `after` running past the parent's end
+    /// and crossing it.
+    #[test]
+    fn first_byte_split_clamps_overrun_to_parent_end() {
+        assert_eq!(
+            super::first_byte_split(1000, 80, 100),
+            ((1000, 80), (1080, 0)),
+        );
+    }
+
+    /// The synthesized halves must survive Perfetto's stacking — feed them through
+    /// the reader's [`crate::trace::overlaps`] (the same rule Perfetto applies) and
+    /// assert nothing is dropped. Guards the `dur` clamp: build from `total_ms`
+    /// instead and `after` would cross the parent's end and this would fail.
+    #[test]
+    fn first_byte_split_children_are_overlap_free() {
+        let (ts, dur, ttfb) = (1_000_u64, 250_u64, 100_u64);
+        let ((b_ts, b_dur), (a_ts, a_dur)) = super::first_byte_split(ts, dur, ttfb);
+        let mk = |name: &str, ts, dur| trace::Event {
+            name: name.to_owned(),
+            tid: 7,
+            ts,
+            dur,
+            args: serde_json::Map::new(),
+        };
+        let evs = vec![
+            mk("http request", ts, dur),
+            mk("before first byte", b_ts, b_dur),
+            mk("after first byte", a_ts, a_dur),
+        ];
+        let over = trace::overlaps(&evs);
+        assert!(over.is_empty(), "synthesized children overlap: {over:?}");
     }
 }

@@ -60,12 +60,6 @@ pub fn incremental_fetch(cfg: &Config, mirror: &MirrorRepo) -> Result<Vec<RefUpd
             prepared
         };
 
-        // gix leaves its phase label stuck on `list refs` through the silent
-        // have-set build below (it doesn't `set_name` again until negotiation),
-        // so close the stale span here. Otherwise the gap is mislabeled as
-        // `list refs` instead of falling under the `receive` span.
-        progress.clear_phase();
-
         // The next ~30–60s on a large mirror are gix-internal and silent:
         //   1. build local "have" set from existing refs (silent ~20s on AUR)
         //   2. negotiate (visible — `set_name=negotiate (round N)`)

@@ -105,9 +105,7 @@ pub fn init() -> Guard {
     // into OpenTelemetry and exported as trace-events by `chrome::ChromeExporter`.
     // `with_threads(true)` tags each span with `thread.id`/`thread.name`, which
     // the exporter maps to Chrome track (`tid`) so parallel rayon index work and
-    // the gix curl worker each get their own lane. The fetch-phase sub-spans are
-    // *held, not entered* (the progress adapter stays `Send + Sync`), but OTEL
-    // records open→close with explicit timestamps regardless, so they survive.
+    // the gix curl worker each get their own lane.
     let (chrome_layer, provider, trace_path) = match Traces.create(&basename) {
         Ok((file, path)) => {
             let provider = SdkTracerProvider::builder()

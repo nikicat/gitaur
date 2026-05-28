@@ -47,6 +47,9 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         depth: usize,
     },
+    /// List complete slices Perfetto drops because they overlap a sibling on
+    /// the same track (`slice_drop_overlapping_complete_event`).
+    Overlaps,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -58,12 +61,23 @@ fn main() -> anyhow::Result<()> {
     };
     let events = trace::load(&path)?;
     let forest = trace::build_forest(&events);
+    let over = trace::overlaps(&events);
     let min_us = cli.min_ms.saturating_mul(1_000);
+    let cmd = cli.cmd.unwrap_or(Cmd::Summary);
 
     eprintln!("{} — {} spans", path.display(), events.len());
+    // Surface the drop count up front: an overlap means Perfetto silently omits
+    // a slice and the tree below mis-attributes its parent's self time.
+    if !over.is_empty() && !matches!(cmd, Cmd::Overlaps) {
+        eprintln!(
+            "  warning: {} overlapping slice(s) Perfetto will drop — run `gitaur-trace overlaps`",
+            over.len(),
+        );
+    }
 
-    match cli.cmd.unwrap_or(Cmd::Summary) {
+    match cmd {
         Cmd::Summary => print_summary(&trace::summarize(&forest), min_us),
+        Cmd::Overlaps => print_overlaps(&over),
         Cmd::Tree { span, depth } => {
             let depth = if depth == 0 { usize::MAX } else { depth };
             let roots: Vec<&Node> = match &span {
@@ -95,6 +109,36 @@ fn print_summary(aggs: &[Agg], min_us: u64) {
             trace::fmt_dur(a.total_us),
             a.count,
             a.name,
+        );
+    }
+}
+
+/// List every overlapping slice, naming the slice Perfetto drops and the one it
+/// overruns, each with its `[start..end]` window so it's findable in Perfetto.
+fn print_overlaps(over: &[trace::Overlap]) {
+    if over.is_empty() {
+        println!("no overlapping slices — Perfetto renders every complete event");
+        return;
+    }
+    println!(
+        "{} overlapping slice(s) dropped as slice_drop_overlapping_complete_event:",
+        over.len(),
+    );
+    let window = |e: &trace::Event| {
+        format!(
+            "[{}..{}]",
+            trace::fmt_dur(e.ts),
+            trace::fmt_dur(e.ts.saturating_add(e.dur)),
+        )
+    };
+    for o in over {
+        println!(
+            "  tid {}: '{}' {} collides with '{}' {}",
+            o.tid,
+            o.dropped.name,
+            window(&o.dropped),
+            o.over.name,
+            window(&o.over),
         );
     }
 }

@@ -185,6 +185,80 @@ fn sort_children(node: &mut Node) {
     }
 }
 
+/// A complete slice Perfetto drops because it *crosses* an open slice's end.
+///
+/// `dropped` begins inside `over` but ends after it (`over.start ≤ dropped.start
+/// < over.end < dropped.end`) — a partial overlap, which on one track is invalid
+/// and discarded as `slice_drop_overlapping_complete_event`. Note what is *not*
+/// here: slices that merely share a start, share an end, or touch are all fine —
+/// Perfetto nests or pops them. Only a true crossing is dropped.
+#[derive(Debug, Clone)]
+pub struct Overlap {
+    pub tid: i64,
+    /// The slice that escapes its container — the one Perfetto discards.
+    pub dropped: Event,
+    /// The open slice whose end it crosses.
+    pub over: Event,
+}
+
+/// Find the complete slices Perfetto drops, per track.
+///
+/// Faithfully replays Perfetto's `SliceTracker::Scoped` (see
+/// `slice_tracker.cc`): process each `X` slice in `(timestamp, file order)`,
+/// maintaining a per-track stack. Before placing a new slice, pop every open one
+/// that ended at or before it starts (a touch *pops* — it is not an overlap),
+/// then the innermost still-open slice is the parent. A new slice is dropped
+/// only on a true crossing — it starts before that parent's end yet ends after
+/// it (`new.start < end < new.end`); otherwise it nests.
+///
+/// This is deliberately *not* a "strictly nested or disjoint" check: shared
+/// starts, shared ends, and touches do not drop in real Perfetto. Earlier
+/// attempts that guessed a begin/end split with a same-timestamp tiebreak (or
+/// flagged every shared boundary) produced both false negatives and false
+/// positives; this mirrors the engine instead.
+pub fn overlaps(events: &[Event]) -> Vec<Overlap> {
+    let mut by_tid: BTreeMap<i64, Vec<&Event>> = BTreeMap::new();
+    for e in events {
+        by_tid.entry(e.tid).or_default().push(e);
+    }
+
+    let mut out = Vec::new();
+    for (_tid, mut evs) in by_tid {
+        // Perfetto sorts by timestamp; file order is the stable tiebreak. `evs`
+        // is already in file order, so a stable sort by `ts` reproduces it.
+        evs.sort_by_key(|e| e.ts);
+        let mut stack: Vec<&Event> = Vec::new();
+        for e in evs {
+            let new_ts = e.ts;
+            let new_end = e.ts.saturating_add(e.dur);
+            let mut dropped = false;
+            while let Some(top) = stack.last() {
+                let end = top.ts.saturating_add(top.dur);
+                // Pop slices that ended before `e`, or exactly at its start —
+                // unless both are zero-length instants (those coexist).
+                if end < new_ts || (end == new_ts && !(top.dur == 0 && e.dur == 0)) {
+                    stack.pop();
+                    continue;
+                }
+                // `top` is still open. Only a true crossing is dropped.
+                if new_ts < end && new_end > end {
+                    out.push(Overlap {
+                        tid: e.tid,
+                        dropped: e.clone(),
+                        over: (*top).clone(),
+                    });
+                    dropped = true;
+                }
+                break; // nested in `top` (or dropped): stop here either way.
+            }
+            if !dropped {
+                stack.push(e);
+            }
+        }
+    }
+    out
+}
+
 /// Per-name aggregate across the whole trace.
 #[derive(Debug, Clone)]
 pub struct Agg {
@@ -361,6 +435,59 @@ mod tests {
         let forest = build_forest(&evs);
         let rounds = find_by_name(&forest, "round");
         assert_eq!(rounds.len(), 2);
+    }
+
+    #[test]
+    fn overlaps_flags_partial_crossing() {
+        // X starts inside A [0,100] but ends at 150 — it crosses A's end. This is
+        // the only shape Perfetto drops; build_forest would hide it under A.
+        let over = overlaps(&[ev("A", 1, 0, 100), ev("X", 1, 80, 70)]);
+        assert_eq!(over.len(), 1);
+        assert_eq!(over[0].tid, 1);
+        assert_eq!(over[0].dropped.name, "X");
+        assert_eq!(over[0].over.name, "A");
+    }
+
+    #[test]
+    fn overlaps_flags_phase_style_crossing() {
+        // The real bug shape: an annotation span opens just after an op span and
+        // closes after it ends — crossing the op's end. Dropped.
+        let over = overlaps(&[ev("op", 1, 0, 100), ev("phase", 1, 10, 100)]);
+        assert_eq!(over.len(), 1);
+        assert_eq!(over[0].dropped.name, "phase");
+        assert_eq!(over[0].over.name, "op");
+    }
+
+    #[test]
+    fn overlaps_ignores_nesting_touch_and_shared_boundaries() {
+        // Everything Perfetto tolerates and that earlier over-strict rules wrongly
+        // flagged: a nested child, a child sharing the parent's start, two siblings
+        // that touch (`a.end == b.start`), and a child sharing the parent's end.
+        let evs = vec![
+            ev("outer", 1, 0, 100),
+            ev("shares_start", 1, 0, 20), // shared start with outer
+            ev("a", 1, 20, 30),           // [20,50]
+            ev("b", 1, 50, 30),           // [50,80] touches a
+            ev("shares_end", 1, 80, 20),  // [80,100] shares end with outer
+        ];
+        assert!(overlaps(&evs).is_empty(), "{:?}", overlaps(&evs));
+    }
+
+    #[test]
+    fn overlaps_are_per_track() {
+        // Same wall-clock window, different tids: never an overlap.
+        let evs = vec![ev("main", 1, 0, 100), ev("worker", 2, 50, 100)];
+        assert!(overlaps(&evs).is_empty());
+    }
+
+    #[test]
+    fn overlaps_dropped_slice_does_not_blame_later_ones() {
+        // X crosses A and is dropped; Y starts after A and must stand alone,
+        // not be reported as overlapping the (non-existent) X.
+        let evs = vec![ev("A", 1, 0, 100), ev("X", 1, 80, 70), ev("Y", 1, 200, 50)];
+        let over = overlaps(&evs);
+        assert_eq!(over.len(), 1);
+        assert_eq!(over[0].dropped.name, "X");
     }
 
     #[test]

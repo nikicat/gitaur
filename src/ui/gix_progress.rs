@@ -37,18 +37,6 @@ pub struct GixProgress {
     /// `MultiProgress` on `Drop`. Nodes that only get `set_name`'d (root,
     /// intermediate ancestors) never spawn a leaf.
     leaf: Mutex<Option<ProgressBar>>,
-    /// True only for the root node (the one from [`GixProgress::new`]). The
-    /// root drives the phase-span timeline; children don't (see [`swap_phase`]).
-    ///
-    /// [`swap_phase`]: GixProgress::swap_phase
-    is_root: bool,
-    /// Tracing span for the root's current fetch/clone phase, swapped on every
-    /// `set_name` transition so each phase shows up as a timed sub-span of the
-    /// enclosing `#[instrument]` span. `None` on children and before the first
-    /// phase. Held, *not entered* — the adapter must stay `Send + Sync` so it
-    /// can't keep an `EnteredSpan`; the OTEL bridge records a span's open→close
-    /// (not enter/exit), so the held span's lifetime *is* the phase.
-    phase_span: Mutex<Option<tracing::Span>>,
 }
 
 /// State shared by every node in one progress tree.
@@ -84,32 +72,7 @@ impl GixProgress {
             own_unit_is_bytes: false,
             own_max: None,
             leaf: Mutex::new(None),
-            is_root: true,
-            phase_span: Mutex::new(None),
         }
-    }
-
-    /// Close the current root-phase span and open one for `name`. The previous
-    /// span is dropped *before* the new one is created so phases read as a
-    /// clean sequence of siblings under the enclosing fetch/clone span rather
-    /// than overlapping.
-    fn swap_phase(&self, name: &str) {
-        let mut g = self.phase_span.lock().unwrap();
-        *g = None; // close the previous phase span first
-        *g = Some(open_phase_span(name));
-    }
-
-    /// Drop the current root-phase span without opening a successor.
-    ///
-    /// gix only transitions the phase label on a `set_name` *change*, so a
-    /// label can outlive the work it named: after the ref advertisement, gix
-    /// leaves the name stuck on `list refs` through the entire silent have-set
-    /// build at the start of `receive`, never calling `set_name` again until
-    /// negotiation begins. Callers use this at a known phase boundary to close
-    /// the stale span so the trace doesn't attribute that gap to the wrong
-    /// phase. No-op on children (their `phase_span` is always `None`).
-    pub fn clear_phase(&self) {
-        *self.phase_span.lock().unwrap() = None;
     }
 
     /// Clear all live bars. Intended for end-of-clone cleanup.
@@ -118,9 +81,6 @@ impl GixProgress {
         if let Some(pb) = taken {
             pb.finish_and_clear();
         }
-        // Close the final phase span (e.g. "receiving pack") while the
-        // enclosing fetch/clone span is still open, so it nests correctly.
-        self.phase_span.lock().unwrap().take();
         self.shared.summary.finish_and_clear();
     }
 
@@ -195,8 +155,6 @@ impl Drop for GixProgress {
         if let Some(pb) = taken {
             pb.finish_and_clear();
         }
-        // Backstop in case `finish()` wasn't called; no-op on children.
-        self.phase_span.lock().unwrap().take();
     }
 }
 
@@ -263,67 +221,6 @@ fn phase_hint(name: &str) -> Option<&'static str> {
 /// alignment.
 fn leaf_is_muted(name: &str) -> bool {
     name.starts_with("remote") || name.starts_with("remote:")
-}
-
-/// The root fetch/clone phases we surface as their own trace span. gix's phase
-/// name is sometimes dynamic (e.g. `"negotiate (round 3)"`), so [`classify`]
-/// folds it into one of these; [`Other`] covers anything unrecognized.
-///
-/// [`classify`]: Phase::classify
-/// [`Other`]: Phase::Other
-#[derive(Clone, Copy)]
-enum Phase {
-    Handshake,
-    Authentication,
-    ListRefs,
-    Negotiate,
-    ReceivingPack,
-    Other,
-}
-
-impl Phase {
-    /// Classify a gix phase name (case-insensitive, tolerant of the dynamic
-    /// `"… (round N)"` suffixes) into a fixed [`Phase`].
-    fn classify(name: &str) -> Self {
-        let lower = name.to_ascii_lowercase();
-        if lower.starts_with("handshake") {
-            Self::Handshake
-        } else if lower == "authentication" {
-            Self::Authentication
-        } else if lower == "list refs" {
-            Self::ListRefs
-        } else if lower.starts_with("negotiate") {
-            Self::Negotiate
-        } else if lower == "receiving pack" {
-            Self::ReceivingPack
-        } else {
-            Self::Other
-        }
-    }
-}
-
-/// Open a tracing span for one root fetch/clone phase. The slice label comes
-/// from the [`Phase`] (span names must be `'static` literals, so they live in
-/// the match arms); the exact gix string is preserved in the `phase` field.
-/// The returned span is held — not entered — by the root [`GixProgress`] and
-/// dropped on the next transition; the OTEL bridge records its open→close, so
-/// its lifetime marks the phase's duration as a child of the enclosing
-/// `#[instrument]` fetch/clone span.
-fn open_phase_span(name: &str) -> tracing::Span {
-    use tracing::debug_span;
-    macro_rules! phase {
-        ($label:literal) => {
-            debug_span!(target: "gix_progress", $label, phase = %name)
-        };
-    }
-    match Phase::classify(name) {
-        Phase::Handshake => phase!("handshake"),
-        Phase::Authentication => phase!("authentication"),
-        Phase::ListRefs => phase!("list refs"),
-        Phase::Negotiate => phase!("negotiate"),
-        Phase::ReceivingPack => phase!("receiving pack"),
-        Phase::Other => phase!("phase"),
-    }
 }
 
 /// Build the summary text for a phase name, appending the hint (dimmed) when
@@ -422,13 +319,6 @@ impl GixProgressTrait for GixProgress {
         // *transitions* are interesting — those become DEBUG.
         if name != self.own_name {
             tracing::debug!(target: "gix_progress", old = %self.own_name, new = %name, "set_name");
-            // A root phase transition: end the span for the phase we're
-            // leaving and start one for the phase we're entering, so the
-            // trace shows a timed sub-span per phase rather than one long
-            // fetch span dotted with instant events. Children stay event-only.
-            if self.is_root {
-                self.swap_phase(&name);
-            }
         }
         self.set_summary(summary_with_hint(&name));
         self.own_name.clone_from(&name);
@@ -476,137 +366,10 @@ impl NestedProgress for GixProgress {
             own_unit_is_bytes: false,
             own_max: None,
             leaf: Mutex::new(None),
-            is_root: false,
-            phase_span: Mutex::new(None),
         }
     }
 
     fn add_child_with_id(&mut self, name: impl Into<String>, _id: Id) -> Self::SubProgress {
         self.add_child(name)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*; // also re-exports the `gix::Progress` alias, for `set_name`
-    use crate::logging::chrome::ChromeExporter;
-    use opentelemetry::trace::TracerProvider as _;
-    use opentelemetry_sdk::trace::SdkTracerProvider;
-    use serde_json::Value;
-    use std::fs::File;
-    use std::io::Read;
-    use tempfile::tempdir;
-    use tracing::subscriber::with_default;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::{EnvFilter, Layer};
-
-    /// Drive the root [`GixProgress`] through the `set_name` sequence a real
-    /// fetch produces and assert the chrome trace gains one nested phase span
-    /// per transition. This pins *our* span wiring (`swap_phase`,
-    /// `open_phase_span`, the [`Phase`] mapping) end-to-end through the same
-    /// OTEL bridge + [`ChromeExporter`] `logging::init` uses — the phase *names*
-    /// come from gix and aren't asserted against a live fetch (a tiny test repo
-    /// wouldn't reproduce e.g. "negotiate (round 5)").
-    #[test]
-    fn root_set_name_transitions_become_nested_phase_spans() {
-        let tmp = tempdir().unwrap();
-        let path = tmp.path().join("trace.json");
-
-        // Same wiring as `logging::init`: OTEL bridge → our Chrome exporter.
-        let provider = SdkTracerProvider::builder()
-            .with_simple_exporter(ChromeExporter::new(File::create(&path).unwrap()))
-            .build();
-        let layer = tracing_opentelemetry::layer()
-            .with_tracer(provider.tracer("test"))
-            .with_threads(true)
-            .with_filter(EnvFilter::new("debug"));
-        let subscriber = tracing_subscriber::registry().with(layer);
-
-        with_default(subscriber, || {
-            // Stand in for the `#[instrument]` fetch span so the phase spans
-            // nest under it (contextual parent = the entered span).
-            let fetch = tracing::debug_span!("incremental_fetch");
-            let _entered = fetch.enter();
-
-            let mut p = GixProgress::new("fetch");
-            for name in [
-                "handshake",
-                "list refs",
-                "negotiate (round 1)",
-                "negotiate (round 2)",
-                "receiving pack",
-            ] {
-                p.set_name(name.to_owned());
-            }
-            p.finish(); // closes the final ("receiving pack") phase span
-        });
-
-        // Flush buffered spans to the file (exporter writes on shutdown).
-        provider.shutdown().unwrap();
-
-        let mut json = String::new();
-        File::open(&path)
-            .unwrap()
-            .read_to_string(&mut json)
-            .unwrap();
-        let doc: Value = serde_json::from_str(&json).unwrap();
-        // Each span is one `X` (complete) event; skip the `M` track-label events.
-        let spans: Vec<&Value> = doc["traceEvents"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|e| e["ph"] == "X")
-            .collect();
-        let names: Vec<&str> = spans.iter().filter_map(|e| e["name"].as_str()).collect();
-
-        for expected in [
-            "incremental_fetch",
-            "handshake",
-            "list refs",
-            "negotiate",
-            "receiving pack",
-        ] {
-            assert!(
-                names.contains(&expected),
-                "missing span {expected:?}; got {names:?}",
-            );
-        }
-
-        // The two negotiate rounds collapse to the "negotiate" label but stay
-        // distinct spans, each keeping gix's exact string in the `phase` arg.
-        // Order by start time so the assertion doesn't ride on export order.
-        let mut neg: Vec<(u64, &str)> = spans
-            .iter()
-            .filter(|e| e["name"] == "negotiate")
-            .map(|e| {
-                (
-                    e["ts"].as_u64().unwrap(),
-                    e["args"]["phase"].as_str().unwrap(),
-                )
-            })
-            .collect();
-        neg.sort_by_key(|&(ts, _)| ts);
-        let neg_rounds: Vec<&str> = neg.into_iter().map(|(_, phase)| phase).collect();
-        assert_eq!(neg_rounds, ["negotiate (round 1)", "negotiate (round 2)"]);
-
-        // Phase spans nest inside the enclosing fetch span's time window —
-        // chrome://tracing / Perfetto build the tree from `X` containment.
-        let window = |name: &str| -> (u64, u64) {
-            let e = spans
-                .iter()
-                .find(|e| e["name"] == name)
-                .unwrap_or_else(|| panic!("no span for {name:?}"));
-            let ts = e["ts"].as_u64().unwrap();
-            (ts, ts + e["dur"].as_u64().unwrap())
-        };
-        let (fetch_start, fetch_end) = window("incremental_fetch");
-        for phase in ["handshake", "receiving pack"] {
-            let (start, end) = window(phase);
-            assert!(
-                fetch_start <= start && end <= fetch_end,
-                "{phase:?} span [{start}, {end}] not nested within incremental_fetch \
-                 [{fetch_start}, {fetch_end}]",
-            );
-        }
     }
 }
