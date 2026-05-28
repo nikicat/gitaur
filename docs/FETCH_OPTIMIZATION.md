@@ -192,6 +192,22 @@ The pack itself rewrites all of `packed-refs` (~1 s), so the threshold amortizes
 it across hundreds of fetches. A binary/indexed ref backend (git's `reftable`)
 would moot this entirely, but gix only implements the files backend.
 
+### 13. Packed-only ref resolution in the `apply` transaction
+`gix-ref` · `2d63be6b0`
+
+The post-pack ref update (`apply`) re-resolves every mapping's current value a
+third time — to verify each edit's `MustExistAndMatch` precondition — inside the
+`gix-ref` transaction. Instrumenting the loop showed **~96% of `apply` was that
+resolution**, not the verify: `lock_ref_and_apply_change` resolved loose-first
+(`ref_contents()` → an `open()`) then fell back to packed, so each of ~155k
+edits paid a futile loose `open()` on a packed mirror. Applied the same fast
+path as #4/#7: snapshot packed-refs + the loose-ref names once, resolve
+packed-only names straight from packed-refs. `apply` ~770 ms → ~400 ms
+(resolution ~640 ms → ~240 ms). The remaining ~240 ms is the packed `try_find`
++ the owned-`Reference` allocation (the #8 borrow trick, not yet applied here).
+A `ref tx resolve` `detail!` span now reports this `find_ms`, completing the
+"same refs, three passes" picture alongside `mark mappings` and `update_refs()`.
+
 ### Tooling (not perf, but part of the arc)
 - `gix-transport` http spans with curl CURLINFO timing (`90a0a85d3`),
   the `mark mappings` split-phase span (`d5b3ee00e`), and a `gix-ref`
@@ -220,12 +236,13 @@ Don't pursue without a real semantics discussion / upstreaming.
 
 Ordered roughly by expected payoff. None attempted yet.
 
-- **`apply` (~800 ms) — batch/packed-aware verification.** The per-edit
-  `MustExistAndMatch` verification re-resolves each ref a third time inside
-  the `gix-ref` transaction layer. Rather than skipping the edits (the dead
-  end above), make the transaction verify a large batch of no-op edits
-  against the packed-refs snapshot in one pass. This is a deeper `gix-ref`
-  change but keeps semantics intact.
+- **`apply` resolution residual (~240 ms).** #13 removed the futile loose
+  `open()`; what's left is the packed `try_find` (HashMap probe + decode) plus
+  an owned-`Reference` allocation per edit. The borrow trick from #8
+  (`packed::Buffer::try_find` → read the target directly, hold `Option<Target>`)
+  applies here too and would drop the ~155k allocations — a small follow-up.
+  Note the *verify* itself measured only ~25 ms, so batching it (the original
+  idea here) was the wrong target; the cost was always the resolution.
 
 - **`receive` side.** `write_to_directory` (pack index, ~1.3 s) is now a
   meaningful share of the total — the commit-graph write (#10) and the index

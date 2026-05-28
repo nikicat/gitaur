@@ -56,8 +56,13 @@ path = "src/bin/trace.rs"
 #  - an `update_refs` fast path that emits the no-op edit for an unchanged direct
 #    packed ref without the per-ref `objects.exists()` probe / peel — together
 #    these cut `update_refs` self time from ~1.2s to ~0.6s and `mark mappings`
-#    `find_ms` by ~120ms on the AUR mirror.
-gix = { git = "https://github.com/nikicat/gitoxide", rev = "3a62d800c", features = [
+#    `find_ms` by ~120ms on the AUR mirror;
+#  - a `gix-ref` transaction fast path that resolves packed-only refs straight
+#    from packed-refs when verifying each edit's precondition, skipping the
+#    per-ref loose `open()` — the dominant cost of applying the ref transaction
+#    (the `apply` span). Cuts that resolution on the AUR mirror from ~640ms to
+#    ~240ms (`apply` ~770ms to ~400ms); adds a `ref tx resolve` detail span.
+gix = { git = "https://github.com/nikicat/gitoxide", rev = "2d63be6b0", features = [
   # curl-rustls (over reqwest-rust-tls) so gix's low_speed_* / lowSpeedLimit
   # config actually fires — only the curl transport implements it, the
   # reqwest blocking transport silently ignores those fields. Adds libcurl
