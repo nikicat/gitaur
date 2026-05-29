@@ -19,11 +19,16 @@
 use crate::config::Config;
 use crate::error::{Error, Result};
 use console::Term;
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use nix::sys::signal::{Signal, killpg};
+use nix::unistd::Pid;
+use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
+use signal_hook::consts::SIGINT;
+use signal_hook::iterator::Signals;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use tracing::{debug, info, instrument, warn};
 
@@ -63,20 +68,49 @@ pub fn run(cfg: &Config, worktree: &Path) -> Result<PathBuf> {
     // Drop our slave handle so master reads see EOF the instant the child
     // (the only other holder of the slave fds) exits.
     drop(pty.slave);
+    let pid = child.process_id();
 
     let reader = pty
         .master
         .try_clone_reader()
         .map_err(|e| Error::Build(format!("pty reader: {e}")))?;
 
-    let log = Mutex::new(log_file);
-    thread::scope(|s| {
-        s.spawn(|| tee(reader, std::io::stdout(), &log));
-    });
+    // Catch SIGINT for the duration of this build. `Signals` installs an
+    // async-signal-safe handler that suppresses the default action (which would
+    // kill gitaur) and feeds a blocking iterator instead — so a Ctrl+C mid-build
+    // unwinds as `Error::Interrupted` and the no-arg loop bails back to the
+    // table rather than the whole program dying. Dropping `Signals` at the end
+    // of the function restores the previous disposition (RAII), so Ctrl+C on the
+    // picker/table still exits.
+    let mut signals = Signals::new([SIGINT])?;
+    let handle = signals.handle();
+    let interrupted = AtomicBool::new(false);
 
-    let status = child
-        .wait()
-        .map_err(|e| Error::Build(format!("wait makepkg: {e}")))?;
+    let log = Mutex::new(log_file);
+    let status = thread::scope(|s| -> Result<ExitStatus> {
+        s.spawn(|| tee(reader, std::io::stdout(), &log));
+        // Watcher: blocks on the signal pipe (no polling). On Ctrl+C it notes
+        // the interrupt and forwards SIGINT to makepkg's process group, then
+        // loops back to block again; `handle.close()` below ends it once
+        // makepkg has exited.
+        s.spawn(|| {
+            for _ in &mut signals {
+                interrupted.store(true, Ordering::SeqCst);
+                forward_sigint(pid);
+            }
+        });
+        let status = child
+            .wait()
+            .map_err(|e| Error::Build(format!("wait makepkg: {e}")))?;
+        handle.close();
+        Ok(status)
+    });
+    let status = status?;
+
+    if interrupted.load(Ordering::SeqCst) {
+        warn!(log = %log_path.display(), "makepkg interrupted by SIGINT");
+        return Err(Error::Interrupted);
+    }
     if !status.success() {
         let code = status.exit_code();
         return Err(Error::Build(format!(
@@ -86,6 +120,19 @@ pub fn run(cfg: &Config, worktree: &Path) -> Result<PathBuf> {
     }
     info!(log = %log_path.display(), "makepkg succeeded");
     Ok(log_path)
+}
+
+/// Forward SIGINT to makepkg's whole process group so its build children
+/// (make, cc, …) stop too, not just makepkg itself. makepkg runs under the pty
+/// in its own session (`setsid`), so its pgid equals its pid.
+fn forward_sigint(pid: Option<u32>) {
+    let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) else {
+        warn!("no makepkg pid to forward SIGINT to");
+        return;
+    };
+    if let Err(e) = killpg(Pid::from_raw(pid), Signal::SIGINT) {
+        warn!(error = %e, "failed to forward SIGINT to makepkg process group");
+    }
 }
 
 /// Pump bytes from the pty master to the user's terminal and the build log.

@@ -1,12 +1,12 @@
 # Update loop, change-set preview & build-cost estimates (design)
 
-Status: **phase 1 largely implemented; SIGINT tail + phases 2–4 pending.** The
-no-arg `gaur` loop, session state, reviewed-set gating, picker badges, and the
-change-set preview now live in `src/cli/upgrade_loop.rs` (backed by
-`build::UpgradeSession` and the `build::resolve_targets` / `build::apply_plan`
-split). Still TODO in phase 1: SIGINT-during-build → bail-to-table. Phases 2–4
-(size column, build-time metric, custom picker) are not started. The
-single-shot `-Syu` flow remains `dispatch::handle_s` in `src/cli/dispatch.rs`.
+Status: **phase 1 implemented; phases 2–4 pending.** The no-arg `gaur` loop,
+session state, reviewed-set gating, picker badges, change-set preview, and
+SIGINT-during-build → bail-to-table now live in `src/cli/upgrade_loop.rs` +
+`src/build/makepkg.rs` (backed by `build::UpgradeSession` and the
+`build::resolve_targets` / `build::apply_plan` split). Phases 2–4 (size column,
+build-time metric, custom picker) are not started. The single-shot `-Syu` flow
+remains `dispatch::handle_s` in `src/cli/dispatch.rs`.
 
 ## Problem
 

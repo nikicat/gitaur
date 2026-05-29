@@ -50,6 +50,7 @@ impl SessionState {
         }
         self.failed
             .extend(report.failed.iter().map(|(pb, f)| (pb.clone(), f.clone())));
+        self.interrupted.extend(report.interrupted.iter().cloned());
         self.skipped.extend(report.skipped_user.iter().cloned());
         // A dep-blocked pkgbase didn't build; treat it like a skip so it shows
         // dim and unchecked but stays available for a retry once its blocker is
@@ -256,6 +257,7 @@ mod tests {
             .insert(pb("a"), BuildFailure::Build("boom".into()));
         report.skipped_user.push(pb("b"));
         report.skipped_dep.insert(pb("c"), pb("a"));
+        report.interrupted.push(pb("d"));
 
         let mut state = SessionState::default();
         state.fold(&report);
@@ -266,6 +268,7 @@ mod tests {
             state.skipped.contains(&pb("c")),
             "dep-blocked pkgbase should fold into skipped"
         );
+        assert!(state.interrupted.contains(&pb("d")));
     }
 
     /// A pkgbase that succeeds this batch sheds any badge it carried from an

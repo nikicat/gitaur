@@ -169,7 +169,11 @@ pub fn cmd_install(
         },
     };
     let report = install_with_index(cfg, idx, by, &pac, targets, opts, &mut reviewed)?;
-    Ok(u8::from(report.had_failures()))
+    // A Ctrl+C'd build exits non-zero too: the user aborted, so `||` chains and
+    // scripts should see the run didn't complete.
+    Ok(u8::from(
+        report.had_failures() || !report.interrupted.is_empty(),
+    ))
 }
 
 /// Resolve `targets` against a caller-supplied index + pacman snapshot, then
@@ -383,6 +387,13 @@ fn run_aur_pipeline(
             &mut transitive_marks,
             &mut report,
         );
+        // A Ctrl+C'd build stops the whole batch here — anything already
+        // built+installed above stays; the rest stays outstanding for the next
+        // table pass (or a `-S` retry).
+        if !report.interrupted.is_empty() {
+            ui::warn("build interrupted — stopping this batch");
+            break;
+        }
     }
 
     if !opts.asdeps && !transitive_marks.is_empty() {
@@ -441,6 +452,15 @@ fn build_stratum(
                     pkgbase: prep.pkgbase.to_owned(),
                     files,
                 }),
+                // Ctrl+C during this build: mark it interrupted and stop the
+                // rest of the stratum. The caller installs what built so far,
+                // then bails the whole run (the no-arg loop re-enters the
+                // table; `-S` exits non-zero).
+                Err(Error::Interrupted) => {
+                    ui::warn(&format!("{}: build interrupted", prep.pkgbase));
+                    report.interrupted.push(prep.pkgbase.to_owned());
+                    break;
+                }
                 Err(e) => {
                     let msg = e.to_string();
                     ui::error(&format!("{}: build failed: {msg}", prep.pkgbase));
@@ -542,6 +562,10 @@ pub(super) struct RunReport {
     /// Value is the immediate blocker — usually enough to debug since the
     /// blocker itself shows up in `failed`.
     pub(super) skipped_dep: HashMap<PkgBase, PkgBase>,
+    /// Ctrl+C'd mid-build. Distinct from `failed`: nothing went wrong with the
+    /// package, the user just bailed — the no-arg loop badges it separately and
+    /// keeps it available for a clean retry.
+    pub(super) interrupted: Vec<PkgBase>,
 }
 
 impl RunReport {

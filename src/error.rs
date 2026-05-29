@@ -61,6 +61,12 @@ pub enum Error {
     #[error("user aborted")]
     UserAbort,
 
+    /// A makepkg build was interrupted by SIGINT (Ctrl+C). Caught by the build
+    /// pipeline and turned into a per-pkgbase "interrupted" outcome rather than
+    /// aborting the whole run — the no-arg loop bails back to the table.
+    #[error("interrupted")]
+    Interrupted,
+
     /// One or more user-supplied targets were not found.
     #[error("unknown target(s): {0}")]
     UnknownTargets(String),

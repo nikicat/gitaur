@@ -97,7 +97,8 @@ pub(super) fn final_summary(report: &RunReport) {
     let total = report.installed.len()
         + report.failed.len()
         + report.skipped_user.len()
-        + report.skipped_dep.len();
+        + report.skipped_dep.len()
+        + report.interrupted.len();
     if total < 2 {
         return;
     }
@@ -113,6 +114,9 @@ pub(super) fn final_summary(report: &RunReport) {
     }
     for pb in &report.skipped_user {
         ui::note(&format!("skipped {pb} (user)"));
+    }
+    for pb in &report.interrupted {
+        ui::warn(&format!("interrupted {pb}"));
     }
     let dep_sorted: BTreeMap<&PkgBase, &PkgBase> = report.skipped_dep.iter().collect();
     for (pb, blocker) in dep_sorted {
