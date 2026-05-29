@@ -2,8 +2,8 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::index::IndexFile;
 use crate::index::secondary::{self, Secondary};
+use crate::index::{IndexEntry, IndexFile};
 use crate::names::{PkgBase, PkgName, PkgTarget};
 use crate::pacman::alpm_db::PacmanIndex;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -119,6 +119,28 @@ pub struct PkgbasePlan<'a> {
     pub hint: Option<&'a PkgName>,
 }
 
+/// How a target entered the resolver's work queue: named by the user
+/// (`Direct`) or pulled in as another package's dependency (`Dep`). Drives
+/// the explicit-vs-`--asdeps` split (`direct_repo`/`transitive_repo`,
+/// `direct_aur`) and gates the direct-target rebuild override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Direct,
+    Dep,
+}
+
+impl Origin {
+    /// Whether `target` should count as user-requested. True when it was
+    /// queued `Direct`, or when its bare name is in `direct_set` — the user
+    /// typed it explicitly even though the LIFO queue happened to pop it as a
+    /// dependency first (`gaur -S cargo` where `cargo` is also an AUR pkg's
+    /// makedep). The `direct_set` backstop is only relevant to the bucketing
+    /// split, not the rebuild override (see [`resolve_target_source`]).
+    fn is_direct(self, target: &PkgTarget, direct_set: &HashSet<PkgTarget>) -> bool {
+        self == Self::Direct || direct_set.contains(target.bare())
+    }
+}
+
 /// Resolve `targets` against the index + pacman DBs into a [`Plan`].
 ///
 /// `by` is `None` when no AUR index is loaded (typical fresh installs where
@@ -134,6 +156,10 @@ pub fn resolve(
 ) -> Result<Plan> {
     let mut plan = Plan::default();
     let mut visited_aur: BTreeSet<PkgBase> = BTreeSet::new();
+    // Concrete repo pkgnames whose `depends` we've already expanded. Repo
+    // deps can't cycle, but a package reached via several aliases (or as both
+    // a direct target and a dep) must only be walked once.
+    let mut visited_repo: HashSet<PkgName> = HashSet::new();
     let mut missing: Vec<String> = Vec::new();
     // Separate graphs:
     //   * `all_edges` covers runtime + build-time deps; used for cycle
@@ -142,17 +168,17 @@ pub fn resolve(
     //     checkdepends) that resolve to AUR pkgbases; drives strata so
     //     each pkg's build-time AUR deps are installed before it runs.
     //
-    // Keys are typed `PkgBase` (the graph node identity); values stay
-    // `Vec<String>` because they're raw dep expressions before pkgname →
-    // pkgbase resolution. Post-resolution `make_edges_resolved` has
-    // `Vec<PkgBase>` on both sides.
-    let mut all_edges: HashMap<PkgBase, Vec<String>> = HashMap::new();
-    let mut make_edges: HashMap<PkgBase, Vec<String>> = HashMap::new();
+    // Keys are typed `PkgBase` (the graph node identity); values are
+    // `PkgTarget` — unclassified dep expressions before pkgname → pkgbase
+    // resolution. Post-resolution `make_edges_resolved` has `Vec<PkgBase>`
+    // on both sides.
+    let mut all_edges: HashMap<PkgBase, Vec<PkgTarget>> = HashMap::new();
+    let mut make_edges: HashMap<PkgBase, Vec<PkgTarget>> = HashMap::new();
     let mut pkgname_to_pkgbase: HashMap<PkgName, PkgBase> = HashMap::new();
 
-    let direct_set: HashSet<String> = targets
+    let direct_set: HashSet<PkgTarget> = targets
         .iter()
-        .map(|t| secondary::strip_version_constraint(t).to_owned())
+        .map(|t| PkgTarget::from(secondary::strip_version_constraint(t)))
         .collect();
     for t in targets {
         // Widen the raw CLI/picker string into a typed `PkgTarget` — the
@@ -160,26 +186,35 @@ pub fn resolve(
         plan.direct_targets.insert(PkgTarget::from(t.as_str()));
     }
 
-    let mut queue: Vec<(String, bool)> = targets.iter().map(|t| (t.clone(), true)).collect();
-    while let Some((target, is_direct)) = queue.pop() {
-        let bare = secondary::strip_version_constraint(&target).to_owned();
-        let source = resolve_target_source(by, pac, &bare, is_direct);
+    let mut queue: Vec<(PkgTarget, Origin)> = targets
+        .iter()
+        .map(|t| (PkgTarget::from(t.as_str()), Origin::Direct))
+        .collect();
+    while let Some((target, origin)) = queue.pop() {
+        let bare = target.bare();
+        let source = resolve_target_source(by, pac, bare, origin);
         match source {
             Source::Installed(concrete) => {
                 debug!(target = %bare, %concrete, "already satisfied (installed)");
             }
             Source::Repo(concrete) => {
+                // Expand this repo package's deps into the BFS so any not-yet-
+                // installed repo dependency surfaces in the plan instead of
+                // being pulled in silently by the final `pacman -S`. Walk once
+                // per concrete pkg (repo deps can't cycle, but aliases repeat).
+                if visited_repo.insert(concrete.clone()) {
+                    enqueue_repo_deps(pac, &concrete, &mut queue);
+                }
                 // direct_set is keyed on the **user-typed** name so explicit
                 // `gaur -S cargo` flips the resolved provider (`rust`) into
                 // direct_repo even when it also appears as another pkg's dep.
-                let direct = is_direct || direct_set.contains(&bare);
-                let bucket = if direct {
+                let bucket = if origin.is_direct(&target, &direct_set) {
                     &mut plan.direct_repo
                 } else {
                     &mut plan.transitive_repo
                 };
-                if !bucket.iter().any(|s| s == &concrete) {
-                    bucket.push(concrete);
+                if !bucket.iter().any(|s| concrete == *s) {
+                    bucket.push(concrete.into_inner());
                 }
             }
             Source::Aur(entry_idx) => {
@@ -188,9 +223,9 @@ pub fn resolve(
                 // Record direct-ness before the visited-dedup `continue`: the
                 // queue is LIFO, so a pkgbase can be popped as a dep before
                 // the direct target that also names it. `direct_set` (keyed on
-                // the user-typed string) backstops the `is_direct` flag for
-                // that ordering, mirroring the repo branch above.
-                if is_direct || direct_set.contains(&bare) {
+                // the user-typed string) backstops the queue `Origin` for that
+                // ordering, mirroring the repo branch above.
+                if origin.is_direct(&target, &direct_set) {
                     plan.direct_aur.insert(pkgbase.clone());
                 }
                 for pkg in &entry.pkgnames {
@@ -199,28 +234,15 @@ pub fn resolve(
                 if !visited_aur.insert(pkgbase.clone()) {
                     continue;
                 }
-                let runtime: Vec<String> = entry
-                    .depends
-                    .iter()
-                    .map(|d| secondary::strip_version_constraint(d).to_owned())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                let build_time: Vec<String> = entry
-                    .makedepends
-                    .iter()
-                    .chain(entry.checkdepends.iter())
-                    .map(|d| secondary::strip_version_constraint(d).to_owned())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                let all: Vec<String> = runtime.iter().chain(build_time.iter()).cloned().collect();
+                // `all` (runtime + build-time) feeds the cycle graph and the
+                // BFS; `build_time` alone is staged for strata and rewritten
+                // pkgname → pkgbase after the BFS (needs the full name map).
+                let (all, build_time) = entry_dep_exprs(entry);
                 all_edges.insert(pkgbase.clone(), all.clone());
-                // make_edges entry is finalised once we know which deps
-                // resolved to AUR pkgbases (need pkgname → pkgbase map).
-                // Stage build-time dep pkgnames; rewrite after the BFS.
                 make_edges.insert(pkgbase.clone(), build_time);
-                queue.extend(all.into_iter().map(|d| (d, false)));
+                queue.extend(all.into_iter().map(|d| (d, Origin::Dep)));
             }
-            Source::Missing => missing.push(bare),
+            Source::Missing => missing.push(bare.to_owned()),
         }
     }
 
@@ -234,22 +256,7 @@ pub fn resolve(
     // cycle even when makedepends alone would be acyclic.
     topo::sort(&all_edges, &visited_aur)?;
 
-    // Rewrite make_edges entries from pkgnames → AUR pkgbases. Drop entries
-    // pointing at repo/installed targets (irrelevant for build ordering).
-    // `HashMap<PkgName, PkgBase>::get(&str)` via `Borrow<str>` saves us
-    // a PkgName allocation per dep lookup.
-    let make_edges_resolved: HashMap<PkgBase, Vec<PkgBase>> = make_edges
-        .into_iter()
-        .map(|(pkgbase, deps)| {
-            let resolved: Vec<PkgBase> = deps
-                .into_iter()
-                .filter_map(|d| pkgname_to_pkgbase.get(d.as_str()).cloned())
-                .filter(|pb| pb != &pkgbase) // self-edges from split pkgs
-                .collect();
-            (pkgbase, resolved)
-        })
-        .collect();
-
+    let make_edges_resolved = resolve_make_edges(make_edges, &pkgname_to_pkgbase);
     plan.aur_strata = topo::strata(&make_edges_resolved, &visited_aur)?;
     plan.aur_make_edges = make_edges_resolved;
 
@@ -272,6 +279,70 @@ pub fn resolve(
     Ok(plan)
 }
 
+/// Expand a repo package's `depends` into the BFS `queue` as `Origin::Dep`
+/// targets. Each is classified on its next pop: already-installed deps drop
+/// out as `Installed`, sync deps land in `transitive_repo`, virtuals resolve
+/// to their provider. Surfacing them here is what lets the plan show — and
+/// [`Plan::only_requested`] gate on — deps the final `pacman -S` would
+/// otherwise pull in silently.
+fn enqueue_repo_deps(pac: &PacmanIndex, concrete: &PkgName, queue: &mut Vec<(PkgTarget, Origin)>) {
+    for dep in pac.sync_depends(concrete) {
+        if !dep.bare().is_empty() {
+            queue.push((dep.clone(), Origin::Dep));
+        }
+    }
+}
+
+/// Split an AUR entry's dependency arrays into the two dep-reference lists
+/// the BFS needs: `(all, build_time)`. `all` = runtime `depends` + build-time
+/// (`makedepends` + `checkdepends`); `build_time` is that build-time subset
+/// alone. The raw `.SRCINFO` strings widen into [`PkgTarget`] with version
+/// constraints stripped (so the bare name indexes the graph directly), and
+/// empties are dropped.
+fn entry_dep_exprs(entry: &IndexEntry) -> (Vec<PkgTarget>, Vec<PkgTarget>) {
+    let widen = |d: &String| {
+        let bare = secondary::strip_version_constraint(d);
+        (!bare.is_empty()).then(|| PkgTarget::from(bare))
+    };
+    let build_time: Vec<PkgTarget> = entry
+        .makedepends
+        .iter()
+        .chain(entry.checkdepends.iter())
+        .filter_map(widen)
+        .collect();
+    // `all` prepends runtime `depends` to the build-time set; the latter is
+    // already materialised, so chain its clones rather than collecting twice.
+    let all = entry
+        .depends
+        .iter()
+        .filter_map(widen)
+        .chain(build_time.iter().cloned())
+        .collect();
+    (all, build_time)
+}
+
+/// Rewrite staged build-time deps from pkgnames into AUR pkgbase edges:
+/// resolve each dep to its owning pkgbase, dropping deps that point at
+/// repo/installed targets (irrelevant to build order) and self-edges from
+/// split pkgs. The `HashMap<PkgName, PkgBase>::get(&str)` lookup rides
+/// `Borrow<str>` to skip a `PkgName` allocation per dep.
+fn resolve_make_edges(
+    make_edges: HashMap<PkgBase, Vec<PkgTarget>>,
+    pkgname_to_pkgbase: &HashMap<PkgName, PkgBase>,
+) -> HashMap<PkgBase, Vec<PkgBase>> {
+    make_edges
+        .into_iter()
+        .map(|(pkgbase, deps)| {
+            let resolved: Vec<PkgBase> = deps
+                .into_iter()
+                .filter_map(|d| pkgname_to_pkgbase.get(d.bare()).cloned())
+                .filter(|pb| pb != &pkgbase)
+                .collect();
+            (pkgbase, resolved)
+        })
+        .collect()
+}
+
 /// Wrap [`classify`] with a rebuild override for direct targets: when the
 /// user explicitly named a pkg that classifies as `Installed` and that name
 /// also exists in the AUR index, return `Source::Aur` so the build path
@@ -279,15 +350,16 @@ pub fn resolve(
 /// version, so an outdated installed AUR pkg would otherwise be silently
 /// dropped — breaking `-Syu`'s AUR half and `-S name` on an already-
 /// installed AUR pkg. Transitive deps keep the default behavior; a satisfied
-/// dep is not a rebuild trigger.
+/// dep is not a rebuild trigger — so only `Origin::Direct` (the raw queue
+/// flag, not the `direct_set` backstop) arms the override.
 fn resolve_target_source(
     by: Option<&Secondary>,
     pac: &PacmanIndex,
     bare: &str,
-    is_direct: bool,
+    origin: Origin,
 ) -> Source {
     let source = classify(by, pac, bare);
-    if !is_direct {
+    if origin != Origin::Direct {
         return source;
     }
     let (Source::Installed(_), Some(by)) = (&source, by) else {
@@ -355,6 +427,112 @@ mod tests {
         let cfg = default_config();
         let targets: Vec<String> = targets.iter().map(|s| (*s).to_owned()).collect();
         resolve(&cfg, &idx, Some(&by), &pac, &targets)
+    }
+
+    /// Resolve `targets` against a caller-built [`PacmanIndex`] and no AUR
+    /// index — the seam for repo→repo dependency-walk tests, which set up
+    /// `sync_versions` / `sync_depends` / `installed` with typed values.
+    fn resolve_repo(pac: &PacmanIndex, targets: &[&str]) -> Plan {
+        let idx = IndexFile::empty();
+        let by = Secondary::build(&idx);
+        let cfg = default_config();
+        let targets: Vec<String> = targets.iter().map(|s| (*s).to_owned()).collect();
+        resolve(&cfg, &idx, Some(&by), pac, &targets).unwrap()
+    }
+
+    /// Register a sync package with its dependency list, typed at the seam:
+    /// `PkgName` key, `PkgTarget` deps. Keeps the per-test setup declarative.
+    fn sync_pkg(pac: &mut PacmanIndex, name: &str, deps: &[&str]) {
+        pac.sync_versions.insert(name.into(), "1.0-1".into());
+        pac.sync_depends.insert(
+            name.into(),
+            deps.iter().map(|d| PkgTarget::from(*d)).collect(),
+        );
+    }
+
+    /// Sorted clone of `transitive_repo` — the BFS pushes in pop order, so
+    /// tests assert membership, not the incidental ordering.
+    fn sorted_transitive(plan: &Plan) -> Vec<String> {
+        let mut t = plan.transitive_repo.clone();
+        t.sort();
+        t
+    }
+
+    // ---- repo dependency tree --------------------------------------------
+
+    #[test]
+    fn repo_target_pulls_uninstalled_repo_dep() {
+        // `foo` depends on repo `bar`; nothing installed. `bar` is an
+        // unrequested repo dep → transitive_repo, and the prompt must fire.
+        let mut pac = PacmanIndex::default();
+        sync_pkg(&mut pac, "foo", &["bar"]);
+        sync_pkg(&mut pac, "bar", &[]);
+        let plan = resolve_repo(&pac, &["foo"]);
+        assert_eq!(plan.direct_repo, vec!["foo".to_owned()]);
+        assert_eq!(plan.transitive_repo, vec!["bar".to_owned()]);
+        assert!(!plan.only_requested());
+    }
+
+    #[test]
+    fn repo_dep_already_installed_is_dropped() {
+        // Same graph, but `bar` is already installed → satisfied, dropped from
+        // the plan. Nothing unrequested remains, so the prompt is skipped.
+        let mut pac = PacmanIndex::default();
+        sync_pkg(&mut pac, "foo", &["bar"]);
+        sync_pkg(&mut pac, "bar", &[]);
+        pac.installed.insert("bar".into(), "1.0-1".into());
+        let plan = resolve_repo(&pac, &["foo"]);
+        assert_eq!(plan.direct_repo, vec!["foo".to_owned()]);
+        assert!(plan.transitive_repo.is_empty());
+        assert!(plan.only_requested());
+    }
+
+    #[test]
+    fn repo_deps_walk_transitively() {
+        // foo → bar → baz, all repo, none installed. The walk must reach the
+        // whole closure, not just the direct dep.
+        let mut pac = PacmanIndex::default();
+        sync_pkg(&mut pac, "foo", &["bar"]);
+        sync_pkg(&mut pac, "bar", &["baz"]);
+        sync_pkg(&mut pac, "baz", &[]);
+        let plan = resolve_repo(&pac, &["foo"]);
+        assert_eq!(plan.direct_repo, vec!["foo".to_owned()]);
+        assert_eq!(
+            sorted_transitive(&plan),
+            vec!["bar".to_owned(), "baz".to_owned()]
+        );
+        assert!(!plan.only_requested());
+    }
+
+    #[test]
+    fn user_named_repo_dep_stays_direct() {
+        // User names both `foo` and its dep `bar` → both explicit, nothing
+        // unrequested, prompt skipped. `bar` is reached as a dep too, but the
+        // direct_set backstop keeps it in direct_repo, not transitive_repo.
+        let mut pac = PacmanIndex::default();
+        sync_pkg(&mut pac, "foo", &["bar"]);
+        sync_pkg(&mut pac, "bar", &[]);
+        let plan = resolve_repo(&pac, &["foo", "bar"]);
+        let mut direct = plan.direct_repo.clone();
+        direct.sort();
+        assert_eq!(direct, vec!["bar".to_owned(), "foo".to_owned()]);
+        assert!(plan.transitive_repo.is_empty());
+        assert!(plan.only_requested());
+    }
+
+    #[test]
+    fn repo_dep_via_virtual_provide_resolves_to_concrete() {
+        // `foo` depends on the virtual `libbar.so`, provided by sync pkg
+        // `barlib`. The plan must list the concrete provider, not the virtual.
+        let mut pac = PacmanIndex::default();
+        sync_pkg(&mut pac, "foo", &["libbar.so"]);
+        pac.sync_versions.insert("barlib".into(), "2.0-1".into());
+        pac.sync_providers
+            .insert("libbar.so".into(), vec!["barlib".into()]);
+        let plan = resolve_repo(&pac, &["foo"]);
+        assert_eq!(plan.direct_repo, vec!["foo".to_owned()]);
+        assert_eq!(plan.transitive_repo, vec!["barlib".to_owned()]);
+        assert!(!plan.only_requested());
     }
 
     // ---- repo-only paths -------------------------------------------------

@@ -1,0 +1,15 @@
+# "Official repo" fixture with a repo dependency. Registered into the local
+# sync DB (classifies as Source::Repo); its depends=(repo-helper-lib) lets the
+# resolver's repo→repo dependency walk be exercised end-to-end — installing
+# this pulls in repo-helper-lib, which the plan must disclose and confirm.
+pkgname=repo-with-dep
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: sync pkg that depends on repo-helper-lib'
+arch=('any')
+license=('MIT')
+depends=('repo-helper-lib')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

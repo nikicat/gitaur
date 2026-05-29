@@ -1,6 +1,7 @@
 //! Classify a single dep reference into Installed / Repo / AUR / Missing.
 
 use crate::index::secondary::Secondary;
+use crate::names::PkgName;
 use crate::pacman::alpm_db::PacmanIndex;
 
 /// Where a given dep name lives, with the **concrete** pkgname pacman would act on.
@@ -19,12 +20,12 @@ use crate::pacman::alpm_db::PacmanIndex;
 pub enum Source {
     /// Already satisfied locally; nothing to do. Carries the concrete pkgname
     /// (the resolved provider, not the original virtual) for diagnostics.
-    Installed(String),
+    Installed(PkgName),
     /// Available in a sync repo; install via pacman batch. Carries the
     /// concrete pkgname pacman will actually install — when the input was a
     /// virtual provide we substitute the provider's pkgname, which is what
     /// shows up in the plan and the eventual `pacman -S` argv.
-    Repo(String),
+    Repo(PkgName),
     /// AUR pkgbase at `idx.entries[usize]`.
     Aur(usize),
     /// Could not be resolved anywhere.
@@ -40,9 +41,9 @@ pub enum Source {
 pub fn classify(by: Option<&Secondary>, pac: &PacmanIndex, name: &str) -> Source {
     if let Some((concrete, installed)) = pac.resolve_concrete(name) {
         return if installed {
-            Source::Installed(concrete.to_string())
+            Source::Installed(concrete.clone())
         } else {
-            Source::Repo(concrete.to_string())
+            Source::Repo(concrete.clone())
         };
     }
     let Some(by) = by else {

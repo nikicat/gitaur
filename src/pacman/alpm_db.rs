@@ -9,7 +9,7 @@ use super::sync;
 use crate::error::{Error, Result};
 use crate::index::schema::IndexEntry;
 use crate::index::secondary::strip_version_constraint;
-use crate::names::PkgName;
+use crate::names::{PkgName, PkgTarget};
 use crate::version::{Ver, Version};
 use alpm::Alpm;
 use std::collections::{HashMap, HashSet};
@@ -201,6 +201,15 @@ pub struct PacmanIndex {
     /// dependency is a virtual name we pick a concrete provider so the plan
     /// shows the package pacman would actually install, with its version.
     pub sync_providers: HashMap<String, Vec<PkgName>>,
+    /// pkgname → its `depends`, recorded on the same first-DB-wins basis as
+    /// [`Self::sync_versions`] so the deps read match the package pacman
+    /// would actually install. Values are [`PkgTarget`] — a dep is an
+    /// unclassified, possibly version-suffixed reference (`glibc>=2.38`,
+    /// `libalpm.so`), exactly the shape the resolver classifies. Lets the
+    /// resolver walk repo→repo edges so a repo package's not-yet-installed
+    /// deps surface in the plan instead of being pulled in silently by the
+    /// final `pacman -S`.
+    pub sync_depends: HashMap<PkgName, Vec<PkgTarget>>,
 }
 
 impl PacmanIndex {
@@ -226,14 +235,29 @@ impl PacmanIndex {
         }
         let mut sync_versions: HashMap<PkgName, Version> = HashMap::new();
         let mut sync_providers: HashMap<String, Vec<PkgName>> = HashMap::new();
+        let mut sync_depends: HashMap<PkgName, Vec<PkgTarget>> = HashMap::new();
         for db in alpm.syncdbs() {
             for p in db.pkgs() {
                 let name = PkgName::new(p.name());
-                // `entry().or_insert` so the first DB pacman.conf lists wins,
-                // matching pacman's own repo precedence.
-                sync_versions
-                    .entry(name.clone())
-                    .or_insert_with(|| Version::from(p.version()));
+                // First DB pacman.conf lists wins, matching pacman's own repo
+                // precedence — record version + depends together on that
+                // first sighting so they describe the same package. (provides
+                // stay accumulated across DBs below; `resolve_concrete` only
+                // reads the first provider, so duplicates are harmless.)
+                if !sync_versions.contains_key(&name) {
+                    sync_versions.insert(name.clone(), Version::from(p.version()));
+                    // `Dep::name()` is the bare dependency name (alpm parses
+                    // off the version constraint); the resolver classifies on
+                    // that name, so widen it straight into an unclassified
+                    // `PkgTarget` rather than carrying the constraint.
+                    sync_depends.insert(
+                        name.clone(),
+                        p.depends()
+                            .iter()
+                            .map(|d| PkgTarget::from(d.name()))
+                            .collect(),
+                    );
+                }
                 for prov in p.provides() {
                     sync_providers
                         .entry(prov.name().to_owned())
@@ -247,6 +271,7 @@ impl PacmanIndex {
             installed_provides = installed_providers.len(),
             sync = sync_versions.len(),
             sync_provides = sync_providers.len(),
+            sync_depends = sync_depends.len(),
             "pacman index built"
         );
         Self {
@@ -254,6 +279,7 @@ impl PacmanIndex {
             installed_providers,
             sync_versions,
             sync_providers,
+            sync_depends,
         }
     }
 
@@ -282,6 +308,16 @@ impl PacmanIndex {
     /// provides hit deliberately returns `None`.
     pub fn sync_version(&self, name: &str) -> Option<&Ver> {
         self.sync_versions.get(name).map(Version::as_ver)
+    }
+
+    /// Sync-repo `depends` for the concrete pkgname `name`, or an empty slice
+    /// when `name` isn't an exact sync pkgname. Takes `&PkgName` (not `&str`
+    /// like the version lookups): a dep walk only makes sense once a name has
+    /// been resolved to a concrete provider — virtual provides carry no deps
+    /// of their own — so the type encodes that precondition. Drives the
+    /// resolver's repo→repo dependency walk.
+    pub fn sync_depends(&self, name: &PkgName) -> &[PkgTarget] {
+        self.sync_depends.get(name).map_or(&[], Vec::as_slice)
     }
 
     /// Resolve a (possibly virtual) name to the concrete pkgname pacman would
@@ -575,6 +611,21 @@ mod tests {
         // Provides-only names carry no version of their own — only the
         // providing pkgname does.
         assert_eq!(idx.sync_version("java-runtime"), None);
+    }
+
+    #[test]
+    fn sync_depends_returns_deps_or_empty() {
+        let mut idx = PacmanIndex::default();
+        idx.sync_versions.insert("firefox".into(), "110.0-1".into());
+        idx.sync_depends
+            .insert("firefox".into(), vec!["gtk3".into(), "libpulse".into()]);
+        assert_eq!(
+            idx.sync_depends(&"firefox".into()),
+            &["gtk3".into(), "libpulse".into()] as &[PkgTarget],
+        );
+        // A pkgname with no recorded deps (or an unknown one) yields an empty
+        // slice, never a panic.
+        assert!(idx.sync_depends(&"bash".into()).is_empty());
     }
 
     #[test]

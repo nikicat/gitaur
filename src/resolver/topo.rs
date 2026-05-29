@@ -3,9 +3,10 @@
 //!
 //! * [`sort`] yields a flat build order (used for cycle detection over the
 //!   full dependency graph, including runtime `depends`). Edge values are
-//!   raw dep strings — pre-resolution they're a mix of pkgnames, virtuals,
-//!   and pkgbases — so the function works in terms of `String` deps with
-//!   `K: Borrow<str>` for in-graph lookups.
+//!   unresolved dep references — pre-resolution they're a mix of pkgnames,
+//!   virtuals, and pkgbases — so the function is generic over the dep type
+//!   `D: Borrow<str>` (a `PkgTarget` in the resolver, `String` in tests) and
+//!   indexes `nodes` via `K: Borrow<str>`.
 //! * [`strata`] groups nodes into independent layers, used for scheduling
 //!   build/install rounds: every pkg in stratum N has all its edges to nodes
 //!   in strata `< N` only, so the stratum can be built in parallel and then
@@ -18,11 +19,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::hash::{BuildHasher, Hash};
 
-/// Recursive DFS helper for [`sort`]. Walks via `nodes.get(d.as_str())` so
-/// in-graph deps resolve by `Borrow<str>` to the typed key.
-fn visit<K, S>(
+/// Recursive DFS helper for [`sort`]. Walks via `nodes.get(dep_str)` so
+/// in-graph deps resolve by `Borrow<str>` to the typed key. Dep values are
+/// any `D: Borrow<str>` (raw `String`, or a typed [`crate::names::PkgTarget`]
+/// dep expression) — only their string view is needed to index `nodes`.
+fn visit<K, D, S>(
     node: &K,
-    edges: &HashMap<K, Vec<String>, S>,
+    edges: &HashMap<K, Vec<D>, S>,
     nodes: &BTreeSet<K>,
     visited: &mut HashSet<K>,
     on_stack: &mut HashSet<K>,
@@ -31,6 +34,7 @@ fn visit<K, S>(
 ) -> Result<()>
 where
     K: Eq + Hash + Ord + Clone + Borrow<str> + fmt::Display,
+    D: Borrow<str>,
     S: BuildHasher,
 {
     // Use `HashSet::contains::<K>` (turbofish) on the K-keyed methods so the
@@ -47,9 +51,9 @@ where
     }
     stack.push(node.clone());
 
-    if let Some(deps) = HashMap::<K, Vec<String>, S>::get::<K>(edges, node) {
+    if let Some(deps) = HashMap::<K, Vec<D>, S>::get::<K>(edges, node) {
         for d in deps {
-            if let Some(d_k) = nodes.get(d.as_str()) {
+            if let Some(d_k) = nodes.get(<D as Borrow<str>>::borrow(d)) {
                 let d_k = d_k.clone();
                 visit(&d_k, edges, nodes, visited, on_stack, stack, order)?;
             }
@@ -66,11 +70,13 @@ where
 /// Tarjan-style DFS yielding a build order. On cycle, returns
 /// `Err(Error::Resolve(...))` with the offending path.
 ///
-/// `K` is the node identity (e.g. `PkgBase`); edges values are raw `String`
-/// dep names, looked up against `nodes` via `K: Borrow<str>`.
-pub fn sort<K, S>(edges: &HashMap<K, Vec<String>, S>, nodes: &BTreeSet<K>) -> Result<Vec<K>>
+/// `K` is the node identity (e.g. `PkgBase`); edge values are dep references
+/// (`D: Borrow<str>` — `String` or a typed `PkgTarget`), looked up against
+/// `nodes` via `K: Borrow<str>`.
+pub fn sort<K, D, S>(edges: &HashMap<K, Vec<D>, S>, nodes: &BTreeSet<K>) -> Result<Vec<K>>
 where
     K: Eq + Hash + Ord + Clone + Borrow<str> + fmt::Display,
+    D: Borrow<str>,
     S: BuildHasher,
 {
     let mut order = Vec::with_capacity(nodes.len());
