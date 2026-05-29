@@ -220,8 +220,13 @@ impl LoopEnv for RealEnv<'_> {
         let resolved = resolve_aur(self.cfg, self.session, &pac, sel)?;
 
         // Whole-batch preview (repo roots + AUR roots + pulled-in deps), then a
-        // single gate before any sudo or build.
-        preview(candidates, sel, resolved.as_ref());
+        // single gate before any sudo or build. Sizes come from the freshly
+        // refreshed *synced* db — the same source as the candidate versions —
+        // not the system db: gitaur never `-Sy`s the system db, so its syncdb
+        // still holds the installed versions, whose cached archives make
+        // `download_size()` report a misleading `0 B`.
+        let size_pac = synced_pac()?;
+        preview(candidates, sel, resolved.as_ref(), &size_pac);
         if !ui::confirm("Proceed with this batch?", false)
             .map_err(|e| Error::other(format!("confirm: {e}")))?
         {
@@ -261,6 +266,18 @@ fn system_pac() -> Result<PacmanIndex> {
     Ok(PacmanIndex::build(&alpm))
 }
 
+/// A rootless-synced pacman snapshot, used only for the change-set preview's
+/// size figures. The candidate versions came from this freshly-refreshed db, so
+/// its syncdb carries the *new* versions whose archives aren't in the package
+/// cache — `download_size()` then reports the real fetch cost rather than the
+/// `0 B` the stale system syncdb yields for already-cached installed versions.
+/// Localdb (the AUR `isize` source) is shared with [`system_pac`] via the
+/// private dbpath's `local` symlink, so AUR estimates match either way.
+fn synced_pac() -> Result<PacmanIndex> {
+    let alpm = alpm_db::open_synced()?;
+    Ok(PacmanIndex::build(&alpm))
+}
+
 /// Resolve the selected AUR upgrades into a [`Plan`], or `None` when nothing AUR
 /// was selected. `PkgUpgrade.name` is the foreign pkgname the picker matched;
 /// it rides along as the counterpart hint so review labelling lands on the right
@@ -291,8 +308,14 @@ fn resolve_aur(
 }
 
 /// Render the change-set preview: the selected root upgrades (repo + AUR) plus
-/// the dependencies the AUR builds pull in.
-fn preview(candidates: &[PkgUpgrade], sel: &UpgradeSelection, resolved: Option<&Plan>) {
+/// the dependencies the AUR builds pull in, with per-row and total sizes read
+/// from `pac`.
+fn preview(
+    candidates: &[PkgUpgrade],
+    sel: &UpgradeSelection,
+    resolved: Option<&Plan>,
+    pac: &PacmanIndex,
+) {
     // Roots: repo upgrades the user selected (look up their versions in the
     // candidate list) plus the AUR upgrades, which already carry versions.
     let mut roots: Vec<PkgUpgrade> = Vec::new();
@@ -321,7 +344,7 @@ fn preview(candidates: &[PkgUpgrade], sel: &UpgradeSelection, resolved: Option<&
             (repo_deps, aur_deps)
         }
     };
-    ui::change_set_table(&roots, &repo_deps, &aur_deps);
+    ui::change_set_table(&roots, &repo_deps, &aur_deps, pac);
 }
 
 #[cfg(test)]

@@ -210,6 +210,18 @@ pub struct PacmanIndex {
     /// deps surface in the plan instead of being pulled in silently by the
     /// final `pacman -S`.
     pub sync_depends: HashMap<PkgName, Vec<PkgTarget>>,
+    /// pkgname → installed on-disk size in bytes (localdb `isize()`). The
+    /// upgrade loop's change-set preview reads this to estimate an AUR build's
+    /// footprint from the version currently installed — a hint for ranking
+    /// "small vs huge," not a contract (the rebuilt version may differ in
+    /// size). Read here so the picker never has to hold an `&Alpm`.
+    pub installed_size: HashMap<PkgName, u64>,
+    /// pkgname → bytes pacman would fetch to install it, from the first syncdb
+    /// declaring it (`download_size()`, same first-DB-wins precedence as
+    /// [`Self::sync_versions`]). Already-cached packages report 0 — correct,
+    /// since pacman won't re-download them. Drives the change-set preview's
+    /// exact size figure for repo rows and repo deps.
+    pub sync_download_size: HashMap<PkgName, u64>,
 }
 
 impl PacmanIndex {
@@ -221,11 +233,15 @@ impl PacmanIndex {
     pub fn build(alpm: &Alpm) -> Self {
         let mut installed: HashMap<PkgName, Version> = HashMap::new();
         let mut installed_providers: HashMap<String, Vec<PkgName>> = HashMap::new();
+        let mut installed_size: HashMap<PkgName, u64> = HashMap::new();
         for p in alpm.localdb().pkgs() {
             let name = PkgName::new(p.name());
             // `From<&alpm::Ver> for Version` reads the bytes directly via
             // `alpm::Ver::as_str()` — not through `Display::to_string`.
             installed.insert(name.clone(), Version::from(p.version()));
+            // `isize()` is libalpm's `i64` (never negative in practice);
+            // `try_from` floors a corrupt-DB negative at 0 rather than wrapping.
+            installed_size.insert(name.clone(), u64::try_from(p.isize()).unwrap_or(0));
             for prov in p.provides() {
                 installed_providers
                     .entry(prov.name().to_owned())
@@ -236,16 +252,23 @@ impl PacmanIndex {
         let mut sync_versions: HashMap<PkgName, Version> = HashMap::new();
         let mut sync_providers: HashMap<String, Vec<PkgName>> = HashMap::new();
         let mut sync_depends: HashMap<PkgName, Vec<PkgTarget>> = HashMap::new();
+        let mut sync_download_size: HashMap<PkgName, u64> = HashMap::new();
         for db in alpm.syncdbs() {
             for p in db.pkgs() {
                 let name = PkgName::new(p.name());
                 // First DB pacman.conf lists wins, matching pacman's own repo
-                // precedence — record version + depends together on that
-                // first sighting so they describe the same package. (provides
-                // stay accumulated across DBs below; `resolve_concrete` only
-                // reads the first provider, so duplicates are harmless.)
+                // precedence — record version + depends + download size
+                // together on that first sighting so they describe the same
+                // package. (provides stay accumulated across DBs below;
+                // `resolve_concrete` only reads the first provider, so
+                // duplicates are harmless.)
                 if !sync_versions.contains_key(&name) {
                     sync_versions.insert(name.clone(), Version::from(p.version()));
+                    // `download_size()` is the bytes pacman would fetch (0 when
+                    // the archive is already cached); `try_from` floors a
+                    // negative at 0, as with `isize` above.
+                    sync_download_size
+                        .insert(name.clone(), u64::try_from(p.download_size()).unwrap_or(0));
                     // `Dep::name()` is the bare dependency name (alpm parses
                     // off the version constraint); the resolver classifies on
                     // that name, so widen it straight into an unclassified
@@ -280,6 +303,8 @@ impl PacmanIndex {
             sync_versions,
             sync_providers,
             sync_depends,
+            installed_size,
+            sync_download_size,
         }
     }
 
@@ -318,6 +343,21 @@ impl PacmanIndex {
     /// resolver's repo→repo dependency walk.
     pub fn sync_depends(&self, name: &PkgName) -> &[PkgTarget] {
         self.sync_depends.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    /// Installed on-disk size of `name` in bytes, or `None` when it isn't in
+    /// localdb. Takes `&PkgName` (not `&str`): a size estimate only makes sense
+    /// for a concrete installed pkgname, the shape the change-set preview
+    /// already holds. Backs the AUR-row footprint estimate.
+    pub fn installed_size(&self, name: &PkgName) -> Option<u64> {
+        self.installed_size.get(name).copied()
+    }
+
+    /// Bytes pacman would download for `name` (0 if already cached), or `None`
+    /// when `name` isn't an exact sync pkgname. Backs the exact size figure for
+    /// repo rows and repo deps in the change-set preview.
+    pub fn sync_download_size(&self, name: &PkgName) -> Option<u64> {
+        self.sync_download_size.get(name).copied()
     }
 
     /// Resolve a (possibly virtual) name to the concrete pkgname pacman would
@@ -611,6 +651,22 @@ mod tests {
         // Provides-only names carry no version of their own — only the
         // providing pkgname does.
         assert_eq!(idx.sync_version("java-runtime"), None);
+    }
+
+    #[test]
+    fn size_lookups_read_owned_maps() {
+        let mut idx = PacmanIndex::default();
+        idx.installed_size.insert("vim".into(), 4_200_000);
+        idx.sync_download_size.insert("firefox".into(), 78_000_000);
+        // Cached repo pkg: download_size is 0, which is a real answer, not a
+        // miss — `Some(0)`, never `None`.
+        idx.sync_download_size.insert("glibc".into(), 0);
+
+        assert_eq!(idx.installed_size(&"vim".into()), Some(4_200_000));
+        assert_eq!(idx.installed_size(&"firefox".into()), None);
+        assert_eq!(idx.sync_download_size(&"firefox".into()), Some(78_000_000));
+        assert_eq!(idx.sync_download_size(&"glibc".into()), Some(0));
+        assert_eq!(idx.sync_download_size(&"vim".into()), None);
     }
 
     #[test]

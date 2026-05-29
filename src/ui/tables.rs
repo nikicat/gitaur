@@ -4,6 +4,7 @@
 use super::{color_on, dim};
 use crate::config::Config;
 use crate::names::{PkgBase, PkgName};
+use crate::pacman::alpm_db::PacmanIndex;
 use crate::pacman::invoke::{PkgUpgrade, REPO_AUR};
 use crate::pacman::verdiff::{self, BumpKind};
 
@@ -160,13 +161,20 @@ pub fn upgrade_table(plan: &[PkgUpgrade]) {
 /// Pre-apply change-set preview for the upgrade loop.
 ///
 /// Shows the selected root upgrades, then the dependencies they pull in (fresh
-/// repo installs and AUR builds), so the user sees the whole batch before
-/// committing. Phase 1 shows no cost numbers — just the honest set of packages
-/// about to change. Root rows reuse the picker's aligned format; pulled-in deps
-/// are indented under a `pulls in:` line and tagged `(install)` / `(build)`.
-/// `repo_deps` are the concrete pkgnames `pacman -S` will install; `aur_deps`
-/// are the extra pkgbases that get built.
-pub fn change_set_table(roots: &[PkgUpgrade], repo_deps: &[PkgName], aur_deps: &[PkgBase]) {
+/// repo installs and AUR builds), so the user sees the whole batch — and its
+/// size cost — before committing. Root rows reuse the picker's aligned format;
+/// pulled-in deps are indented under a `pulls in:` line and tagged `(install)`
+/// / `(build)`. Every row carries a size figure (exact download size for repo,
+/// `~`-estimated installed size for AUR, `~?` for never-installed pull-ins) and
+/// the batch total closes the table. `repo_deps` are the concrete pkgnames
+/// `pacman -S` will install; `aur_deps` are the extra pkgbases that get built;
+/// `pac` is the system-db snapshot the sizes are read from.
+pub fn change_set_table(
+    roots: &[PkgUpgrade],
+    repo_deps: &[PkgName],
+    aur_deps: &[PkgBase],
+    pac: &PacmanIndex,
+) {
     let dep_count = repo_deps.len() + aur_deps.len();
     let header = if dep_count == 0 {
         format!("this batch — {} package(s)", roots.len())
@@ -181,27 +189,138 @@ pub fn change_set_table(roots: &[PkgUpgrade], repo_deps: &[PkgName], aur_deps: &
 
     let ordered = sort_for_display(roots);
     let (repo_w, name_w, old_w) = col_widths(&ordered);
+    let new_w = ordered.iter().map(|u| u.new_ver.len()).max().unwrap_or(0);
     let paint = Paint::from(color_on());
-    for u in &ordered {
-        eprintln!("    {}", render_row(u, repo_w, name_w, old_w, paint));
-    }
 
-    if dep_count == 0 {
-        return;
-    }
-    super::note("pulls in:");
-    let dep_w = repo_deps
+    // Resolve every row's size once: the figures drive the size-column width,
+    // the per-row cells, and the batch total in a single pass.
+    let root_sizes: Vec<SizeEst> = ordered.iter().map(|u| size_of_root(u, pac)).collect();
+    let repo_dep_sizes: Vec<SizeEst> = repo_deps.iter().map(|n| size_of_repo_dep(n, pac)).collect();
+    // Pulled-in AUR deps are unsatisfied builds — not yet installed — so their
+    // footprint is unknown (`~?`). See `docs/UPDATE_LOOP.md` § Cost estimates.
+    let aur_dep_sizes: Vec<SizeEst> = vec![SizeEst::Unknown; aur_deps.len()];
+    let size_w = root_sizes
         .iter()
-        .map(PkgName::len)
-        .chain(aur_deps.iter().map(PkgBase::len))
+        .chain(&repo_dep_sizes)
+        .chain(&aur_dep_sizes)
+        .map(|s| s.render().len())
         .max()
         .unwrap_or(0);
-    for name in repo_deps {
-        eprintln!("      {name:<dep_w$}  (install)");
+
+    for (u, size) in ordered.iter().zip(&root_sizes) {
+        let row = render_row(u, repo_w, name_w, old_w, paint);
+        let new_pad = " ".repeat(new_w.saturating_sub(u.new_ver.len()));
+        eprintln!("    {row}{new_pad}  {size:>size_w$}", size = size.render());
     }
-    for name in aur_deps {
-        eprintln!("      {name:<dep_w$}  (build)");
+
+    if dep_count > 0 {
+        super::note("pulls in:");
+        let dep_w = repo_deps
+            .iter()
+            .map(PkgName::len)
+            .chain(aur_deps.iter().map(PkgBase::len))
+            .max()
+            .unwrap_or(0);
+        // "(install)" is the widest tag — pad both to it so the size column
+        // lines up across install and build rows.
+        let tag_w = "(install)".len();
+        for (name, size) in repo_deps.iter().zip(&repo_dep_sizes) {
+            eprintln!(
+                "      {name:<dep_w$}  {tag:<tag_w$}  {size:>size_w$}",
+                tag = "(install)",
+                size = size.render(),
+            );
+        }
+        for (name, size) in aur_deps.iter().zip(&aur_dep_sizes) {
+            eprintln!(
+                "      {name:<dep_w$}  {tag:<tag_w$}  {size:>size_w$}",
+                tag = "(build)",
+                size = size.render(),
+            );
+        }
     }
+
+    let (total, approx) = batch_total(
+        root_sizes
+            .iter()
+            .chain(&repo_dep_sizes)
+            .chain(&aur_dep_sizes)
+            .copied(),
+    );
+    let prefix = if approx { "~" } else { "" };
+    super::note(&format!("total  {prefix}{}", super::human_bytes(total)));
+}
+
+/// A change-set row's size figure.
+///
+/// Repo rows are [`Self::Exact`] (the bytes pacman will download); AUR rows are
+/// an [`Self::Estimate`] from the installed version's on-disk size, rendered
+/// with a leading `~`; a pulled-in dep that was never installed is
+/// [`Self::Unknown`] (`~?`). See `docs/UPDATE_LOOP.md` § Cost estimates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SizeEst {
+    Exact(u64),
+    Estimate(u64),
+    Unknown,
+}
+
+impl SizeEst {
+    /// Bytes this row contributes to the batch total (0 when unknown).
+    const fn bytes(self) -> u64 {
+        match self {
+            Self::Exact(n) | Self::Estimate(n) => n,
+            Self::Unknown => 0,
+        }
+    }
+
+    /// Whether the figure is approximate — any non-exact row makes the batch
+    /// total a `~` lower bound.
+    const fn approximate(self) -> bool {
+        !matches!(self, Self::Exact(_))
+    }
+
+    /// The cell text: bare for exact, `~`-prefixed for an estimate, `~?` when
+    /// unknown.
+    fn render(self) -> String {
+        match self {
+            Self::Exact(n) => super::human_bytes(n),
+            Self::Estimate(n) => format!("~{}", super::human_bytes(n)),
+            Self::Unknown => "~?".to_owned(),
+        }
+    }
+}
+
+/// Size of a selected root: AUR rows estimate from the installed footprint,
+/// repo rows take the exact download size. Either lookup can miss (an AUR pkg
+/// pacman has no localdb size for, a repo pkg absent from this db snapshot) →
+/// [`SizeEst::Unknown`].
+fn size_of_root(u: &PkgUpgrade, pac: &PacmanIndex) -> SizeEst {
+    if u.repo == REPO_AUR {
+        pac.installed_size(&u.name)
+            .map_or(SizeEst::Unknown, SizeEst::Estimate)
+    } else {
+        pac.sync_download_size(&u.name)
+            .map_or(SizeEst::Unknown, SizeEst::Exact)
+    }
+}
+
+/// Size of a pulled-in repo dependency: the exact bytes `pacman -S` will fetch.
+fn size_of_repo_dep(name: &PkgName, pac: &PacmanIndex) -> SizeEst {
+    pac.sync_download_size(name)
+        .map_or(SizeEst::Unknown, SizeEst::Exact)
+}
+
+/// Sum a change set's figures into `(bytes, approximate)`. `bytes` is a lower
+/// bound whenever a row is an estimate or unknown; `approximate` flags that so
+/// the caller can prefix the total with `~`.
+fn batch_total(sizes: impl IntoIterator<Item = SizeEst>) -> (u64, bool) {
+    let mut total = 0u64;
+    let mut approx = false;
+    for s in sizes {
+        total = total.saturating_add(s.bytes());
+        approx |= s.approximate();
+    }
+    (total, approx)
 }
 
 /// User's choice from the interactive `-Syu` picker.
@@ -812,6 +931,108 @@ mod tests {
         ];
         upgrade_table(&ups);
         upgrade_table(&[]);
+    }
+
+    fn up(repo: &str, name: &str, old: &str, new: &str) -> PkgUpgrade {
+        PkgUpgrade {
+            repo: repo.into(),
+            name: name.into(),
+            old_ver: old.into(),
+            new_ver: new.into(),
+        }
+    }
+
+    /// Each variant renders its expected cell: bare exact, `~`-prefixed
+    /// estimate, `~?` for unknown.
+    #[test]
+    fn size_est_renders_each_variant() {
+        assert_eq!(SizeEst::Exact(1024).render(), "1.00 KiB");
+        assert_eq!(SizeEst::Estimate(1024).render(), "~1.00 KiB");
+        assert_eq!(SizeEst::Unknown.render(), "~?");
+    }
+
+    /// A root's size source is chosen by repo: AUR rows estimate from localdb
+    /// `isize`, repo rows take the exact syncdb download size, and a miss in
+    /// either map falls back to unknown.
+    #[test]
+    fn size_of_root_picks_source_by_repo() {
+        let mut pac = PacmanIndex::default();
+        pac.installed_size
+            .insert("paru-bin".into(), 9 * 1024 * 1024);
+        pac.sync_download_size
+            .insert("glibc".into(), 12 * 1024 * 1024);
+
+        assert_eq!(
+            size_of_root(&up(REPO_AUR, "paru-bin", "1-1", "2-1"), &pac),
+            SizeEst::Estimate(9 * 1024 * 1024)
+        );
+        assert_eq!(
+            size_of_root(&up("core", "glibc", "2.40-1", "2.41-1"), &pac),
+            SizeEst::Exact(12 * 1024 * 1024)
+        );
+        // AUR row with no localdb size (manually built / never installed).
+        assert_eq!(
+            size_of_root(&up(REPO_AUR, "ghost", "1-1", "2-1"), &pac),
+            SizeEst::Unknown
+        );
+    }
+
+    /// Regression guard for the stale-db size bug: a repo row whose pkgname is
+    /// present in the size index with a `download_size` of 0 (libalpm's answer
+    /// for an already-cached archive) is `Exact(0)` → renders `0 B`, a real
+    /// value — distinct from a *missing* pkgname, which is `Unknown` → `~?`. The
+    /// distinction is why a preview full of `0 B` rows points at the size source
+    /// (a stale syncdb whose versions are already cached), not the formatter.
+    #[test]
+    fn repo_zero_size_is_exact_not_missing() {
+        let mut pac = PacmanIndex::default();
+        pac.sync_download_size.insert("cached".into(), 0);
+        // present, cached → real zero
+        let cached = size_of_root(&up("core", "cached", "1-1", "1-2"), &pac);
+        assert_eq!(cached, SizeEst::Exact(0));
+        assert_eq!(cached.render(), "0 B");
+        // absent → unknown, never silently 0
+        let missing = size_of_root(&up("core", "absent", "1-1", "1-2"), &pac);
+        assert_eq!(missing, SizeEst::Unknown);
+        assert_eq!(missing.render(), "~?");
+    }
+
+    /// The batch total sums every row's bytes and flags itself approximate the
+    /// moment a non-exact row (estimate or unknown) is in the mix.
+    #[test]
+    fn batch_total_sums_and_flags_approximate() {
+        let (exact, approx) = batch_total([SizeEst::Exact(100), SizeEst::Exact(200)]);
+        assert_eq!(exact, 300);
+        assert!(!approx, "all-exact total must not be marked approximate");
+
+        let (mixed, approx) =
+            batch_total([SizeEst::Exact(100), SizeEst::Estimate(50), SizeEst::Unknown]);
+        assert_eq!(mixed, 150, "unknown contributes 0 to the total");
+        assert!(approx, "an estimate makes the total approximate");
+    }
+
+    /// `change_set_table` must survive the cases most likely to break the
+    /// width/zip math: a mixed root + dep batch, the no-deps path, and an empty
+    /// change set. Output goes to stderr so we assert "doesn't panic," as the
+    /// other table smokes do.
+    #[test]
+    fn change_set_table_smoke() {
+        let mut pac = PacmanIndex::default();
+        pac.installed_size
+            .insert("cuda".into(), 3 * 1024 * 1024 * 1024);
+        pac.sync_download_size
+            .insert("glibc".into(), 12 * 1024 * 1024);
+        pac.sync_download_size
+            .insert("gcc13".into(), 50 * 1024 * 1024);
+        let roots = vec![
+            up(REPO_AUR, "cuda", "12.6-1", "12.8-1"),
+            up("core", "glibc", "2.40-1", "2.41-1"),
+        ];
+        let repo_deps = vec![PkgName::from("gcc13")];
+        let aur_deps = vec![PkgBase::from("nvidia-utils")];
+        change_set_table(&roots, &repo_deps, &aur_deps, &pac);
+        change_set_table(&roots, &[], &[], &pac);
+        change_set_table(&[], &[], &[], &PacmanIndex::default());
     }
 
     /// `UpgradePickerTheme` must never hand dialoguer an ANSI-bearing string

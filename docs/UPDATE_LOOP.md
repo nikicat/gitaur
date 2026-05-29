@@ -1,12 +1,15 @@
 # Update loop, change-set preview & build-cost estimates (design)
 
-Status: **phase 1 implemented; phases 2–4 pending.** The no-arg `gaur` loop,
+Status: **phases 1–2 implemented; phases 3–4 pending.** The no-arg `gaur` loop,
 session state, reviewed-set gating, picker badges, change-set preview, and
 SIGINT-during-build → bail-to-table now live in `src/cli/upgrade_loop.rs` +
 `src/build/makepkg.rs` (backed by `build::UpgradeSession` and the
-`build::resolve_targets` / `build::apply_plan` split). Phases 2–4 (size column,
-build-time metric, custom picker) are not started. The single-shot `-Syu` flow
-remains `dispatch::handle_s` in `src/cli/dispatch.rs`.
+`build::resolve_targets` / `build::apply_plan` split). Phase 2 added the
+per-row size column + batch total on the change-set preview, reading from the
+pacman DBs with no store (`PacmanIndex::{installed_size, sync_download_size}` +
+`ui::human_bytes`). Phases 3–4 (build-time metric, custom picker) are not
+started. The single-shot `-Syu` flow remains `dispatch::handle_s` in
+`src/cli/dispatch.rs`.
 
 ## Problem
 
@@ -209,11 +212,17 @@ than in the live picker. A live inline-expanding custom picker (route 2) is
 the eventual target but is deferred — both routes render the identical
 change-set computation; only *when* it appears differs.
 
-**As shipped (phase 1)** — `ui::change_set_table`, driven by
-`upgrade_loop::preview`. Two simplifications against the sketch above:
+**As shipped (phases 1–2)** — `ui::change_set_table`, driven by
+`upgrade_loop::preview`. One simplification remains against the sketch above:
 
-- **No sizes.** The `~X GiB` / `total` column is phase 2; the row is just
-  `repo  name  old -> new` and the deps are `name  (install)` / `(build)`.
+- **Sizes (phase 2).** Every row carries a right-aligned size cell and the
+  table closes with a batch total. Repo rows/deps show the exact download size
+  from the syncdb (`PacmanIndex::sync_download_size`, cached pkgs read 0); AUR
+  roots show a `~`-prefixed estimate from the installed footprint
+  (`PacmanIndex::installed_size`, via localdb `isize`); never-installed
+  pulled-in AUR builds show `~?`. The total is `~`-prefixed whenever any row is
+  an estimate or unknown — see `ui::human_bytes` and the `SizeEst` classifier
+  in `src/ui/tables.rs`.
 - **Flat deps, not per-root nesting.** The pulled-in deps render as one
   indented block under a `pulls in:` line, not nested beneath the specific
   root that dragged each in. The resolver's `Plan` tracks AUR build edges
@@ -225,12 +234,13 @@ So the confirm screen currently looks like:
 
 ```
 :: this batch — 3 package(s), +2 dependencies
-    aur   cuda       12.6-1 -> 12.8-1
-    aur   yay-bin    12.4-1 -> 12.5-1
-    core  glibc      2.40-1 -> 2.41-1
+    core  glibc      2.40-1 -> 2.41-1   12.00 MiB
+    aur   cuda       12.6-1 -> 12.8-1   ~3.00 GiB
+    aur   yay-bin    12.4-1 -> 12.5-1   ~9.00 MiB
 -> pulls in:
-      gcc13          (install)
-      nvidia-utils   (build)
+      gcc13          (install)   50.00 MiB
+      nvidia-utils   (build)            ~?
+-> total  ~3.06 GiB
 Proceed with this batch? [Y/n]
 ```
 
@@ -312,23 +322,28 @@ sets after each `cmd_install` (and on `Error::Interrupted`).
 
 ## Cost estimates
 
-### Size — from the pacman DBs, no store
+### Size — from the pacman DBs, no store — DONE
 
-For any candidate row gitaur can read size without persisting anything,
-because the picker only shows installed-but-outdated packages:
+For any candidate row gitaur reads size without persisting anything, because
+the picker only shows installed-but-outdated packages:
 
 - **Repo rows / repo deps** — exact compressed download size from the sync DB
   (`alpm::Package::download_size()` on the syncdb pkg).
-- **AUR rows / AUR deps** — the currently-installed version's on-disk size
-  from localdb (`alpm::Package::isize()`). This is the uncompressed installed
-  size of the *old* version, used as a predictor of the new build's footprint
-  — good enough to rank "small vs huge," which is the actual need. Marked with
-  a leading `~`; brand-never-installed rows (only possible for pulled-in deps)
-  show `~?`.
+- **AUR rows** — the currently-installed version's on-disk size from localdb
+  (`alpm::Package::isize()`). This is the uncompressed installed size of the
+  *old* version, used as a predictor of the new build's footprint — good enough
+  to rank "small vs huge," which is the actual need. Marked with a leading `~`.
+- **AUR deps** — the pulled-in build deps are by definition not yet installed
+  (the resolver only surfaces *unsatisfied* deps), so they have no localdb size
+  and render `~?`.
 
-`PacmanIndex` (`src/pacman/alpm_db.rs`) currently snapshots installed
-name→version; extend it to also carry installed size (and `base()`), so the
-picker reads sizes without holding `&Alpm`. No SQLite, no new files.
+`PacmanIndex` (`src/pacman/alpm_db.rs`) gained two pkgname-keyed maps for this —
+`installed_size` (localdb `isize`) and `sync_download_size` (syncdb
+`download_size`) — built in the same single pass, so the picker reads sizes
+without holding `&Alpm`. No SQLite, no new files. (The sketch floated also
+carrying `base()` to sum a split AUR pkgbase's installed footprint across its
+members; the single-pkgname `isize` is enough for the small-vs-huge ranking, so
+that wasn't added.)
 
 Imprecision is accepted by decision: installed≠download size, and a manually
 installed package may differ from what gitaur would build. The number is a
@@ -357,12 +372,13 @@ artifact. When build-time tracking lands:
   (`src/build.rs:560`) with an `Instant`; upsert on success. The `Cached`
   disposition (`src/build.rs:515`) skips the build and leaves the row intact.
 
-### Batch total before apply
+### Batch total before apply — DONE
 
 The confirm screen sums the size column of the whole resolved change set
 (roots + unsatisfied deps; exact for repo, estimated for AUR) into the
-`total · ~X` line shown above. Once build time exists, a `· ~Yh build` term
-joins it. Cheap — a sum at a gate that already exists.
+`total  ~X` line shown above — `~`-prefixed when any row is an estimate or
+unknown (`tables::batch_total`). Once build time exists, a `~Yh build` term can
+join it. Cheap — a sum at a gate that already exists.
 
 ## Ordering with session state
 
@@ -392,10 +408,13 @@ No row moves; the badge carries the state.
    `LoopEnv` fake (`upgrade_loop` unit tests), SIGINT and the loop UI via
    `tests/container/extended/02`/`04`. The change-set preview shipped flat (no
    per-root nesting) — see "As shipped" above.
-2. **Size column + batch total.** Render size on every change-set row (repo
-   exact from syncdb / AUR estimated from localdb `isize`) and the
-   post-selection total. No store — pure DB reads. Extend `PacmanIndex` to
-   carry installed size + base.
+2. **Size column + batch total. — DONE.** Renders a size on every change-set
+   row (repo exact from syncdb `download_size` / AUR estimated from localdb
+   `isize`, `~?` for never-installed pull-ins) and the post-selection total. No
+   store — pure DB reads via the two new `PacmanIndex` size maps. Landed in
+   `src/ui/tables.rs` (`SizeEst`, `change_set_table`) + `src/ui.rs`
+   (`human_bytes`) + `src/pacman/alpm_db.rs` (size maps). The `base()` summing
+   the sketch floated was dropped as unnecessary — see "Size" above.
 3. **Build-time metric.** Add `rusqlite` + `metrics.db` (just
    `pkgbase → build_secs`); capture around `makepkg::run`; add the build-time
    term to the column and total; dim estimates whose localdb install date is
