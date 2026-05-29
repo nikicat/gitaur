@@ -1,0 +1,20 @@
+# Long-running build() for the SIGINT/interrupt test (extended/02). Prints a
+# sentinel so the harness knows the build actually started, then sleeps on a
+# distinctive duration the harness greps for to confirm the child was killed
+# when gitaur forwarded SIGINT to makepkg's process group. No source=(), so
+# makepkg goes straight to build().
+pkgname=test-sleep-build
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: build() sleeps so a Ctrl+C can interrupt it'
+arch=('any')
+license=('MIT')
+
+build() {
+    echo 'GITAUR_SLEEP_BUILD_SENTINEL'
+    sleep 3137
+}
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}
