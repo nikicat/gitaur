@@ -209,6 +209,31 @@ than in the live picker. A live inline-expanding custom picker (route 2) is
 the eventual target but is deferred — both routes render the identical
 change-set computation; only *when* it appears differs.
 
+**As shipped (phase 1)** — `ui::change_set_table`, driven by
+`upgrade_loop::preview`. Two simplifications against the sketch above:
+
+- **No sizes.** The `~X GiB` / `total` column is phase 2; the row is just
+  `repo  name  old -> new` and the deps are `name  (install)` / `(build)`.
+- **Flat deps, not per-root nesting.** The pulled-in deps render as one
+  indented block under a `pulls in:` line, not nested beneath the specific
+  root that dragged each in. The resolver's `Plan` tracks AUR build edges
+  (`aur_make_edges`) but not per-root provenance for *repo* deps, so honest
+  per-root attribution isn't a cheap read today. Deferred to route 2 (phase
+  4), where the live picker rebuilds the change-set model anyway.
+
+So the confirm screen currently looks like:
+
+```
+:: this batch — 3 package(s), +2 dependencies
+    aur   cuda       12.6-1 -> 12.8-1
+    aur   yay-bin    12.4-1 -> 12.5-1
+    core  glibc      2.40-1 -> 2.41-1
+-> pulls in:
+      gcc13          (install)
+      nvidia-utils   (build)
+Proceed with this batch? [Y/n]
+```
+
 ## PKGBUILD review across the session
 
 Review already happens today: phase 1 of `run_aur_pipeline` calls
@@ -354,14 +379,19 @@ No row moves; the badge carries the state.
 
 ## Suggested phasing
 
-1. **Loop core.** Hoist index/mirror load out of the iteration; add
+1. **Loop core. — DONE.** Hoist index/mirror load out of the iteration; add
    `recompute_remaining`; turn the no-arg upgrade path into a loop with clean
    empty-selection exit; fold `RunReport` into session state; add the
    `reviewed` set and gate `prepare_one`'s review on it; implement the
    SIGINT-during-build → bail-to-table behavior (`Error::Interrupted`);
    change-set preview via confirm-stage expansion (route 1). No cost numbers
    yet. Removes the re-fetch pain, the failure/interrupt restart pain, the
-   redundant-review pain, and the hidden-deps problem.
+   redundant-review pain, and the hidden-deps problem. Landed in
+   `src/cli/upgrade_loop.rs` (`drive`/`RealEnv` over the `LoopEnv` seam) +
+   `src/build/makepkg.rs` (signal handling). Tests: loop logic via the
+   `LoopEnv` fake (`upgrade_loop` unit tests), SIGINT and the loop UI via
+   `tests/container/extended/02`/`04`. The change-set preview shipped flat (no
+   per-root nesting) — see "As shipped" above.
 2. **Size column + batch total.** Render size on every change-set row (repo
    exact from syncdb / AUR estimated from localdb `isize`) and the
    post-selection total. No store — pure DB reads. Extend `PacmanIndex` to
