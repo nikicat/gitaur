@@ -22,7 +22,10 @@ pub use progress::{
     promote_count_bar, spinner, tick,
 };
 pub use prompts::{confirm, select_pkgnames};
-pub use tables::{UpgradeSelection, install_table, pkg_list, select_upgrades, upgrade_table};
+pub use tables::{
+    RowAnnotations, RowStatus, UpgradeSelection, change_set_table, install_table, pkg_list,
+    select_upgrades, upgrade_table,
+};
 
 use console::{Term, style};
 use std::sync::OnceLock;

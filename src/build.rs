@@ -31,7 +31,7 @@ pub mod print;
 pub mod review;
 pub mod upgrade;
 
-pub use upgrade::{cmd_query_upgrades, collect_upgrade_plan};
+pub use upgrade::{UpgradeSession, cmd_query_upgrades, collect_upgrade_plan};
 
 /// One built pkgbase's set of `.pkg.tar.zst` outputs.
 struct BuiltPkg {
@@ -84,15 +84,36 @@ impl Target {
     }
 }
 
+/// Whether the plan-level "Proceed with installation?" prompt still needs to be
+/// asked.
+///
+/// [`ConfirmGate::AlreadyConfirmed`] means a higher layer already gated the
+/// batch (the `-Syu` picker, the no-arg loop's change-set preview), so
+/// `install_with_index` skips its own prompt. The sudo gate and PKGBUILD review
+/// prompts fire regardless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmGate {
+    Ask,
+    AlreadyConfirmed,
+}
+
+/// Knobs for one install batch, shared by the `-S` entry and the upgrade loop.
+///
+/// `noconfirm` / `asdeps` are the crate-wide pacman-parity flags; `gate`
+/// controls only the plan-level confirm (see [`ConfirmGate`]).
+#[derive(Debug, Clone, Copy)]
+pub struct InstallOpts {
+    pub noconfirm: bool,
+    pub asdeps: bool,
+    pub gate: ConfirmGate,
+}
+
 /// Entry point for `gaur -S <targets>`.
 ///
 /// Loads the pacman snapshot and (optionally) the AUR index in parallel, then
-/// classifies every target. After printing the unified plan and getting a
-/// single confirmation gitaur drives every `pacman` call with `--noconfirm`
-/// so the user is asked once; pacman never re-prompts. `already_confirmed`
-/// short-circuits the gate for callers that have already confirmed at a
-/// higher level (e.g. the `-Syu` interactive picker in `cli::dispatch`);
-/// PKGBUILD review prompts still respect `noconfirm`.
+/// hands them to [`install_with_index`]. After printing the unified plan and
+/// getting a single confirmation gitaur drives every `pacman` call with
+/// `--noconfirm` so the user is asked once; pacman never re-prompts.
 #[instrument(skip(cfg))]
 pub fn cmd_install(
     cfg: &Config,
@@ -135,14 +156,69 @@ pub fn cmd_install(
         (&empty_idx, None)
     };
 
+    // `-S` has no cross-call review memory, so a fresh per-invocation set. The
+    // upgrade loop keeps its own session-scoped set across batches instead.
+    let mut reviewed = HashSet::new();
+    let opts = InstallOpts {
+        noconfirm,
+        asdeps,
+        gate: if already_confirmed {
+            ConfirmGate::AlreadyConfirmed
+        } else {
+            ConfirmGate::Ask
+        },
+    };
+    let report = install_with_index(cfg, idx, by, &pac, targets, opts, &mut reviewed)?;
+    Ok(u8::from(report.had_failures()))
+}
+
+/// Resolve `targets` against a caller-supplied index + pacman snapshot, then
+/// drive the repo and AUR install phases, returning the per-pkgbase
+/// [`RunReport`].
+///
+/// Split out of [`cmd_install`] so the no-arg upgrade loop can run many
+/// batches against one already-loaded [`IndexFile`]/[`Secondary`] without
+/// re-reading the index each iteration, and so the loop can fold the report
+/// into its session state. `reviewed` is the session-scoped set of pkgbases
+/// already approved (see [`prepare_one`]); `-S` passes a fresh empty one.
+pub(crate) fn install_with_index(
+    cfg: &Config,
+    idx: &IndexFile,
+    by: Option<&Secondary>,
+    pac: &PacmanIndex,
+    targets: &[Target],
+    opts: InstallOpts,
+    reviewed: &mut HashSet<PkgBase>,
+) -> Result<RunReport> {
+    let plan = resolve_targets(cfg, idx, by, pac, targets, opts.noconfirm)?;
+    print::plan(&plan, idx, pac);
+    apply_plan(cfg, idx, pac, &plan, opts, reviewed)
+}
+
+/// Classify `targets` into a [`Plan`] — expand bare pkgbases, resolve deps, and
+/// stamp the per-pkgbase decisions (split selections, counterpart hints) onto
+/// it.
+///
+/// Pulled out of [`install_with_index`] so the upgrade loop can resolve once,
+/// render its change-set preview against the [`Plan`], and then hand the *same*
+/// plan to [`apply_plan`] — re-resolving would re-run the split-package prompt
+/// inside `expand_pkgbase_targets`.
+pub(crate) fn resolve_targets(
+    cfg: &Config,
+    idx: &IndexFile,
+    by: Option<&Secondary>,
+    pac: &PacmanIndex,
+    targets: &[Target],
+    noconfirm: bool,
+) -> Result<Plan> {
     // Expand bare `-S <pkgbase>` targets into the pkgname(s) the user wants
     // installed as explicit. Split pkgbases prompt for a subset; single-pkgname
     // pkgbases pass through silently. The selector closure delegates to
     // `ui::select_pkgnames` so tests can swap in a deterministic picker.
-    let expanded = resolver::expand_pkgbase_targets(idx, by, &pac, targets, &mut |pb, pns| {
+    let expanded = resolver::expand_pkgbase_targets(idx, by, pac, targets, &mut |pb, pns| {
         ui::select_pkgnames(pb, pns, noconfirm).map_err(|e| Error::other(e.to_string()))
     })?;
-    let mut plan = resolver::resolve(cfg, idx, by, &pac, &expanded.targets)?;
+    let mut plan = resolver::resolve(cfg, idx, by, pac, &expanded.targets)?;
     plan.pkgname_selections = expanded.selections;
     // For pkgbase/provides hits the resolver received the pkgbase string, so
     // `plan.direct_targets` only contains the pkgbase. Mark the pkgnames the
@@ -153,12 +229,23 @@ pub fn cmd_install(
     plan.direct_targets
         .extend(expanded.direct_pkgnames.into_iter().map(PkgTarget::from));
     plan.counterpart_hints = expanded.counterpart_hints;
+    Ok(plan)
+}
 
-    print::plan(&plan, idx, &pac);
-
+/// Execute an already-resolved [`Plan`]: confirm gate, repo phase, AUR
+/// pipeline. The caller is responsible for displaying the plan first
+/// ([`print::plan`] for `-S`, the change-set preview for the loop).
+pub(crate) fn apply_plan(
+    cfg: &Config,
+    idx: &IndexFile,
+    pac: &PacmanIndex,
+    plan: &Plan,
+    opts: InstallOpts,
+    reviewed: &mut HashSet<PkgBase>,
+) -> Result<RunReport> {
     if plan.direct_repo.is_empty() && plan.transitive_repo.is_empty() && plan.aur_strata.is_empty()
     {
-        return Ok(0);
+        return Ok(RunReport::default());
     }
 
     // Skip the plan confirm when every package was explicitly named — the
@@ -166,25 +253,22 @@ pub fn cmd_install(
     // place only when the plan drags in unrequested packages (repo deps or
     // AUR makedepends). The sudo "Continue?" gate (and AUR review prompts)
     // still fire regardless.
-    if !already_confirmed
+    if opts.gate == ConfirmGate::Ask
         && !plan.only_requested()
-        && !ui::confirm("Proceed with installation?", noconfirm)?
+        && !ui::confirm("Proceed with installation?", opts.noconfirm)?
     {
         return Err(Error::UserAbort);
     }
 
-    install_repo_phase(cfg, &plan, asdeps)?;
+    install_repo_phase(cfg, plan, opts.asdeps)?;
 
-    if !plan.aur_strata.is_empty() {
-        // AUR path needs a loaded index — by construction `aur_strata` is
-        // empty when `by == None`, so this unwrap is unreachable.
-        let idx = aur_loaded
-            .as_ref()
-            .map(|(i, _)| i)
-            .ok_or_else(|| Error::other("internal: AUR plan without index"))?;
-        return run_aur_pipeline(cfg, idx, &pac, &plan, noconfirm, asdeps);
+    if plan.aur_strata.is_empty() {
+        return Ok(RunReport::default());
     }
-    Ok(0)
+    // A non-empty `aur_strata` implies the resolver found AUR entries, which
+    // can only happen when `by` (and thus a real `idx`) was present — so `idx`
+    // here is the loaded index, never the empty fallback.
+    run_aur_pipeline(cfg, idx, pac, plan, opts, reviewed)
 }
 
 /// Install the user's repo targets up front: direct ones as explicit, deps
@@ -238,9 +322,9 @@ fn run_aur_pipeline(
     idx: &IndexFile,
     pac: &PacmanIndex,
     plan: &Plan,
-    noconfirm: bool,
-    asdeps: bool,
-) -> Result<u8> {
+    opts: InstallOpts,
+    reviewed: &mut HashSet<PkgBase>,
+) -> Result<RunReport> {
     let mirror = MirrorRepo::open(&paths::aur_repo_path())?;
     // `plan.direct_targets` is already `HashSet<PkgTarget>` — pass it
     // through; `install_stratum` uses `PkgTargetSetExt::contains_pkgname`
@@ -268,7 +352,8 @@ fn run_aur_pipeline(
                 pac,
                 &plan.pkgbase_plan(pkgbase),
                 cfg.review_history_scan_max,
-                noconfirm,
+                opts.noconfirm,
+                reviewed,
             )?);
         }
         prep_strata.push(row);
@@ -294,13 +379,13 @@ fn run_aur_pipeline(
             &built,
             stratum_idx,
             direct_names,
-            asdeps,
+            opts.asdeps,
             &mut transitive_marks,
             &mut report,
         );
     }
 
-    if !asdeps && !transitive_marks.is_empty() {
+    if !opts.asdeps && !transitive_marks.is_empty() {
         let mut args = vec!["-D".to_owned(), "--asdeps".into()];
         // pacman argv is `Vec<String>` — downgrade typed `PkgName`s at
         // this single boundary.
@@ -313,7 +398,7 @@ fn run_aur_pipeline(
     }
 
     print::final_summary(&report);
-    Ok(u8::from(report.had_failures()))
+    Ok(report)
 }
 
 /// Build every pkgbase in one stratum, mutating `report` as failures /
@@ -359,7 +444,9 @@ fn build_stratum(
                 Err(e) => {
                     let msg = e.to_string();
                     ui::error(&format!("{}: build failed: {msg}", prep.pkgbase));
-                    report.failed.insert(prep.pkgbase.to_owned(), msg);
+                    report
+                        .failed
+                        .insert(prep.pkgbase.to_owned(), BuildFailure::Build(msg));
                 }
             },
         }
@@ -397,8 +484,43 @@ fn commit_stratum(
                 stratum_idx + 1
             ));
             for b in built {
-                report.failed.insert(b.pkgbase.clone(), msg.clone());
+                report
+                    .failed
+                    .insert(b.pkgbase.clone(), BuildFailure::Install(msg.clone()));
             }
+        }
+    }
+}
+
+/// Why a pkgbase failed to land in localdb this batch.
+///
+/// The reason isn't free text — it's one of two pipeline phases, and the
+/// distinction is actionable: a `Build` failure points the user at a makepkg
+/// log to read; an `Install` failure means the package built fine but its
+/// stratum's `pacman -U` transaction rejected it (and took the whole stratum
+/// down with it). The inner string is the underlying [`Error`]'s rendering —
+/// a log path, a pacman exit code — the only genuinely free-form part.
+#[derive(Debug, Clone)]
+pub(super) enum BuildFailure {
+    /// `makepkg` exited non-zero or produced no packages.
+    Build(String),
+    /// The stratum's `pacman -U` transaction failed.
+    Install(String),
+}
+
+impl BuildFailure {
+    /// Short phase label for the summary line (`build` / `install`).
+    pub(super) const fn phase(&self) -> &'static str {
+        match self {
+            Self::Build(_) => "build",
+            Self::Install(_) => "install",
+        }
+    }
+
+    /// The underlying error rendering.
+    pub(super) fn detail(&self) -> &str {
+        match self {
+            Self::Build(d) | Self::Install(d) => d,
         }
     }
 }
@@ -406,16 +528,14 @@ fn commit_stratum(
 /// Per-pkgbase outcome aggregated across all strata, used to drive both the
 /// dep-skip logic and the final summary (see `print::final_summary`).
 ///
-/// Keys are typed `PkgBase` so the report can't accidentally key on a
-/// pkgname; the `failed` value stays `String` because it carries a
-/// stringified error message, not an identity.
+/// Keys are typed `PkgBase` so the report can't accidentally key on a pkgname.
 #[derive(Default)]
 pub(super) struct RunReport {
     /// Successfully built (or reused from cache) and installed by `pacman -U`.
     pub(super) installed: Vec<PkgBase>,
-    /// makepkg or the stratum's `pacman -U` returned non-zero. Value is the
-    /// stringified error so the summary can quote it back.
-    pub(super) failed: HashMap<PkgBase, String>,
+    /// makepkg or the stratum's `pacman -U` returned non-zero, tagged by which
+    /// phase failed so the summary can say where to look.
+    pub(super) failed: HashMap<PkgBase, BuildFailure>,
     /// User chose "skip" at the PKGBUILD review prompt.
     pub(super) skipped_user: Vec<PkgBase>,
     /// Auto-skipped because a pkgbase earlier in the build graph failed.
@@ -471,7 +591,7 @@ enum Disposition {
     Skipped,
 }
 
-#[instrument(skip(mirror, idx, pac, target), fields(pkgbase = %target.pkgbase))]
+#[instrument(skip(mirror, idx, pac, target, reviewed), fields(pkgbase = %target.pkgbase))]
 fn prepare_one<'a>(
     mirror: &MirrorRepo,
     idx: &'a IndexFile,
@@ -479,6 +599,7 @@ fn prepare_one<'a>(
     target: &PkgbasePlan<'a>,
     history_scan_max: usize,
     noconfirm: bool,
+    reviewed: &mut HashSet<PkgBase>,
 ) -> Result<Prep<'a>> {
     let &PkgbasePlan {
         pkgbase,
@@ -530,6 +651,22 @@ fn prepare_one<'a>(
         });
     }
 
+    // Already approved this session: the mirror is frozen for the whole
+    // session (no mid-loop re-fetch), so a pkgbase maps to a single PKGBUILD
+    // commit and re-reviewing it is pure friction. Auto-approve — this is what
+    // makes the loop's retry-after-failure painless (a pkgbase approved in one
+    // iteration and rebuilt in the next isn't re-prompted).
+    if reviewed.contains(pkgbase) {
+        debug!(%pkgbase, "PKGBUILD already reviewed this session; skipping prompt");
+        return Ok(Prep {
+            pkgbase,
+            wt,
+            new_ver,
+            required,
+            disposition: Disposition::Build,
+        });
+    }
+
     // What the user has installed that this pkgbase will displace. Looks
     // through pkgname → replaces → provides so renames and split pkgs label
     // correctly; see `PacmanIndex::counterpart_with_hint` for the resolution
@@ -544,7 +681,12 @@ fn prepare_one<'a>(
         history_scan_max,
         noconfirm,
     )? {
-        review::Outcome::Approved => Disposition::Build,
+        review::Outcome::Approved => {
+            // Remember the approval so a later batch in the same session
+            // doesn't re-prompt the same diff.
+            reviewed.insert(pkgbase.clone());
+            Disposition::Build
+        }
         review::Outcome::Skipped => Disposition::Skipped,
     };
     Ok(Prep {
@@ -716,7 +858,9 @@ mod tests {
         let mut report = RunReport::default();
 
         // a failed two strata back; b skipped because of it; now check c.
-        report.failed.insert(a.clone(), "boom".into());
+        report
+            .failed
+            .insert(a.clone(), BuildFailure::Build("boom".into()));
         report.skipped_dep.insert(b.clone(), a.clone());
 
         assert_eq!(blocking_dep(&b, &edges, &report), Some(&a));

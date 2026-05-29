@@ -10,7 +10,7 @@ use crate::resolver::Plan;
 use crate::ui;
 use std::collections::BTreeMap;
 
-use super::RunReport;
+use super::{BuildFailure, RunReport};
 
 /// Render the resolved [`Plan`] to stderr as aligned `name  version` tables
 /// — one group per source — mirroring the style of [`ui::upgrade_table`] used
@@ -118,8 +118,12 @@ pub(super) fn final_summary(report: &RunReport) {
     for (pb, blocker) in dep_sorted {
         ui::warn(&format!("skipped {pb} (blocked by {blocker})"));
     }
-    let failed_sorted: BTreeMap<&PkgBase, &String> = report.failed.iter().collect();
-    for (pb, msg) in failed_sorted {
-        ui::error(&format!("failed {pb}: {msg}"));
+    let failed_sorted: BTreeMap<&PkgBase, &BuildFailure> = report.failed.iter().collect();
+    for (pb, fail) in failed_sorted {
+        ui::error(&format!(
+            "failed {pb} ({}): {}",
+            fail.phase(),
+            fail.detail()
+        ));
     }
 }

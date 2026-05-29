@@ -4,12 +4,14 @@ use crate::build;
 use crate::cli::Cli;
 use crate::cli::flags::{self, PacFlags};
 use crate::cli::search;
+use crate::cli::upgrade_loop;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::index;
 use crate::mirror;
 use crate::pacman::invoke;
 use crate::ui;
+use std::io::IsTerminal;
 
 /// Top-level routing entry — clap already pre-scanned for pacman-owned ops,
 /// so by this point `cli.args` is gitaur's responsibility (`-S` family,
@@ -19,12 +21,17 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
     let f = flags::parse(argv);
 
     // yay parity: no operation letter and no positional targets → run `-Syu`
-    // (refresh + upgrade). Long-only flags like `--noconfirm` still travel
-    // through `cli`, so the synthetic argv keeps the behaviour the user
-    // configured. Replaces an older "no-args = -Sy only" shortcut: bare
-    // `yay` / bare `paru` both upgrade, and gitaur's lone outlier was a
+    // (refresh + upgrade). Interactively this is the iterative upgrade loop
+    // (refresh once, then picker→apply until done — see `upgrade_loop`); a
+    // non-interactive run (--noconfirm, piped stdin, cron) does a single pass
+    // like explicit `-Syu`. Replaces an older "no-args = -Sy only" shortcut:
+    // bare `yay` / bare `paru` both upgrade, and gitaur's lone outlier was a
     // surprise rather than a feature.
     if f.op.is_none() && f.positional.is_empty() {
+        let interactive = !cli.noconfirm && std::io::stdin().is_terminal();
+        if interactive {
+            return upgrade_loop::run(cfg, cli.devel || cfg.devel);
+        }
         let syu = vec!["-Syu".to_owned()];
         let synth = flags::parse(&syu);
         return handle_s(cfg, cli, &synth, &syu);
@@ -95,7 +102,8 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
         if plan.is_empty() {
             ui::info("nothing to do");
         } else {
-            let sel = ui::select_upgrades(&plan, cfg, noconfirm)
+            // Single-shot `-Syu` has no prior batch, so no row annotations.
+            let sel = ui::select_upgrades(&plan, cfg, noconfirm, &ui::RowAnnotations::default())
                 .map_err(|e| Error::other(format!("upgrade selection: {e}")))?;
             if sel.is_empty() {
                 return Err(Error::UserAbort);
@@ -149,7 +157,9 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
 /// pacman still resolves the full upgrade graph (partial-upgrade safety) but
 /// pins the listed versions. If every repo upgrade was deselected we skip the
 /// pacman call entirely; there's nothing to do (and no point asking for sudo).
-fn run_repo_upgrade(cfg: &Config, sel: &ui::UpgradeSelection) -> Result<u8> {
+///
+/// Shared by the single-shot `-Syu` handler and the no-arg upgrade loop.
+pub(crate) fn run_repo_upgrade(cfg: &Config, sel: &ui::UpgradeSelection) -> Result<u8> {
     if sel.repo.is_empty() {
         return Ok(0);
     }

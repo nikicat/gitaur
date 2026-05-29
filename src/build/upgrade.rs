@@ -4,8 +4,9 @@
 
 use crate::config::Config;
 use crate::error::Result;
-use crate::index::secondary::Secondary;
+use crate::index::secondary::{AurClass, Secondary};
 use crate::index::{self, IndexFile};
+use crate::names::{PkgBase, PkgName};
 use crate::pacman::alpm_db::{self, PacmanIndex};
 use crate::pacman::invoke::{self, PkgUpgrade};
 use crate::paths;
@@ -27,18 +28,81 @@ pub fn cmd_query_upgrades(cfg: &Config, devel: bool) -> Result<u8> {
 /// rendering) and `-Syu` (feeds the interactive picker). Unprivileged —
 /// reads alpm and the AUR index file only.
 pub fn collect_upgrade_plan(cfg: &Config, devel: bool) -> Result<Vec<PkgUpgrade>> {
-    let mut plan = invoke::query_repo_upgrades()?;
-    let idx_path = paths::index_path();
-    if idx_path.exists() {
+    match UpgradeSession::load(cfg)? {
+        Some(session) => session.recompute_remaining(devel),
+        // No AUR index yet (user hasn't run `-Sy`) — repo upgrades only.
+        None => Ok(invoke::query_repo_upgrades()?),
+    }
+}
+
+/// The once-per-session immutable state behind the no-arg `gaur` upgrade loop.
+///
+/// Holds the AUR index plus its secondary lookup maps, loaded exactly once.
+/// The mirror is fetched at session start and never re-fetched mid-loop, so
+/// this view is fixed for the whole session — only the localdb changes as
+/// packages get installed. Each iteration calls [`Self::recompute_remaining`],
+/// which re-snapshots alpm (cheap) and recomputes the candidate list against
+/// this frozen index.
+///
+/// `-Qu` and the non-interactive single-shot path build a session, recompute
+/// once, and drop it — see [`collect_upgrade_plan`].
+pub struct UpgradeSession {
+    idx: IndexFile,
+    by: Secondary,
+}
+
+impl UpgradeSession {
+    /// Load the AUR index + secondary maps once. `Ok(None)` when no index file
+    /// exists yet (no `-Sy` has run), leaving the caller to fall back to a
+    /// repo-only upgrade query.
+    pub fn load(cfg: &Config) -> Result<Option<Self>> {
+        let idx_path = paths::index_path();
+        if !idx_path.exists() {
+            return Ok(None);
+        }
         let idx = index::load_or_resync(cfg, &idx_path)?;
         let by = Secondary::build(&idx);
-        // Same rootless-sync db as `query_repo_upgrades` so the AUR-vs-repo
+        Ok(Some(Self { idx, by }))
+    }
+
+    /// The loaded AUR index — immutable for the session.
+    pub const fn index(&self) -> &IndexFile {
+        &self.idx
+    }
+
+    /// The secondary lookup maps over [`Self::index`].
+    pub const fn secondary(&self) -> &Secondary {
+        &self.by
+    }
+
+    /// The AUR pkgbase that owns a foreign localdb pkgname, or `None` when the
+    /// name isn't in the index. Lets the loop map an AUR upgrade row (keyed by
+    /// pkgname) back to the pkgbase its session badges are keyed on.
+    pub fn pkgbase_of(&self, name: &PkgName) -> Option<&PkgBase> {
+        match self.by.classify_foreign(&self.idx, name) {
+            AurClass::AsPkgname(e) | AurClass::AsProvides(e) | AurClass::AsPkgbase(e) => {
+                Some(&e.pkgbase)
+            }
+            AurClass::NotInAur => None,
+        }
+    }
+
+    /// Re-snapshot the localdb and recompute the remaining upgrade candidates
+    /// (repo ∪ AUR) against the frozen index.
+    ///
+    /// Opens one alpm handle so both halves see one consistent localdb view —
+    /// the per-iteration cost the loop pays (≈10ms), as opposed to the
+    /// once-only index load above.
+    #[instrument(skip(self))]
+    pub fn recompute_remaining(&self, devel: bool) -> Result<Vec<PkgUpgrade>> {
+        // Same rootless-sync db `query_repo_upgrades` uses, so the AUR-vs-repo
         // "foreign" split is computed against one consistent view.
         let alpm = alpm_db::open_synced()?;
+        let mut plan = invoke::query_repo_upgrades_in(&alpm);
         let pac = PacmanIndex::build(&alpm);
-        plan.extend(aur_upgrades(&idx, &by, &pac, devel));
+        plan.extend(aur_upgrades(&self.idx, &self.by, &pac, devel));
+        Ok(plan)
     }
-    Ok(plan)
 }
 
 /// Scan the localdb for foreign pkgs with a newer version in the AUR index.

@@ -17,6 +17,7 @@ use clap::Parser;
 pub mod dispatch;
 pub mod flags;
 pub mod search;
+pub mod upgrade_loop;
 
 /// yay-like AUR helper backed by the github.com/archlinux/aur mirror.
 ///

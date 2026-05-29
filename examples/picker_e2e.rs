@@ -36,7 +36,8 @@ fn main() {
 
     let plan = synthetic_plan(20);
     let cfg = Config::default();
-    let sel = ui::select_upgrades(&plan, &cfg, false).expect("picker failed");
+    let sel = ui::select_upgrades(&plan, &cfg, false, &ui::RowAnnotations::default())
+        .expect("picker failed");
 
     // Echo the selection on stdout so the test can confirm the prompt ran
     // to completion (Enter was actually consumed) rather than aborting on a

@@ -7,6 +7,7 @@ use crate::pacman::alpm_db;
 use crate::runopts;
 use crate::ui;
 use crate::version::Version;
+use alpm::Alpm;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Command;
 use tracing::{debug, info, instrument, warn};
@@ -40,6 +41,15 @@ pub fn query_repo_upgrades() -> Result<Vec<PkgUpgrade>> {
     // refreshed (`-Sy`), so the upgrade list reflects the latest repos without
     // a privileged `pacman -Sy`. Falls back to the system db otherwise.
     let alpm = alpm_db::open_synced()?;
+    Ok(query_repo_upgrades_in(&alpm))
+}
+
+/// Like [`query_repo_upgrades`] but against a caller-supplied handle.
+///
+/// Lets the upgrade loop build the repo and AUR halves of one recompute from a
+/// single localdb snapshot instead of opening alpm twice per iteration.
+#[instrument(skip(alpm))]
+pub fn query_repo_upgrades_in(alpm: &Alpm) -> Vec<PkgUpgrade> {
     let mut upgrades = Vec::new();
     for ipkg in alpm.localdb().pkgs() {
         for db in alpm.syncdbs() {
@@ -66,7 +76,7 @@ pub fn query_repo_upgrades() -> Result<Vec<PkgUpgrade>> {
         }
     }
     debug!(count = upgrades.len(), "alpm repo upgrades scanned");
-    Ok(upgrades)
+    upgrades
 }
 
 /// Exec `pacman` with `argv`, prepending the privilege escalator when needed.
