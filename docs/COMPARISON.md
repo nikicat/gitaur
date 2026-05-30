@@ -18,6 +18,8 @@ the reasoning behind them.
 | PKGBUILD review | — | diff vs prev install | diff vs prev install | diff vs ancestor commit by `.SRCINFO` version |
 | Build orchestration | — | sequential | sequential | stratified by makedepends DAG |
 | Sudo prompts per `-S` | per call | per AUR pkg | per AUR pkg | one batched `pacman -U` at end |
+| Missing PGP keys | — | proposes auto-import | proposes auto-import | left to user's keyring (build fails loudly) |
+| Fetch PKGBUILD to CWD | `pkgctl repo clone` (separate tool) | `-G` clones AUR repo into CWD | `-G` / `-Gp` (print) | no `-G` — full mirror already on disk (see below) |
 | Configuration | `pacman.conf` | `~/.config/yay/config.json` | `~/.config/paru/paru.conf` | `~/.config/gitaur/config.toml` |
 
 Read on for the parts that aren't obvious from the matrix.
@@ -245,6 +247,39 @@ A foreign pkg that's not in any syncdb AND not in AUR is invisible to
 yay's "Packages not in AUR" message in `-Syu` is one way to surface
 this. gitaur could add a `-Qf` (foreign-not-in-AUR list) or fold it
 into `-Qu`'s output. Open.
+
+### `-G` (getpkgbuild): copy the package dir for hacking and pushing back
+
+**yay/paru behavior:** `yay -G <pkg>` git-clones the package's AUR repo into
+the current working directory so the user can patch it and hand-build (or
+push a fix back to the AUR); `paru -Gp <pkg>` prints the PKGBUILD to stdout.
+Because both go through `git clone`, the resulting dir *does* get an `origin`
+remote automatically — but it's the default `AURURL`, i.e.
+`https://aur.archlinux.org/<pkgbase>.git`, and AUR's HTTPS endpoint is
+**fetch-only**. So the clone is ready to pull, not to push: to land a patch
+the user has to rewrite the remote to the SSH form
+(`ssh://aur@aur.archlinux.org/<pkgbase>.git`) by hand first.
+
+**Current gitaur behavior:** there's no `-G` yet. Dispatch only owns the `-S`
+family and bare `-Qu`; everything else is pacman pass-through.
+
+**Why it's nearly free for gitaur:** gitaur already holds the *entire* AUR
+mirror locally (`~/.local/state/gitaur/aur`, see
+[AUR data source](#aur-data-source-full-mirror-clone-instead-of-rpc)), and
+each pkgbase is a real git checkout with full history — not a tarball of the
+current files. So `-G` doesn't need a network fetch or any worktree
+machinery: it resolves the pkgbase against the index and **copies the
+package directory into `./`**. Because the copy carries the pkgbase's git
+history — and gets its `origin` set straight to the *pushable* AUR remote
+(`ssh://aur@aur.archlinux.org/<pkgbase>.git`), not the fetch-only HTTPS URL
+yay/paru leave behind — the user can edit, `git commit`, and `git push` the
+fix straight back to the AUR with no remote-rewriting and no extra clone
+step. That's the one concrete improvement over yay/paru's `-G` here: same
+hack/patch workflow, but the dir lands push-ready.
+
+**Status:** not implemented; the design is settled (plain dir copy, AUR push
+remote), it just hasn't been wired into dispatch. A `-Gp` print-to-stdout
+variant would fall out of the same pkgbase resolution.
 
 ### Index format upgrades and the rkyv FORMAT_VERSION
 
