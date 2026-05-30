@@ -263,6 +263,24 @@ merging non-trivial changes to `resolver/`, `build/`, or `pacman/`.
 
 ## When tests fail
 
+Check these two podman-suite quirks **first** — they cause the same
+confusing failures over and over:
+
+- **Stale image after a fixture change.** The container image bakes in the
+  mock AUR + local repo from `fixtures/*/` at *image-build* time. `run.sh`
+  recompiles and mounts the `gaur` binary every run, but only rebuilds the
+  **image** on `--rebuild` (or when it's absent). So after editing a fixture
+  (`PKGBUILD`/`repo`/`commit-date`), the `Dockerfile`, or `setup-fixtures.sh`,
+  you **must**
+  `tests/container/run.sh --rebuild`. Telltale symptom: a new fixture fails
+  with `error: unknown target(s): <fixture>`, or a changed PKGBUILD silently
+  runs its old contents. This is a stale image, **not** a binary/source
+  bug — don't go editing Rust to chase it. Source-only changes never need
+  `--rebuild`.
+- **Parallelism flakes.** Default `-j $(nproc)`; under host contention a lone
+  script can fail and then pass in isolation. Confirm with
+  `tests/container/run.sh smoke/NN_*.sh` or `-j1` before treating it as real.
+
 Per project rule (`memory/feedback_*`):
 
 - **No workarounds in tests.** If the test reveals a bug in gitaur, fix
