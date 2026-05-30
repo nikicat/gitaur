@@ -8,7 +8,6 @@
 use super::sync;
 use crate::error::{Error, Result};
 use crate::index::schema::IndexEntry;
-use crate::index::secondary::strip_version_constraint;
 use crate::names::{PkgName, PkgTarget};
 use crate::version::{Ver, Version};
 use alpm::Alpm;
@@ -489,11 +488,7 @@ impl PacmanIndex {
                 via: MatchedVia::Pkgname,
             });
         }
-        if entry
-            .replaces
-            .iter()
-            .any(|r| stored_name == strip_version_constraint(r))
-        {
+        if entry.replaces.iter().any(|r| stored_name == r.bare()) {
             return Some(InstalledCounterpart {
                 pkgname: stored_name,
                 version,
@@ -504,11 +499,8 @@ impl PacmanIndex {
             .pkgnames
             .iter()
             .flat_map(|p| &p.provides)
-            .any(|prov| stored_name == strip_version_constraint(prov));
-        let in_pkgbase_provides = entry
-            .provides
-            .iter()
-            .any(|prov| stored_name == strip_version_constraint(prov));
+            .any(|prov| stored_name == prov.bare());
+        let in_pkgbase_provides = entry.provides.iter().any(|prov| stored_name == prov.bare());
         if in_scoped_provides || in_pkgbase_provides {
             return Some(InstalledCounterpart {
                 pkgname: stored_name,
@@ -545,8 +537,7 @@ impl PacmanIndex {
         }
         // 2. Replaces — explicit rename declaration.
         for r in &entry.replaces {
-            let name = strip_version_constraint(r);
-            if let Some((stored_name, version)) = self.installed.get_key_value(name) {
+            if let Some((stored_name, version)) = self.installed.get_key_value(r.bare()) {
                 return Some(InstalledCounterpart {
                     pkgname: stored_name,
                     version,
@@ -561,8 +552,7 @@ impl PacmanIndex {
         let mut provides_matches: Vec<(&PkgName, &Ver)> = Vec::new();
         let scoped_provs = entry.pkgnames.iter().flat_map(|p| &p.provides);
         for prov in scoped_provs.chain(entry.provides.iter()) {
-            let name = strip_version_constraint(prov);
-            if let Some((stored_name, version)) = self.installed.get_key_value(name)
+            if let Some((stored_name, version)) = self.installed.get_key_value(prov.bare())
                 && !provides_matches.iter().any(|(n, _)| *n == stored_name)
             {
                 provides_matches.push((stored_name, version.as_ver()));

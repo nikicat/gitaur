@@ -191,7 +191,7 @@ fn print_info(e: &IndexEntry) {
     // Union of pkgbase-level and pkgname-scoped provides — `-Si` users
     // want to see every virtual name the pkgbase makes available, not the
     // attribution.
-    let provides: Vec<&str> = e.all_provides().collect();
+    let provides: Vec<String> = e.all_provides().map(ToString::to_string).collect();
     if !provides.is_empty() {
         println!("Provides        : {}", provides.join(" "));
     }

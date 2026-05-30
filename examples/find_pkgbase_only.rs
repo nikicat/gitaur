@@ -28,7 +28,7 @@ fn main() {
         // Skip when any pkgname's provides (or a pkgbase-level provides)
         // covers the bare pkgbase — those would short-circuit through
         // `provider_of` before reaching the pkgbase branch.
-        if entry.all_provides().any(|x| pb == x) {
+        if entry.all_provides().any(|x| x.refers_to(pb)) {
             continue;
         }
         // Cross-domain probe: does the pkgbase string also appear as a

@@ -7,6 +7,7 @@
 
 use crate::error::{Error, Result};
 use crate::index::schema::{IndexEntry, Pkgname};
+use crate::names::PkgTarget;
 use tracing::trace;
 
 /// Array-valued keys that may carry an arch suffix (`<key>_<arch>`).
@@ -79,9 +80,14 @@ pub fn parse(text: &str) -> Result<IndexEntry> {
             // Every other array key stays pkgbase-flat — we don't (yet) need
             // pkgname-level depends/conflicts/replaces for resolution.
             "provides" => match current_pkgname {
-                None => e.provides.push(v.into()),
-                Some(i) => e.pkgnames[i].provides.push(v.into()),
+                None => e.provides.push(PkgTarget::new(v)),
+                Some(i) => e.pkgnames[i].provides.push(PkgTarget::new(v)),
             },
+            // `conflicts` / `replaces` are typed dep-specs (versioned-name);
+            // routed separately from depends/makedepends/checkdepends/optdepends
+            // which remain raw `String` until / unless they get typed too.
+            "conflicts" => e.conflicts.push(PkgTarget::new(v)),
+            "replaces" => e.replaces.push(PkgTarget::new(v)),
             list_key if ARRAY_KEYS.contains(&list_key) => {
                 list_field_mut(&mut e, list_key).push(v.into());
             }
@@ -112,13 +118,13 @@ pub fn parse(text: &str) -> Result<IndexEntry> {
         &mut e.makedepends,
         &mut e.checkdepends,
         &mut e.optdepends,
-        &mut e.provides,
-        &mut e.conflicts,
-        &mut e.replaces,
         &mut e.arch,
     ] {
         dedup(v);
     }
+    dedup(&mut e.provides);
+    dedup(&mut e.conflicts);
+    dedup(&mut e.replaces);
     // Dedupe per-pkgname provides; also collapse duplicate pkgname entries
     // (rare malformed .SRCINFOs ship the same `pkgname = X` twice).
     for p in &mut e.pkgnames {
@@ -144,22 +150,21 @@ fn canonical(k: &str) -> &str {
     k
 }
 
-/// Lookup the `&mut Vec<String>` for one of the array-valued keys. `provides`
-/// is handled in the match above (it routes by section, not by key), so it
-/// is intentionally absent here.
+/// Lookup the `&mut Vec<String>` for the still-raw array-valued keys.
+/// `provides` / `conflicts` / `replaces` are typed `Vec<PkgTarget>` and
+/// handled in the match above (they route by section / type, not by this
+/// String table), so they are intentionally absent here.
 fn list_field_mut<'a>(e: &'a mut IndexEntry, key: &str) -> &'a mut Vec<String> {
     match key {
         "depends" => &mut e.depends,
         "makedepends" => &mut e.makedepends,
         "checkdepends" => &mut e.checkdepends,
         "optdepends" => &mut e.optdepends,
-        "conflicts" => &mut e.conflicts,
-        "replaces" => &mut e.replaces,
         _ => unreachable!("ARRAY_KEYS membership and provides routing checked before call"),
     }
 }
 
-fn dedup(v: &mut Vec<String>) {
+fn dedup<T: Eq + std::hash::Hash + Clone>(v: &mut Vec<T>) {
     let mut seen = std::collections::HashSet::new();
     v.retain(|s| seen.insert(s.clone()));
 }
@@ -236,9 +241,9 @@ pkgname = bisq-daemon
         assert!(e.depends.contains(&"pacman".to_owned()));
         assert!(e.depends.contains(&"curl".to_owned()));
         // Pkgbase-level provides land on the entry, not on the pkgname.
-        assert!(e.provides.contains(&"cower".to_owned()));
+        assert!(e.provides.contains(&PkgTarget::new("cower")));
         assert!(e.pkgnames[0].provides.is_empty());
-        assert!(e.conflicts.contains(&"cower-git".to_owned()));
+        assert!(e.conflicts.contains(&PkgTarget::new("cower-git")));
         assert!(e.arch.contains(&"x86_64".to_owned()));
     }
 
@@ -276,12 +281,12 @@ pkgname = bisq-daemon
             e.provides.is_empty(),
             "no pkgbase-level provides → e.provides must be empty",
         );
-        assert_eq!(e.pkgnames[0].provides, vec!["bisq".to_owned()]);
+        assert_eq!(e.pkgnames[0].provides, vec![PkgTarget::new("bisq")]);
         assert!(e.pkgnames[1].provides.is_empty());
         assert!(e.pkgnames[2].provides.is_empty());
         // all_provides() unions both buckets, regardless of attribution.
-        let all: Vec<&str> = e.all_provides().collect();
-        assert_eq!(all, vec!["bisq"]);
+        let all: Vec<&PkgTarget> = e.all_provides().collect();
+        assert_eq!(all, vec![&PkgTarget::new("bisq")]);
     }
 
     #[test]
@@ -293,7 +298,7 @@ pkgname = bisq-daemon
         // the same lookup either way.
         let s = "pkgbase = foo\npkgver = 1\npkgrel = 1\nprovides = bar\npkgname = foo\npkgname = foo-extras\n";
         let e = parse(s).unwrap();
-        assert_eq!(e.provides, vec!["bar".to_owned()]);
+        assert_eq!(e.provides, vec![PkgTarget::new("bar")]);
         for p in &e.pkgnames {
             assert!(p.provides.is_empty());
         }
@@ -307,7 +312,7 @@ pkgname = bisq-daemon
         let s = "pkgbase = foo\npkgver = 1\npkgrel = 1\npkgname = foo\ndepends_x86_64 = libfoo\nprovides_aarch64 = bar\n";
         let e = parse(s).unwrap();
         assert!(e.depends.contains(&"libfoo".to_owned()));
-        assert_eq!(e.pkgnames[0].provides, vec!["bar".to_owned()]);
+        assert_eq!(e.pkgnames[0].provides, vec![PkgTarget::new("bar")]);
         assert!(e.provides.is_empty());
     }
 

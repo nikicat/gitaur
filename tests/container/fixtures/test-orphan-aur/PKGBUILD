@@ -1,0 +1,19 @@
+# AUR pkg that PROVIDES `test-orphan-foreign` but also CONFLICTS with it
+# (no `replaces=`). This is the dotnet-core-7.0-bin shape: an alternative
+# implementation offered as a switch, not a transparent upgrade.
+#
+# `gaur -Qu` must NOT list this as an auto-upgrade candidate for the
+# installed `test-orphan-foreign` — pacman's "Remove test-orphan-foreign?"
+# defaults to N under --noconfirm, and the user has to opt in by hand.
+pkgname=test-orphan-aur
+pkgver=2.0
+pkgrel=1
+pkgdesc='gitaur test fixture: AUR pkg that provides but conflicts (no replaces)'
+arch=('any')
+license=('MIT')
+provides=('test-orphan-foreign')
+conflicts=('test-orphan-foreign')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

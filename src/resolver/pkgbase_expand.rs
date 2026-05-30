@@ -246,12 +246,10 @@ fn decide_virtual(idx: &IndexFile, by: &Secondary, bare: &str) -> TargetDecision
         pkgname = %pkgname,
         "rewrote provides target to providing pkgbase",
     );
-    let scoped = entry.pkgnames.iter().any(|p| {
-        &p.name == pkgname
-            && p.provides
-                .iter()
-                .any(|x| secondary::strip_version_constraint(x) == bare)
-    });
+    let scoped = entry
+        .pkgnames
+        .iter()
+        .any(|p| &p.name == pkgname && p.provides.iter().any(|x| x.bare() == bare));
     let selection = (scoped && entry.pkgnames.len() > 1).then(|| {
         let chosen = chosen_with_sibling_deps(entry, pkgname);
         (entry.pkgbase.clone(), chosen)

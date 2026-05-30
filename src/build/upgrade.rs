@@ -4,6 +4,7 @@
 
 use crate::config::Config;
 use crate::error::Result;
+use crate::index::schema::IndexEntry;
 use crate::index::secondary::{AurClass, Secondary};
 use crate::index::{self, IndexFile};
 use crate::names::{PkgBase, PkgName};
@@ -126,7 +127,27 @@ fn aur_upgrades(
         // `provides=` declaration).
         use crate::index::secondary::AurClass;
         let entry = match by.classify_foreign(idx, &name) {
-            AurClass::AsPkgname(e) | AurClass::AsProvides(e) | AurClass::AsPkgbase(e) => e,
+            AurClass::AsPkgname(e) => e,
+            // The cross-rename path (provides/pkgbase match): the candidate
+            // pkgbase isn't named after the installed pkg, it just declares it
+            // satisfies the same virtual. Some such pkgs ALSO declare
+            // `conflicts=<installed-name>` without `replaces=<installed-name>`
+            // — a replacement that needs the user's explicit consent, not a
+            // transparent upgrade. Pacman would prompt "Remove X?" and abort
+            // under `--noconfirm`. Skip with a structured warn so the user
+            // can find these orphans in the log and opt in by hand.
+            AurClass::AsProvides(e) | AurClass::AsPkgbase(e) => {
+                if !is_transparent_upgrade_for(e, &name) {
+                    warn!(
+                        installed = %name,
+                        pkgbase = %e.pkgbase,
+                        "AUR pkgbase provides this pkg but also conflicts with it without a replaces= — skipped as auto-upgrade; opt in with `gaur -S {}` to switch",
+                        e.pkgbase,
+                    );
+                    continue;
+                }
+                e
+            }
             AurClass::NotInAur => {
                 if !name.is_makepkg_debug_split() {
                     warn!(%name, "foreign pkg not in AUR index");
@@ -152,6 +173,37 @@ fn aur_upgrades(
         }
     }
     out
+}
+
+/// Whether `entry` is a transparent upgrade target for an installed pkg
+/// named `name` — i.e. a `pacman -U` of `entry`'s artifacts would not need
+/// the user to consent to removing `name` first.
+///
+/// Rules, in order:
+///
+/// * Direct pkgname match: `name` IS one of the pkgbase's own pkgnames.
+///   Always transparent — the entry literally is the installed pkg.
+/// * Cross-rename via `provides=name`: transparent iff the entry does NOT
+///   also declare `conflicts=name`. A `conflicts=name` says "I take over
+///   this slot but you have to remove the old `name` first", and pacman's
+///   "Remove `name`? [y/N]" question defaults to N under `--noconfirm`.
+/// * `conflicts=name` paired with `replaces=name`: still transparent. The
+///   `replaces=` flips pacman's default to yes, so the swap happens
+///   automatically without a user prompt.
+///
+/// Real-world trigger (dotnet-runtime-7.0 → dotnet-core-7.0-bin): the AUR
+/// pkgbase declares `provides=dotnet-runtime-7.0` AND
+/// `conflicts=dotnet-runtime-7.0` AND no `replaces=`, so it's a switch the
+/// user must opt into explicitly. Auto-queueing it from `-Qu`/`-Syu` just
+/// produces a `failed to prepare transaction` every loop iteration.
+fn is_transparent_upgrade_for(entry: &IndexEntry, name: &PkgName) -> bool {
+    if entry.pkgnames.iter().any(|p| p.name == *name) {
+        return true;
+    }
+    if !entry.conflicts.iter().any(|c| c.refers_to(name)) {
+        return true;
+    }
+    entry.replaces.iter().any(|r| r.refers_to(name))
 }
 
 // `-debug` recognition is on `PkgName::is_makepkg_debug_split` — see
@@ -251,5 +303,111 @@ mod tests {
         let pac = pac_with_foreign(&[("foo-debug", "1.0-1"), ("orphan-pkg", "1.0-1")]);
         assert!(aur_upgrades(&i, &s, &pac, false).is_empty());
         assert!(aur_upgrades(&i, &s, &pac, true).is_empty());
+    }
+
+    /// `is_transparent_upgrade_for` coverage. The principle: a pkgbase is
+    /// transparent when (a) it owns the installed pkgname directly, OR
+    /// (b) it provides the pkgname without conflicting with it, OR (c)
+    /// it conflicts AND replaces (pacman auto-handles the swap).
+    use crate::names::PkgTarget;
+
+    fn entry_with(
+        pkgbase: &str,
+        provides: &[&str],
+        conflicts: &[&str],
+        replaces: &[&str],
+    ) -> IndexEntry {
+        IndexEntry {
+            pkgbase: pkgbase.into(),
+            pkgnames: vec![Pkgname {
+                name: pkgbase.into(),
+                provides: Vec::new(),
+                pkgdesc: None,
+            }],
+            provides: provides.iter().map(|s| PkgTarget::new(*s)).collect(),
+            conflicts: conflicts.iter().map(|s| PkgTarget::new(*s)).collect(),
+            replaces: replaces.iter().map(|s| PkgTarget::new(*s)).collect(),
+            pkgver: "1".into(),
+            pkgrel: "1".into(),
+            ..IndexEntry::default()
+        }
+    }
+
+    #[test]
+    fn direct_pkgname_match_is_transparent() {
+        // Even with a (nonsensical) self-conflict declared, the direct
+        // pkgname match wins — the entry literally IS `foo`.
+        let e = entry_with("foo", &[], &["foo"], &[]);
+        assert!(is_transparent_upgrade_for(&e, &PkgName::from("foo")));
+    }
+
+    #[test]
+    fn provides_only_is_transparent() {
+        let e = entry_with("new-foo", &["foo"], &[], &[]);
+        assert!(is_transparent_upgrade_for(&e, &PkgName::from("foo")));
+    }
+
+    /// The dotnet-runtime-7.0 case: provides + conflicts, NO replaces.
+    /// Pacman's "Remove foo?" defaults to N under --noconfirm.
+    #[test]
+    fn provides_with_conflicts_without_replaces_is_not_transparent() {
+        let e = entry_with("new-foo-bin", &["foo"], &["foo"], &[]);
+        assert!(!is_transparent_upgrade_for(&e, &PkgName::from("foo")));
+    }
+
+    /// A renaming migration: provides + conflicts + replaces. Pacman
+    /// auto-replaces with no prompt — transparent.
+    #[test]
+    fn provides_with_conflicts_and_replaces_is_transparent() {
+        let e = entry_with("new-foo", &["foo"], &["foo"], &["foo"]);
+        assert!(is_transparent_upgrade_for(&e, &PkgName::from("foo")));
+    }
+
+    /// Version constraints in conflicts/replaces are stripped via
+    /// `PkgTarget::bare()` before the name compare.
+    #[test]
+    fn version_constraints_in_conflicts_are_stripped() {
+        let e = entry_with("new-foo-bin", &["foo"], &["foo>=1.0"], &[]);
+        assert!(!is_transparent_upgrade_for(&e, &PkgName::from("foo")));
+        let e2 = entry_with("new-foo", &["foo"], &["foo>=1.0"], &["foo<2.0"]);
+        assert!(is_transparent_upgrade_for(&e2, &PkgName::from("foo")));
+    }
+
+    /// Integration: a foreign pkg whose only AUR match is a conflicting
+    /// pkgbase (provides + conflicts, no replaces) is NOT queued for
+    /// upgrade. Regression target for the dotnet-runtime-7.0 →
+    /// dotnet-core-7.0-bin trap that produced `failed to prepare
+    /// transaction` every loop iteration.
+    #[test]
+    fn provides_with_conflict_skipped_in_aur_upgrades() {
+        let e = entry_with("new-foo-bin", &["foo"], &["foo"], &[]);
+        let i = idx(vec![IndexEntry {
+            pkgver: "2".into(),
+            ..e
+        }]);
+        let s = Secondary::build(&i);
+        let pac = pac_with_foreign(&[("foo", "1-1")]);
+        let out = aur_upgrades(&i, &s, &pac, false);
+        assert!(
+            out.is_empty(),
+            "conflicting pkgbase should not auto-upgrade `foo`; got: {out:?}",
+        );
+    }
+
+    /// Integration: a provides-only match still produces an upgrade row.
+    /// Guards the existing dotnet-rename path against over-aggressive
+    /// filtering.
+    #[test]
+    fn provides_only_still_produces_aur_upgrade() {
+        let e = entry_with("new-foo", &["foo"], &[], &[]);
+        let i = idx(vec![IndexEntry {
+            pkgver: "2".into(),
+            ..e
+        }]);
+        let s = Secondary::build(&i);
+        let pac = pac_with_foreign(&[("foo", "1-1")]);
+        let out = aur_upgrades(&i, &s, &pac, false);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, PkgName::from("foo"));
     }
 }

@@ -1,6 +1,6 @@
 //! On-disk index schema. Persisted via `rkyv 0.8` zero-copy archive.
 
-use crate::names::{PkgBase, PkgName};
+use crate::names::{PkgBase, PkgName, PkgTarget};
 use crate::version::Version;
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -23,7 +23,7 @@ pub struct Pkgname {
     /// `provides = …` declared inside this pkgname's section in `.SRCINFO`.
     /// Empty for the common case where a pkgbase declares all its provides
     /// at the top level.
-    pub provides: Vec<String>,
+    pub provides: Vec<PkgTarget>,
     /// `pkgdesc = …` declared inside this pkgname's section in `.SRCINFO`.
     /// `None` when the description is declared once at the pkgbase level
     /// (the common non-split case) — that value lives on
@@ -64,11 +64,11 @@ pub struct IndexEntry {
     /// live on [`Pkgname::provides`] inside `pkgnames`. Callers that don't
     /// care about attribution should use [`IndexEntry::all_provides`] to
     /// iterate both buckets together.
-    pub provides: Vec<String>,
+    pub provides: Vec<PkgTarget>,
     /// `conflicts` declarations.
-    pub conflicts: Vec<String>,
+    pub conflicts: Vec<PkgTarget>,
     /// `replaces` declarations.
-    pub replaces: Vec<String>,
+    pub replaces: Vec<PkgTarget>,
     /// Supported `arch` list.
     pub arch: Vec<String>,
     /// Commit OID of the branch tip that produced this entry.
@@ -106,12 +106,10 @@ impl IndexEntry {
     /// pkgbase-level first, then each pkgname's scoped provides. Order is
     /// not significant; callers that need attribution should walk
     /// `pkgnames` directly.
-    pub fn all_provides(&self) -> impl Iterator<Item = &str> {
-        self.provides.iter().map(String::as_str).chain(
-            self.pkgnames
-                .iter()
-                .flat_map(|p| p.provides.iter().map(String::as_str)),
-        )
+    pub fn all_provides(&self) -> impl Iterator<Item = &PkgTarget> {
+        self.provides
+            .iter()
+            .chain(self.pkgnames.iter().flat_map(|p| p.provides.iter()))
     }
 
     /// Headline one-line description for the pkgbase row shown in the picker,
@@ -162,12 +160,15 @@ impl IndexFile {
     /// [`IndexEntry::commit_time_unix`] was added (the branch-tip committer
     /// timestamp the search picker sorts on). Was **3** when `pkgbase` and
     /// `Pkgname.name` switched from `String` to the typed `PkgBase` / `PkgName`
-    /// newtypes. rkyv archives are distinct per Rust type even when the
-    /// underlying bytes match, and a new field shifts the layout, so loading an
-    /// older file with newer types would silently mis-shape the deserialized
+    /// newtypes. **5 → 6** when `provides` / `conflicts` / `replaces` switched
+    /// from `Vec<String>` to `Vec<PkgTarget>` — same bytes, distinct rkyv
+    /// archive type, so the version gate forces a rebuild via `gaur -Sy`.
+    /// rkyv archives are distinct per Rust type even when the underlying
+    /// bytes match, and a new field shifts the layout, so loading an older
+    /// file with newer types would silently mis-shape the deserialized
     /// struct without the version gate. Older archives must be rebuilt via
     /// `gaur -Sy`.
-    pub const FORMAT_VERSION: u32 = 5;
+    pub const FORMAT_VERSION: u32 = 6;
 
     /// Empty in-memory index. Used when no on-disk file exists yet.
     pub const fn empty() -> Self {

@@ -1,0 +1,14 @@
+# Foreign baseline for smoke 58: a pkg installed locally that was once
+# in a sync repo but is no longer. Models the dotnet-runtime-7.0 state
+# (Arch's `extra/` dropped 7.0, but the user still wants it). Staged
+# under /srv/foreign-pkgs/ — installed via `install_foreign`.
+pkgname=test-orphan-foreign
+pkgver=1.0
+pkgrel=1
+pkgdesc='gitaur test fixture: foreign pkg with no transparent AUR upgrade'
+arch=('any')
+license=('MIT')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

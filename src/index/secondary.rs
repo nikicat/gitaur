@@ -75,13 +75,12 @@ impl Secondary {
             // which the resolver uses when rewriting `-S <virtual-name>`
             // into the concrete pkgname.
             for prov in e.all_provides() {
-                let base = strip_version_constraint(prov);
-                // Promote the bare `provides=` line to a typed
-                // `VirtualName` at this single boundary. Distinct from
-                // `PkgName` even when lexically identical (the dotnet
+                // Promote the typed dep-spec to a typed `VirtualName` at this
+                // single boundary, stripping any version constraint. Distinct
+                // from `PkgName` even when lexically identical (the dotnet
                 // case).
                 by_provides
-                    .entry(VirtualName::new(base))
+                    .entry(VirtualName::new(prov.bare()))
                     .or_default()
                     .push(i);
             }
@@ -122,11 +121,7 @@ impl Secondary {
         // Prefer the pkgname that explicitly declared this provides; that's
         // the case the bisq/yay parity work was added for.
         for pkg in &entry.pkgnames {
-            if pkg
-                .provides
-                .iter()
-                .any(|p| strip_version_constraint(p) == bare)
-            {
+            if pkg.provides.iter().any(|p| p.bare() == bare) {
                 return Some((entry_idx as usize, &pkg.name));
             }
         }
@@ -224,7 +219,7 @@ fn entry_matches(e: &IndexEntry, r: &regex::Regex) -> bool {
         .iter()
         .any(|p| p.name.matches_regex(r) || p.pkgdesc.as_deref().is_some_and(|d| r.is_match(d)))
         || e.pkgdesc.as_deref().is_some_and(|d| r.is_match(d))
-        || e.all_provides().any(|p| r.is_match(p))
+        || e.all_provides().any(|p| p.matches_regex(r))
 }
 
 /// Strip pacman dep operators (`>=`, `=`, `<`, …) plus the version expression.
@@ -242,6 +237,7 @@ mod tests {
     use super::*;
 
     use crate::index::schema::Pkgname;
+    use crate::names::PkgTarget;
 
     /// Construct a pkgbase entry whose `provides` live at the pkgbase level
     /// (apply to every pkgname implicitly — matches the common AUR shape).
@@ -256,7 +252,7 @@ mod tests {
                     pkgdesc: None,
                 })
                 .collect(),
-            provides: provides.iter().map(|s| (*s).into()).collect(),
+            provides: provides.iter().map(|s| PkgTarget::new(*s)).collect(),
             pkgver: "1".into(),
             pkgrel: "1".into(),
             ..Default::default()
@@ -273,7 +269,7 @@ mod tests {
     ) -> IndexEntry {
         let mut pkgnames = vec![Pkgname {
             name: owner.into(),
-            provides: owner_provides.iter().map(|s| (*s).into()).collect(),
+            provides: owner_provides.iter().map(|s| PkgTarget::new(*s)).collect(),
             pkgdesc: None,
         }];
         for o in others {

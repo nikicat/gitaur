@@ -38,9 +38,10 @@
 //!     plus an optional version constraint; only classifiable after
 //!     `expand_pkgbase_targets` runs.
 //!   * The alpm crate boundary — `alpm::Alpm` consumes plain `&str`.
-//!   * `provides=` declarations — semantically a third kind of name
-//!     (virtual), but they live inside `Vec<String>` on `IndexEntry` and
-//!     the parser feeds them in unchanged.
+//!   * The alpm crate boundary already noted above; pkgbase-level
+//!     `provides=`/`conflicts=`/`replaces=` declarations in `IndexEntry`
+//!     are typed as `Vec<PkgTarget>` (versioned dep specs), with their
+//!     bare name retrievable via [`PkgTarget::bare`].
 
 use regex::Regex;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -66,19 +67,28 @@ pub struct PkgName(String);
 #[rkyv(compare(PartialEq, PartialOrd))]
 pub struct PkgBase(String);
 
-/// A user-typed install target — unclassified.
+/// An unclassified dep-shaped name — pkgname, pkgbase, virtual, or
+/// versioned (`foo>=1.2`).
 ///
-/// Could be any of pkgname / pkgbase / virtual provides name / `repo/pkg`
-/// / versioned dep expression (`foo>=1.2`). Only once
-/// [`crate::resolver::pkgbase_expand`] resolves it do we know which kind
-/// it is — at which point it's reborn as a `PkgBase` (rewritten) or kept
-/// as a `String` passthrough for the resolver.
+/// Two distinct provenances feed this type:
+///
+/// * **User-typed install targets** at the CLI / picker boundary, where
+///   [`crate::resolver::pkgbase_expand`] later resolves each into a
+///   `PkgBase` (rewritten) or keeps it as a String passthrough.
+/// * **AUR-declared dep specs** in `IndexEntry.{provides,conflicts,
+///   replaces}` and `Pkgname.provides`, parsed once from `.SRCINFO` and
+///   archived in the rkyv index. These can carry version constraints, so
+///   they can't reduce to `PkgName` / `VirtualName` (which are bare-name
+///   types).
 ///
 /// The point of the type is to make "I haven't classified this yet" a
 /// compile-time fact: a function taking `&PkgTarget` cannot be handed a
-/// `&PkgName` or `&PkgBase`, so the heterogeneous CLI/picker boundary
-/// can't be mistaken for a classified one.
-#[derive(Debug, Clone, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+/// `&PkgName` or `&PkgBase`, so the heterogeneous CLI / index-archive
+/// boundaries can't be mistaken for a classified one.
+#[derive(
+    Archive, Serialize, Deserialize, Debug, Clone, Default, Hash, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[rkyv(compare(PartialEq, PartialOrd))]
 pub struct PkgTarget(String);
 
 /// A virtual name declared in an AUR pkg's `provides=` array — **not** a pkgname.
@@ -245,6 +255,20 @@ impl PkgTarget {
             }
         }
         self.0.trim()
+    }
+
+    /// Cross-identity bridge: "does this dep-spec's bare name name the
+    /// given identifier?" Encapsulates the single `Borrow<str>` step
+    /// between the typed dep-spec (`provides=`/`conflicts=`/`replaces=` in
+    /// `IndexEntry`) and any typed name (`PkgName`, `PkgBase`, …) so call
+    /// sites read as a domain operation, not a string compare. Uses the
+    /// same `Borrow<str>` trait that `HashMap<PkgBase, V>::get("foo")`
+    /// already relies on as the canonical "names a pkg identifier" cast.
+    pub fn refers_to<N>(&self, name: &N) -> bool
+    where
+        N: ?Sized + Borrow<str>,
+    {
+        self.bare() == name.borrow()
     }
 }
 
