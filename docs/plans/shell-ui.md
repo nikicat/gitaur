@@ -1,6 +1,6 @@
 # Plan: shell-like (REPL) UI for interactive `gaur`
 
-Status: phases 1–2 implemented; cart / approval / commit (phase 3+) proposed.
+Status: phases 1–2 implemented; cart / approval / apply (phase 3+) proposed.
 
 ## Goal
 
@@ -14,9 +14,9 @@ fixed order.
 The headline flow is the upgrade procedure: `upgrade` refreshes the indexes and
 stages the available upgrades; the user refines the set (`discard`/`add`),
 approves the AUR packages (`review`/`approve`; repo packages auto-approve), and
-runs `commit`. A `commit` interrupted or failed mid-build drops back to the
+runs `apply`. An `apply` interrupted or failed mid-build drops back to the
 shell — not out of gaur — with the cart intact, so the user can `discard` the
-offender and `commit` the rest.
+offender and `apply` the rest.
 
 ```
 $ gaur
@@ -38,11 +38,11 @@ gaur> approve yubikey-personalization   # approve without opening a diff
 gaur> show
 :: transaction — 13 package(s), +2 deps · all approved
    …change-set table with sizes + build-time + total…
-gaur> commit
+gaur> apply
    …build + install, one sudo batch…
    ✗ firefox-git failed to build — dropped back to the shell
 gaur> discard firefox-git
-gaur> commit                            # retry the rest; firefox-git no longer staged
+gaur> apply                             # retry the rest; firefox-git no longer staged
    …done…
 gaur> quit
 ```
@@ -55,22 +55,22 @@ gaur> quit
    Non-interactive bare `gaur` (pipe / cron / `--noconfirm`) still does a single
    `-Syu` pass. The shell is *strictly* the interactive no-arg path.
 2. **Words-only command vocabulary.** `search` `info` `add` `discard` `remove`
-   `upgrade` `review` `approve` `show` `commit` `clear` `refresh` `help` `quit`.
+   `upgrade` `review` `approve` `show` `apply` `clear` `refresh` `help` `quit`.
    No pacman-letter clusters, no clap. Note the three distinct removal-ish verbs:
    `discard` un-stages from the cart, `remove` *stages an uninstall* (`pacman -R`),
    `clear` empties the whole cart.
-3. **Staged transaction with an approval gate, run by `commit`.**
+3. **Staged transaction with an approval gate, run by `apply`.**
    `upgrade`/`add`/`discard`/`remove` build a pending set across many commands.
    Every staged package carries an approval state: **repo packages auto-approve;
    AUR packages need review by default (configurable).** `review`/`approve` move
-   AUR items to approved. `commit` runs the build+install **only when every
+   AUR items to approved. `apply` runs the build+install **only when every
    staged package is approved**, in one transaction. This unifies fresh-install
    and upgrade and subsumes today's `upgrade_loop`.
-4. **`upgrade` is a procedure; `commit` is resumable.** `upgrade` refreshes the
-   mirror+index, recomputes available upgrades, and seeds the cart with them. A
-   `commit` interrupted (Ctrl+C) or failed mid-build drops back to the *shell*
+4. **`upgrade` is a procedure; `apply` is resumable.** `upgrade` refreshes the
+   mirror+index, recomputes available upgrades, and seeds the cart with them. An
+   `apply` interrupted (Ctrl+C) or failed mid-build drops back to the *shell*
    with the cart intact and the offending pkgbase badged, so the user can
-   `discard` it and `commit` the rest — never restart the command.
+   `discard` it and `apply` the rest — never restart the command.
 5. **Selection by numbers *and* package names with wildcards.** Commands that
    present a list (`search`, `upgrade`, `show`) remember it; selector arguments
    accept numbers (`3`), ranges (`5-8`), names (`glibc`), and globs (`python-*`).
@@ -78,7 +78,7 @@ gaur> quit
    against is verb-scoped: `add` resolves against the AUR index + sync DBs (you
    can add anything); `discard`/`review`/`approve` resolve against the **cart**
    (you act on what's staged); `approve *` means "every staged AUR package".
-6. **`commit` is one atomic add+remove transaction** (target state) — a single
+6. **`apply` is one atomic add+remove transaction** (target state) — a single
    native libalpm transaction carrying repo adds, AUR file adds, *and* removals,
    so "package(group) X replaces package(group) Y" lands without a window where
    neither is installed. See [Applying the transaction](#applying-the-transaction-one-atomic-addremove)
@@ -102,8 +102,8 @@ the wizard widgets are what go away.
 | Reused unchanged | Becomes shell-native |
 | --- | --- |
 | `UpgradeSession` (load, `recompute_remaining`, `pkgbase_of`, `index`, `secondary`) | `dialoguer::MultiSelect` picker (`ui::select_upgrades`, `search::pick`) |
-| `build::resolve_targets` / `apply_plan` / `cmd_install` (the commit engine) | the fixed confirm-then-review wizard order |
-| `ui::change_set_table` + `PreviewMetrics` (the `show`/`commit` preview) | `cli/upgrade_loop.rs` `drive` loop (retired once the shell reaches parity) |
+| `build::resolve_targets` / `apply_plan` / `cmd_install` (the apply engine) | the fixed confirm-then-review wizard order |
+| `ui::change_set_table` + `PreviewMetrics` (the `show`/`apply` preview) | `cli/upgrade_loop.rs` `drive` loop (retired once the shell reaches parity) |
 | `build::review::review` + a per-pkgbase `reviewed` set | |
 | `mirror::cmd_refresh`, `alpm_db::open`/`open_synced`, metrics store | |
 | `Error::Interrupted` / `Error::UserAbort`, makepkg SIGINT bail-to-table | |
@@ -134,11 +134,11 @@ Three current dead-ends dissolve under this model:
    needs-review per config), display as a numbered list with per-item status.
    With `sel…`, seed only the matching subset (numbers index the freshly computed
    list; names/globs match candidate names).
-4. The user then refines and approves (below) and runs `commit`.
+4. The user then refines and approves (below) and runs `apply`.
 
-`add`/`commit` work **without** a prior `upgrade` too — `add firefox` stages a
+`add`/`apply` work **without** a prior `upgrade` too — `add firefox` stages a
 fresh install into the same cart. `upgrade` is just the bulk-seed-with-available-
-upgrades command; the cart and `commit` are general.
+upgrades command; the cart and `apply` are general.
 
 ## Approval & review
 
@@ -165,9 +165,9 @@ Moving an AUR item to `Approved`:
 A per-pkgbase `reviewed: HashSet<PkgBase>` remembers diffs already approved this
 session, so discarding and re-adding (or a post-failure retry) doesn't re-prompt.
 
-## commit
+## apply
 
-`commit` (alias `apply`):
+`apply`:
 
 1. **Gate.** Refuse while any staged item is `NeedsReview`, listing them
    (`needs review: firefox-git, cuda — run \`review\` or \`approve\``). Repo-only
@@ -181,7 +181,7 @@ session, so discarding and re-adding (or a post-failure retry) doesn't re-prompt
    `RunReport` into the cart's `history`, badges the offending pkgbase, and
    **returns to the prompt** (via `Error::Interrupted` / the report's failed set)
    — the cart keeps everything not-yet-installed staged. The user `discard`s the
-   offender (or fixes its PKGBUILD via `review … → edit`) and `commit`s again.
+   offender (or fixes its PKGBUILD via `review … → edit`) and `apply`s again.
    Successfully-installed items drop out of the cart on the next recompute.
 
 ## Custom types
@@ -189,17 +189,17 @@ session, so discarding and re-adding (or a post-failure retry) doesn't re-prompt
 ### `Cart` — the staged transaction
 
 ```rust
-/// The pending transaction the shell builds up; run by `commit`. Not persisted —
+/// The pending transaction the shell builds up; run by `apply`. Not persisted —
 /// quitting drops it (matches `upgrade_loop::SessionState`'s session-only stance).
 struct Cart {
     /// Staged installs/upgrades (repo + AUR), each with its approval state.
     items: Vec<CartItem>,
-    /// Packages staged for uninstall → `pacman -R` / `trans_remove_pkg` at commit.
+    /// Packages staged for uninstall → `pacman -R` / `trans_remove_pkg` at apply.
     remove: Vec<PkgName>,
     /// PKGBUILDs approved this session — suppresses repeat diffs across
     /// discard/re-add and post-failure retries.
     reviewed: HashSet<PkgBase>,
-    /// Failed/interrupted/skipped badges carried across commits, lifted from
+    /// Failed/interrupted/skipped badges carried across apply runs, lifted from
     /// `upgrade_loop::SessionState`.
     history: SessionState,
 }
@@ -208,7 +208,7 @@ struct CartItem {
     /// Carries the counterpart hint through expand → resolve → prepare exactly
     /// like `upgrade_loop::resolve_aur` (upgrade rows hint the foreign pkgname).
     target: build::Target,
-    source: Source,        // Repo | Aur — decides auto-approval + commit lane
+    source: Source,        // Repo | Aur — decides auto-approval + apply lane
     approval: Approval,    // Approved | NeedsReview
 }
 
@@ -243,7 +243,7 @@ erroring (shell-like); an out-of-range number/range is a hard error.
 
 A small enum: `Search(Vec<SearchTerm>)`, `Info(Vec<String>)`, `Add(Vec<String>)`,
 `Discard(Vec<String>)`, `Remove(Vec<String>)`, `Upgrade(Vec<String>)`,
-`Review(Vec<String>)`, `Approve(Vec<String>)`, `Show`, `Commit`, `Clear`,
+`Review(Vec<String>)`, `Approve(Vec<String>)`, `Show`, `Apply`, `Clear`,
 `Refresh`, `Help(Option<String>)`, `Quit`, plus `Empty` / `Unknown` / `Syntax`.
 Argument-bearing cart verbs keep raw `String` tokens that the handlers feed to
 `Selector`. Parsing is `shell-words` tokenization + a verb match — no clap.
@@ -256,7 +256,7 @@ Argument-bearing cart verbs keep raw `String` tokens that the handlers feed to
 - **`shell-words`** (added) for tokenizing the input line.
 - Globs reuse the existing **`regex`** dep — no `globset`/`glob` added.
 
-rustyline owns the terminal only while reading a line; during `commit` we're away
+rustyline owns the terminal only while reading a line; during `apply` we're away
 from the prompt, so `indicatif` bars and the existing review prompt work as today.
 
 ## Module layout
@@ -265,7 +265,7 @@ from the prompt, so `indicatif` bars and the existing review prompt work as toda
 src/cli/shell.rs            run(): session hoist + REPL loop + rustyline wiring   [done]
 src/cli/shell/command.rs    Command enum + parse() (shell-words → verb)           [done]
 src/cli/shell/selector.rs   Selector enum + resolve()                             [done]
-src/cli/shell/cart.rs       Cart + CartItem + commit() (resolve_targets/apply_plan/-R)  [phase 3]
+src/cli/shell/cart.rs       Cart + CartItem + apply() (resolve_targets/apply_plan/-R)  [phase 3]
 src/cli/shell/complete.rs   rustyline Completer over verbs + the name universe    [pending]
 ```
 
@@ -296,7 +296,7 @@ question — entry stages nothing; `upgrade` is the deliberate first move.
 | Ctrl+C arrives during | Result |
 | --- | --- |
 | line editing at the prompt | rustyline returns `Interrupted`; clear the line, redraw prompt — **never exit** (done) |
-| a `commit` build (`makepkg`) | existing `Error::Interrupted` bail: mark pkgbase interrupted, fold into the cart, **return to prompt** |
+| a `apply` build (`makepkg`) | existing `Error::Interrupted` bail: mark pkgbase interrupted, fold into the cart, **return to prompt** |
 | Ctrl+D (EOF) at the prompt, or `quit`/`exit` | exit the shell cleanly (`Ok(0)`) (done) |
 
 Same interrupt contract the loop already implements, with "the table" → "the
@@ -332,7 +332,7 @@ reads+writes … own progress UI; shell out only for the privileged final txn").
 
 **The privilege boundary.** Committing writes `/var/lib/pacman` (root), and gitaur
 runs unprivileged (it lets *pacman* escalate). The clean way to keep one-sudo: a
-small **internal privileged subcommand** — `commit` serializes the prepared
+small **internal privileged subcommand** — `apply` serializes the prepared
 transaction (syncdb add names + AUR file paths + remove names + flags) and
 re-execs `<escalator> gaur __commit-txn <spec>`, which opens alpm, registers
 adds+removes, prepares, commits, and owns the install progress UI. One
@@ -340,7 +340,7 @@ escalation, one transaction, full atomicity across repo + AUR + removals.
 
 **Phasing this sub-feature:**
 
-- *Interim (phase 3).* `commit` issues the existing pacman calls:
+- *Interim (phase 3).* `apply` issues the existing pacman calls:
   `dispatch::run_repo_upgrade` / `pacman -S` for repo, `apply_plan`'s per-stratum
   `pacman -U` for AUR, `pacman -R` for removals. Declared replaces/conflicts are
   atomic within each call; an undeclared remove+add is two transactions bridged by
@@ -350,7 +350,7 @@ escalation, one transaction, full atomicity across repo + AUR + removals.
   container suite covers the add+remove and group-swap cases.
 
 **Resolver note.** For the cart to *show* the removals a declared replace implies,
-`show`/`commit` reuse the read-only `trans_prepare` in `invoke.rs`: prepare the
+`show`/`apply` reuse the read-only `trans_prepare` in `invoke.rs`: prepare the
 add set, read back `ConflictingDeps` / replaced packages, list them as
 "will remove" rows — honest preview even in the interim phase.
 
@@ -391,10 +391,10 @@ Each phase is independently shippable and leaves the flag CLI fully working.
    patterns, `PkgTarget` for `info`/`-Si` targets — threaded through
    `search_sync`/`cmd_search`/`cmd_info`. (`shell.rs` + `selector.rs` + `command.rs`.)
    **Pending:** the rustyline `Completer`.
-3. **Cart + approval + commit (interim, pacman calls).** `add`/`discard`/`remove`/
+3. **Cart + approval + apply (interim, pacman calls).** `add`/`discard`/`remove`/
    `clear`/`show` build the `Cart` with per-item `Approval`; `review <sel>`
    (approve/skip/discard cycle over `build::review::review`) and `approve [*]`
-   move AUR items to approved; `commit` gates on all-approved, then preview
+   move AUR items to approved; `apply` gates on all-approved, then preview
    (`change_set_table` incl. "will remove" rows) → `confirm` → `apply_plan` + repo
    `pacman -S` + `pacman -R`; a failed/Ctrl-C'd build folds into the cart and
    returns to the prompt. The felt payload — staged installs with review in the
@@ -418,12 +418,12 @@ Mirrors the existing two-tier philosophy (`docs/TESTING.md`) and the loop's seam
 
 - **Unit** — `command::parse`, `selector::resolve`, and the `dispatch` core via a
   scripted `ShellEnv` fake: cart mutation (`add`/`discard`), approval transitions
-  (`review`/`approve`/`approve *`), the `commit` gate refusing while items need
+  (`review`/`approve`/`approve *`), the `apply` gate refusing while items need
   review, and fold-on-failure keeping the cart. (The `drive`/`FakeEnv` pattern.)
 - **Container e2e** — drive the real REPL under a PTY via the `pty-harness`
   dev-crate (precedent: `loop_built_tag_e2e`). Script: `upgrade` → `discard` →
-  `approve *` → `commit` asserting installed state; a Ctrl-C-bails-to-prompt
-  case; and a build-failure-then-discard-then-commit case.
+  `approve *` → `apply` asserting installed state; a Ctrl-C-bails-to-prompt
+  case; and a build-failure-then-discard-then-apply case.
 
 ## Out of scope (this iteration)
 
@@ -437,14 +437,14 @@ Mirrors the existing two-tier philosophy (`docs/TESTING.md`) and the loop's seam
 
 | File | Anchor | Role |
 | --- | --- | --- |
-| `src/cli/shell.rs` | `dispatch`/`ShellEnv`/`run`, `State`, `ListItem` | REPL core (done); grows the cart + commit env methods |
+| `src/cli/shell.rs` | `dispatch`/`ShellEnv`/`run`, `State`, `ListItem` | REPL core (done); grows the cart + apply env methods |
 | `src/cli/shell/selector.rs` | `resolve` | numbers/ranges/names/globs → targets (done) |
-| `src/cli/upgrade_loop.rs` | `UpgradeSession`, `recompute_remaining`, `resolve_aur`, `preview*`, `candidate_metrics`, `SessionState::fold` | reuse for `upgrade`/`show`/`commit`; retire in phase 4 |
+| `src/cli/upgrade_loop.rs` | `UpgradeSession`, `recompute_remaining`, `resolve_aur`, `preview*`, `candidate_metrics`, `SessionState::fold` | reuse for `upgrade`/`show`/`apply`; retire in phase 4 |
 | `src/cli/search.rs` | `Row`, `label`, `picked` | reused for the shell's `search` rows (done) |
-| `src/build.rs` | `resolve_targets`, `apply_plan`, `cmd_install`, `Target::{with_hint,bare}`, `RunReport` | the commit engine + fold |
+| `src/build.rs` | `resolve_targets`, `apply_plan`, `cmd_install`, `Target::{with_hint,bare}`, `RunReport` | the apply engine + fold |
 | `src/build/review.rs` | `review()` → approve/skip/discard/view/edit | the `review` command's diff cycle |
-| `src/ui/change_set.rs` | `change_set_table` | the `show`/`commit` preview |
+| `src/ui/change_set.rs` | `change_set_table` | the `show`/`apply` preview |
 | `src/ui/tables.rs` | `select_upgrades` | **flag path only** — the shell never calls it |
 | `src/pacman/invoke.rs` | `preflight_dash_u_inner`, `exec_pacman`, `confirm_escalation` | native-txn template for `__commit-txn`; "will remove" preview |
-| `src/error.rs` | `Interrupted`, `UserAbort` | commit bail-to-prompt + decline |
+| `src/error.rs` | `Interrupted`, `UserAbort` | apply bail-to-prompt + decline |
 | `src/config.rs` | `review_default` | default AUR approval (→ `aur_approval`) |
