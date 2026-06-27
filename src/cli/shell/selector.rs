@@ -31,7 +31,7 @@ enum Selector {
     Glob(Regex),
 }
 
-/// Resolve `args` against the current `list` and the `names` universe.
+/// Resolve `args` against the current `list` and the `universe` of names.
 ///
 /// `Err` is reserved for hard errors (a malformed token, or a number/range
 /// that falls outside the current list). A glob that matches nothing is *not*
@@ -41,24 +41,22 @@ enum Selector {
 pub fn resolve(
     args: &[String],
     list: &[ListItem],
-    names: &[String],
+    universe: &[PkgTarget],
 ) -> Result<Vec<PkgTarget>, String> {
-    let mut raw: Vec<String> = Vec::new();
+    let mut raw: Vec<PkgTarget> = Vec::new();
     for tok in args {
         match parse_one(tok)? {
             Selector::Index(n) => raw.push(row(list, n)?),
             Selector::Range(a, b) => raw.extend(rows(list, a, b)?),
-            Selector::Name(s) => raw.push(s),
-            Selector::Glob(re) => raw.extend(names.iter().filter(|n| re.is_match(n)).cloned()),
+            Selector::Name(s) => raw.push(PkgTarget::new(s)),
+            Selector::Glob(re) => {
+                raw.extend(universe.iter().filter(|t| re.is_match(t.as_str())).cloned());
+            }
         }
     }
-    // Order-preserving de-dup: the first mention of a name wins its position.
+    // Order-preserving de-dup: the first mention of a target wins its position.
     let mut seen = HashSet::new();
-    Ok(raw
-        .into_iter()
-        .filter(|s| seen.insert(s.clone()))
-        .map(PkgTarget::new)
-        .collect())
+    Ok(raw.into_iter().filter(|t| seen.insert(t.clone())).collect())
 }
 
 /// Classify one token. Order matters: globs first (a `*`/`?` token is never a
@@ -132,17 +130,17 @@ fn glob_to_regex(glob: &str) -> Result<Regex, String> {
 }
 
 /// One row by 1-based index, or a descriptive error.
-fn row(list: &[ListItem], n: usize) -> Result<String, String> {
+fn row(list: &[ListItem], n: usize) -> Result<PkgTarget, String> {
     if list.is_empty() {
         return Err("no current list — run `search` first".into());
     }
     list.get(n - 1)
-        .map(|it| it.target.clone().into_inner())
+        .map(|it| it.target.clone())
         .ok_or_else(|| format!("no row {n} (list has {})", list.len()))
 }
 
 /// A 1-based inclusive range of rows.
-fn rows(list: &[ListItem], a: usize, b: usize) -> Result<Vec<String>, String> {
+fn rows(list: &[ListItem], a: usize, b: usize) -> Result<Vec<PkgTarget>, String> {
     (a..=b).map(|n| row(list, n)).collect()
 }
 
@@ -162,6 +160,10 @@ mod tests {
 
     fn args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn universe(parts: &[&str]) -> Vec<PkgTarget> {
+        parts.iter().map(|s| PkgTarget::new(*s)).collect()
     }
 
     fn targets(v: &[PkgTarget]) -> Vec<String> {
@@ -197,21 +199,21 @@ mod tests {
 
     #[test]
     fn glob_matches_the_universe_in_universe_order() {
-        let universe = args(&["python-bar", "python-foo", "ruby"]);
+        let universe = universe(&["python-bar", "python-foo", "ruby"]);
         let got = resolve(&args(&["python-*"]), &[], &universe).unwrap();
         assert_eq!(targets(&got), vec!["python-bar", "python-foo"]);
     }
 
     #[test]
     fn question_mark_glob_matches_single_char() {
-        let universe = args(&["gtk", "gtk2", "gtk3", "gtk-extra"]);
+        let universe = universe(&["gtk", "gtk2", "gtk3", "gtk-extra"]);
         let got = resolve(&args(&["gtk?"]), &[], &universe).unwrap();
         assert_eq!(targets(&got), vec!["gtk2", "gtk3"]);
     }
 
     #[test]
     fn glob_with_no_match_is_empty_not_error() {
-        let universe = args(&["foo", "bar"]);
+        let universe = universe(&["foo", "bar"]);
         let got = resolve(&args(&["zzz-*"]), &[], &universe).unwrap();
         assert!(got.is_empty());
     }
@@ -219,7 +221,7 @@ mod tests {
     #[test]
     fn mixed_selectors_dedup_preserving_first_position() {
         let l = list(&["foo", "bar"]);
-        let universe = args(&["foo", "bar", "baz"]);
+        let universe = universe(&["foo", "bar", "baz"]);
         // `1` → foo, `bar` literal (dup of nothing yet), `*` → foo,bar,baz;
         // foo+bar already seen, so only baz is new.
         let got = resolve(&args(&["1", "bar", "*"]), &l, &universe).unwrap();

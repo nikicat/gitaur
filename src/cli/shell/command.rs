@@ -24,6 +24,8 @@ pub enum Command {
     Upgrade(Vec<String>),
     /// `review <pkg…>` — view a PKGBUILD/diff and approve it.
     Review(Vec<String>),
+    /// `approve <pkg…>` — approve staged AUR packages without opening a diff.
+    Approve(Vec<String>),
     /// `show` — preview the staged transaction.
     Show,
     /// `apply` — build + install the staged transaction.
@@ -56,6 +58,7 @@ impl Command {
             Self::Remove(_) => "remove",
             Self::Upgrade(_) => "upgrade",
             Self::Review(_) => "review",
+            Self::Approve(_) => "approve",
             Self::Show => "show",
             Self::Apply => "apply",
             Self::Clear => "clear",
@@ -86,10 +89,11 @@ pub fn parse(line: &str) -> Command {
         "search" => Command::Search(args.into_iter().map(SearchTerm::from).collect()),
         "info" => Command::Info(args),
         "add" | "install" => Command::Add(args),
-        "drop" | "unstage" => Command::Drop(args),
+        "drop" | "discard" | "unstage" => Command::Drop(args),
         "remove" | "uninstall" | "rm" => Command::Remove(args),
         "upgrade" | "up" => Command::Upgrade(args),
         "review" => Command::Review(args),
+        "approve" => Command::Approve(args),
         "show" | "status" => Command::Show,
         "apply" | "commit" => Command::Apply,
         "clear" => Command::Clear,
@@ -135,11 +139,18 @@ mod tests {
     #[test]
     fn aliases_map_to_canonical() {
         assert_eq!(parse("install x"), Command::Add(v(&["x"])));
+        assert_eq!(parse("discard x"), Command::Drop(v(&["x"])));
         assert_eq!(parse("up"), Command::Upgrade(v(&[])));
         assert_eq!(parse("commit"), Command::Apply);
         assert_eq!(parse("status"), Command::Show);
         assert_eq!(parse("exit"), Command::Quit);
         assert_eq!(parse("q"), Command::Quit);
+    }
+
+    #[test]
+    fn approve_takes_selectors_including_star() {
+        assert_eq!(parse("approve yay-bin"), Command::Approve(v(&["yay-bin"])));
+        assert_eq!(parse("approve *"), Command::Approve(v(&["*"])));
     }
 
     #[test]

@@ -5,33 +5,44 @@
 //! wizard-style `dialoguer` flows. See `docs/plans/shell-ui.md` for the full
 //! design and phasing.
 //!
-//! **Phase 2 status:** the session is hoisted once at start (the AUR index +
-//! secondary maps via [`UpgradeSession`], plus a sorted name universe for
-//! globs/completion), and the read-only verbs work: `search` prints a numbered
-//! result list the session remembers, and `info` shows package details by
-//! number/name/range/glob via the [`selector`] core. `upgrade` bridges to the
-//! existing loop (phase 1); the cart-staging verbs (`add`/`show`/`apply`/…)
-//! remain acknowledged stubs until phase 3.
+//! **Phase 3 status:** the session is hoisted once at start (the AUR index +
+//! secondary maps via [`UpgradeSession`], a sorted name universe for
+//! globs/completion, and the sync-repo name set for coarse classification).
+//! The read-only verbs work (`search`/`info`), and the cart is live: `add` /
+//! `drop` / `remove` / `clear` stage a [`cart::Cart`]; `review` / `approve`
+//! move AUR items past the approval gate; `show` previews it; `apply` gates on
+//! all-approved, then runs the build+install (reusing the `-S` pipeline) plus
+//! `pacman -R` for removals. `upgrade` still bridges to the existing loop
+//! (phase 1); `refresh` lands in phase 5.
 //!
-//! The [`ShellEnv`]/[`dispatch`] split keeps command handling unit-testable
+//! The [`ShellEnv`]/[`State::dispatch`] split keeps command handling unit-testable
 //! with a scripted fake (mirrors the `LoopEnv`/`drive` pattern in
-//! [`crate::cli::upgrade_loop`]).
+//! [`crate::cli::upgrade_loop`]): the side-effecting I/O (classification, the
+//! PKGBUILD diff, the build) lives behind the trait so the cart mutations and
+//! the approval gate are exercised without a terminal, index, or `makepkg`.
 
-use crate::build::UpgradeSession;
+use crate::build::{self, ConfirmGate, InstallOpts, UpgradeSession, review};
 use crate::cli::search::Row;
 use crate::cli::upgrade_loop;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::index;
-use crate::names::{PkgTarget, SearchTerm};
-use crate::pacman::alpm_db;
+use crate::mirror::{self, MirrorRepo};
+use crate::names::{PkgBase, PkgName, PkgTarget, SearchTerm};
+use crate::pacman::alpm_db::{self, PacmanIndex};
+use crate::pacman::invoke;
 use crate::paths;
 use crate::ui;
+use cart::{
+    ApplyOutcome, Approval, ApproveResult, AurApproval, Cart, CartItem, ReviewOutcome, Source,
+};
 use command::Command;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+use std::collections::HashSet;
 use tracing::{debug, info, instrument};
 
+pub mod cart;
 pub mod command;
 pub mod selector;
 
@@ -49,6 +60,8 @@ pub struct ListItem {
 pub struct State {
     /// The last printed result list (`search`), addressable by number.
     last_list: Vec<ListItem>,
+    /// The staged transaction `apply` runs.
+    cart: Cart,
 }
 
 /// Control-flow result of dispatching one command.
@@ -62,8 +75,9 @@ pub enum Flow {
 
 /// The side-effecting operations command dispatch needs.
 ///
-/// Behind a trait so the pure control flow ([`dispatch`]) is unit-testable with
-/// a scripted fake. Later phases grow this with the cart and build operations.
+/// Behind a trait so the pure control flow ([`State::dispatch`]) is unit-testable
+/// with a scripted fake. The cart mutations stay on [`State`]; this trait is the
+/// I/O seam (search, classification, the PKGBUILD diff, the build+install).
 pub trait ShellEnv {
     /// Emit one line of user-facing output.
     fn print(&mut self, line: &str);
@@ -74,111 +88,438 @@ pub trait ShellEnv {
     fn search(&mut self, terms: &[SearchTerm]) -> Result<Vec<ListItem>>;
     /// Print `-Si`-style info for the already-resolved targets.
     fn show_info(&mut self, targets: &[PkgTarget]) -> Result<()>;
-    /// Sorted universe of package names, for glob resolution + completion.
-    fn names(&self) -> &[String];
+    /// Sorted universe of package targets, for glob resolution + completion.
+    fn names(&self) -> &[PkgTarget];
+    /// Coarse-classify a target for staging: a sync-repo package, an AUR
+    /// package, or `None` when it's neither (a typo / unknown name). Only
+    /// decides the approval policy and the `show` label — the real install
+    /// routing is the resolver's call at `apply`.
+    fn classify(&self, target: &PkgTarget) -> Option<Source>;
+    /// Whether AUR items stage pre-approved (config `review_default == "skip"`).
+    fn aur_policy(&self) -> AurApproval;
+    /// The pkgbase a staged AUR target resolves to, for the reviewed set fed
+    /// into the build pipeline. `None` when it isn't a known AUR package.
+    fn pkgbase_of(&self, target: &PkgTarget) -> Option<PkgBase>;
+    /// Run the PKGBUILD review (diff-or-full) for one staged AUR target.
+    fn review(&mut self, target: &PkgTarget) -> Result<ReviewOutcome>;
+    /// Run the staged transaction: resolve + preview + confirm + build/install +
+    /// removals. Reads the cart; the dispatch core updates it from the outcome.
+    fn apply(&mut self, cart: &Cart) -> Result<ApplyOutcome>;
 }
 
 /// Pure command dispatch: map a parsed [`Command`] to side effects + control
 /// flow.
 ///
-/// Side effects go through `env`/`state`; the function does no I/O of its own,
-/// so the command surface and exit conditions are testable without a terminal.
-pub fn dispatch<E: ShellEnv>(cmd: &Command, state: &mut State, env: &mut E) -> Flow {
-    match cmd {
-        Command::Empty => Flow::Continue,
-        Command::Quit => Flow::Exit(0),
-        Command::Syntax(msg) => {
-            env.print(&format!("syntax error: {msg}"));
-            Flow::Continue
-        }
-        Command::Unknown(verb) => {
-            env.print(&format!(
-                "unknown command `{verb}` — type `help` for the command list"
-            ));
-            Flow::Continue
-        }
-        Command::Help(_topic) => {
-            env.print(HELP_TEXT);
-            Flow::Continue
-        }
-        Command::Search(terms) => {
-            handle_search(terms, state, env);
-            Flow::Continue
-        }
-        Command::Info(args) => {
-            handle_info(args, state, env);
-            Flow::Continue
-        }
-        Command::Upgrade(args) => {
-            if !args.is_empty() {
-                env.print("note: per-package upgrade filtering arrives in a later phase; running the full upgrade");
+/// Side effects go through `env`/`self`; dispatch does no I/O of its own, so the
+/// command surface and exit conditions are testable without a terminal. Each
+/// argument-bearing verb is a method on [`State`] below.
+impl State {
+    pub fn dispatch<E: ShellEnv>(&mut self, cmd: &Command, env: &mut E) -> Flow {
+        match cmd {
+            Command::Empty => Flow::Continue,
+            Command::Quit => Flow::Exit(0),
+            Command::Syntax(msg) => {
+                env.print(&format!("syntax error: {msg}"));
+                Flow::Continue
             }
-            if let Err(e) = env.upgrade() {
-                env.print(&format!("upgrade: {e}"));
+            Command::Unknown(verb) => {
+                env.print(&format!(
+                    "unknown command `{verb}` — type `help` for the command list"
+                ));
+                Flow::Continue
             }
-            Flow::Continue
-        }
-        // The cart-staging verbs aren't wired up yet; they arrive in phase 3.
-        // Acknowledge them so the surface is visible rather than silently
-        // no-op'ing.
-        other => {
-            env.print(&format!(
-                "`{}` isn't implemented yet (coming in a later phase — see docs/plans/shell-ui.md)",
-                other.verb()
-            ));
-            Flow::Continue
-        }
-    }
-}
-
-/// `search <terms…>`: run the query, print a numbered list, remember it.
-fn handle_search<E: ShellEnv>(terms: &[SearchTerm], state: &mut State, env: &mut E) {
-    if terms.is_empty() {
-        env.print("usage: search <terms…>");
-        return;
-    }
-    match env.search(terms) {
-        Ok(items) => {
-            if items.is_empty() {
-                let joined = terms
-                    .iter()
-                    .map(SearchTerm::as_str)
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                env.print(&format!("no packages match `{joined}`"));
-            } else {
-                for (i, item) in items.iter().enumerate() {
-                    env.print(&format!("{:>3}  {}", i + 1, item.label));
+            Command::Help(_topic) => {
+                env.print(HELP_TEXT);
+                Flow::Continue
+            }
+            Command::Search(terms) => {
+                self.search(terms, env);
+                Flow::Continue
+            }
+            Command::Info(args) => {
+                self.info(args, env);
+                Flow::Continue
+            }
+            Command::Upgrade(args) => {
+                if !args.is_empty() {
+                    env.print("note: per-package upgrade filtering arrives in a later phase; running the full upgrade");
                 }
+                if let Err(e) = env.upgrade() {
+                    env.print(&format!("upgrade: {e}"));
+                }
+                Flow::Continue
             }
-            // Replace the current list even when empty, so a stale list can't
-            // be addressed by number after a fruitless search.
-            state.last_list = items;
+            Command::Add(args) => {
+                self.add(args, env);
+                Flow::Continue
+            }
+            Command::Drop(args) => {
+                self.discard(args, env);
+                Flow::Continue
+            }
+            Command::Remove(args) => {
+                self.remove(args, env);
+                Flow::Continue
+            }
+            Command::Approve(args) => {
+                self.approve(args, env);
+                Flow::Continue
+            }
+            Command::Review(args) => {
+                self.review(args, env);
+                Flow::Continue
+            }
+            Command::Show => {
+                self.show(env);
+                Flow::Continue
+            }
+            Command::Apply => {
+                self.apply(env);
+                Flow::Continue
+            }
+            Command::Clear => {
+                if self.cart.is_empty() {
+                    env.print("cart is already empty");
+                } else {
+                    self.cart.clear();
+                    env.print("cart cleared");
+                }
+                Flow::Continue
+            }
+            Command::Refresh => {
+                // The mid-session re-fetch lands in phase 5; until then a fresh
+                // upstream snapshot is what restarting `gaur` is for.
+                env.print(
+                    "refresh isn't wired up yet (phase 5) — restart `gaur` to re-fetch the mirror",
+                );
+                Flow::Continue
+            }
         }
-        Err(e) => env.print(&format!("search: {e}")),
     }
-}
 
-/// `info <pkg|number|range|glob>…`: resolve the selectors and show details.
-/// Reads the current list but doesn't mutate session state.
-fn handle_info<E: ShellEnv>(args: &[String], state: &State, env: &mut E) {
-    if args.is_empty() {
-        env.print("usage: info <pkg|number|range|glob>…");
-        return;
-    }
-    let targets = match selector::resolve(args, &state.last_list, env.names()) {
-        Ok(t) => t,
-        Err(e) => {
-            env.print(&format!("info: {e}"));
+    /// `search <terms…>`: run the query, print a numbered list, remember it.
+    fn search<E: ShellEnv>(&mut self, terms: &[SearchTerm], env: &mut E) {
+        if terms.is_empty() {
+            env.print("usage: search <terms…>");
             return;
         }
-    };
-    if targets.is_empty() {
-        env.print("info: nothing matched");
-        return;
+        match env.search(terms) {
+            Ok(items) => {
+                if items.is_empty() {
+                    let joined = terms
+                        .iter()
+                        .map(SearchTerm::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    env.print(&format!("no packages match `{joined}`"));
+                } else {
+                    for (i, item) in items.iter().enumerate() {
+                        env.print(&format!("{:>3}  {}", i + 1, item.label));
+                    }
+                }
+                // Replace the current list even when empty, so a stale list
+                // can't be addressed by number after a fruitless search.
+                self.last_list = items;
+            }
+            Err(e) => env.print(&format!("search: {e}")),
+        }
     }
-    if let Err(e) = env.show_info(&targets) {
-        env.print(&format!("info: {e}"));
+
+    /// `info <sel…>`: resolve the selectors and show details. Reads the current
+    /// list but doesn't mutate session state.
+    fn info<E: ShellEnv>(&self, args: &[String], env: &mut E) {
+        if args.is_empty() {
+            env.print("usage: info <pkg|number|range|glob>…");
+            return;
+        }
+        let targets = match selector::resolve(args, &self.last_list, env.names()) {
+            Ok(t) => t,
+            Err(e) => {
+                env.print(&format!("info: {e}"));
+                return;
+            }
+        };
+        if targets.is_empty() {
+            env.print("info: nothing matched");
+            return;
+        }
+        if let Err(e) = env.show_info(&targets) {
+            env.print(&format!("info: {e}"));
+        }
+    }
+
+    /// `add <sel…>`: classify each selected target and stage it. Selectors
+    /// resolve against the last search list (numbers) + the full name universe
+    /// (names/globs), so you can `add` anything installable.
+    fn add<E: ShellEnv>(&mut self, args: &[String], env: &mut E) {
+        if args.is_empty() {
+            env.print("usage: add <pkg|number|range|glob>…");
+            return;
+        }
+        let targets = match selector::resolve(args, &self.last_list, env.names()) {
+            Ok(t) => t,
+            Err(e) => {
+                env.print(&format!("add: {e}"));
+                return;
+            }
+        };
+        if targets.is_empty() {
+            env.print("add: nothing matched");
+            return;
+        }
+        let policy = env.aur_policy();
+        for t in targets {
+            match env.classify(&t) {
+                Some(source) => {
+                    let name = t.as_str().to_owned();
+                    if self.cart.add(CartItem::new(t, source, policy)) {
+                        env.print(&format!("staged {name} ({})", source.label()));
+                    } else {
+                        env.print(&format!("{name} is already staged"));
+                    }
+                }
+                None => env.print(&format!("unknown package `{}` — not staged", t.as_str())),
+            }
+        }
+    }
+
+    /// `drop <sel…>`: unstage installs from the cart. Selectors resolve against
+    /// the cart (numbers index the staged rows; names/globs match staged specs).
+    fn discard<E: ShellEnv>(&mut self, args: &[String], env: &mut E) {
+        if args.is_empty() {
+            env.print("usage: drop <pkg|number|range|glob>…");
+            return;
+        }
+        let targets = match self.resolve_against_cart(args) {
+            Ok(t) => t,
+            Err(e) => {
+                env.print(&format!("drop: {e}"));
+                return;
+            }
+        };
+        if targets.is_empty() {
+            env.print("drop: nothing in the cart matched");
+            return;
+        }
+        for t in targets {
+            if self.cart.unstage(&t) {
+                env.print(&format!("dropped {}", t.as_str()));
+            } else {
+                env.print(&format!("{} wasn't staged", t.as_str()));
+            }
+        }
+    }
+
+    /// `remove <sel…>`: stage an uninstall (`pacman -R` at apply). Selectors
+    /// resolve against the last list + universe; pacman validates names at
+    /// apply time.
+    fn remove<E: ShellEnv>(&mut self, args: &[String], env: &mut E) {
+        if args.is_empty() {
+            env.print("usage: remove <pkg|number|range|glob>…");
+            return;
+        }
+        let targets = match selector::resolve(args, &self.last_list, env.names()) {
+            Ok(t) => t,
+            Err(e) => {
+                env.print(&format!("remove: {e}"));
+                return;
+            }
+        };
+        if targets.is_empty() {
+            env.print("remove: nothing matched");
+            return;
+        }
+        for t in targets {
+            let name = PkgName::from(t.into_inner());
+            if self.cart.stage_remove(name.clone()) {
+                env.print(&format!("staged removal of {name}"));
+            } else {
+                env.print(&format!("{name} is already staged for removal"));
+            }
+        }
+    }
+
+    /// `approve <sel…>` / `approve *`: mark staged AUR items approved without
+    /// opening a diff. Repo items are already approved; selectors resolve
+    /// against the cart (`*` matches every staged item).
+    fn approve<E: ShellEnv>(&mut self, args: &[String], env: &mut E) {
+        if args.is_empty() {
+            env.print("usage: approve <pkg|number|range|glob>… (try `approve *`)");
+            return;
+        }
+        let targets = match self.resolve_against_cart(args) {
+            Ok(t) => t,
+            Err(e) => {
+                env.print(&format!("approve: {e}"));
+                return;
+            }
+        };
+        if targets.is_empty() {
+            env.print("approve: nothing in the cart matched");
+            return;
+        }
+        for t in targets {
+            match self.cart.approve(&t) {
+                ApproveResult::Approved => {
+                    if let Some(pb) = env.pkgbase_of(&t) {
+                        self.cart.mark_reviewed(pb);
+                    }
+                    env.print(&format!("approved {}", t.as_str()));
+                }
+                ApproveResult::AlreadyApproved => {
+                    env.print(&format!("{} is already approved", t.as_str()));
+                }
+                ApproveResult::NotStaged => {
+                    env.print(&format!("{} isn't staged", t.as_str()));
+                }
+            }
+        }
+    }
+
+    /// `review <sel…>`: open each selected AUR item's PKGBUILD (diff-against-
+    /// installed or full) and approve/skip per the user's call. Repo items have
+    /// no PKGBUILD; already-approved items are left alone; an abort stops the
+    /// pass.
+    fn review<E: ShellEnv>(&mut self, args: &[String], env: &mut E) {
+        if args.is_empty() {
+            env.print("usage: review <pkg|number|range|glob>…");
+            return;
+        }
+        let targets = match self.resolve_against_cart(args) {
+            Ok(t) => t,
+            Err(e) => {
+                env.print(&format!("review: {e}"));
+                return;
+            }
+        };
+        if targets.is_empty() {
+            env.print("review: nothing in the cart matched");
+            return;
+        }
+        for t in targets {
+            // Copy out (source, approval) so the cart isn't borrowed across the
+            // `env.review` call (which then mutates the cart on approval).
+            match self.cart.item(&t).map(|i| (i.source, i.approval)) {
+                None => {}
+                Some((Source::Repo, _)) => {
+                    env.print(&format!(
+                        "{} is a repo package — nothing to review",
+                        t.as_str()
+                    ));
+                }
+                Some((_, Approval::Approved)) => {
+                    env.print(&format!("{} is already approved", t.as_str()));
+                }
+                Some((Source::Aur, Approval::NeedsReview)) => match env.review(&t) {
+                    Ok(ReviewOutcome::Approved) => {
+                        self.cart.approve(&t);
+                        if let Some(pb) = env.pkgbase_of(&t) {
+                            self.cart.mark_reviewed(pb);
+                        }
+                        env.print(&format!("approved {}", t.as_str()));
+                    }
+                    Ok(ReviewOutcome::Skipped) => {
+                        env.print(&format!("{} left for review", t.as_str()));
+                    }
+                    Ok(ReviewOutcome::Aborted) => {
+                        env.print("review aborted");
+                        break;
+                    }
+                    Err(e) => {
+                        env.print(&format!("review {}: {e}", t.as_str()));
+                        break;
+                    }
+                },
+            }
+        }
+    }
+
+    /// `show`: render the staged transaction — installs (with source +
+    /// approval), removals, and whether `apply` is ready.
+    fn show<E: ShellEnv>(&self, env: &mut E) {
+        let cart = &self.cart;
+        if cart.is_empty() {
+            env.print("cart is empty — `add <pkg>` to stage an install");
+            return;
+        }
+        env.print(&format!(
+            "transaction — {} to install, {} to remove",
+            cart.items().len(),
+            cart.removals().len()
+        ));
+        for (i, it) in cart.items().iter().enumerate() {
+            env.print(&format!(
+                "{:>3}  {:4}  {:8}  {}",
+                i + 1,
+                it.source.label(),
+                it.approval.label(),
+                it.spec()
+            ));
+        }
+        for name in cart.removals() {
+            env.print(&format!("     remove          {name}"));
+        }
+        let pending = cart.pending_review().len();
+        if pending == 0 {
+            env.print("all approved — run `apply`");
+        } else {
+            env.print(&format!(
+                "{pending} package(s) need review — run `review <sel>` or `approve <sel>`"
+            ));
+        }
+    }
+
+    /// `apply`: gate on every staged item being approved, then run the
+    /// transaction. A clean run clears the applied rows; a declined one keeps
+    /// the cart; a failed one keeps it intact so the user can `drop` the
+    /// offender and retry.
+    fn apply<E: ShellEnv>(&mut self, env: &mut E) {
+        if self.cart.is_empty() {
+            env.print("cart is empty — nothing to apply");
+            return;
+        }
+        let pending = self.cart.pending_review();
+        if !pending.is_empty() {
+            let names: Vec<&str> = pending.iter().map(|i| i.spec()).collect();
+            env.print(&format!(
+                "needs review: {} — run `review <sel>` or `approve <sel>`",
+                names.join(", ")
+            ));
+            return;
+        }
+        match env.apply(&self.cart) {
+            Ok(ApplyOutcome::Declined) => env.print("apply cancelled — cart kept"),
+            Ok(ApplyOutcome::Succeeded) => {
+                self.cart.clear_applied();
+                env.print("done");
+            }
+            Ok(ApplyOutcome::Failed) => {
+                env.print("some packages didn't apply — `drop` them and `apply` again");
+            }
+            Err(e) => env.print(&format!("apply: {e}")),
+        }
+    }
+
+    /// Resolve selector `args` against the cart: numbers index the staged rows;
+    /// names/globs match staged specs. Mirrors the verb-scoping rule in the
+    /// design (cart verbs act on what's staged, not the search list).
+    fn resolve_against_cart(&self, args: &[String]) -> std::result::Result<Vec<PkgTarget>, String> {
+        let list: Vec<ListItem> = self
+            .cart
+            .items()
+            .iter()
+            .map(|it| ListItem {
+                target: PkgTarget::new(it.spec()),
+                label: String::new(),
+            })
+            .collect();
+        let universe: Vec<PkgTarget> = self
+            .cart
+            .items()
+            .iter()
+            .map(|it| PkgTarget::new(it.spec()))
+            .collect();
+        selector::resolve(args, &list, &universe)
     }
 }
 
@@ -189,10 +530,11 @@ commands:
   search <terms…>     find packages (repo + AUR)
   info <sel…>         show package details (sel = name | number | range | glob)
   add <sel…>          stage packages to install
-  drop <sel…>         unstage packages from the cart
+  drop <sel…>         unstage packages from the cart (alias: discard)
   remove <sel…>       stage packages to uninstall
   upgrade [pkg…]      upgrade installed packages (repo + AUR)
   review <sel…>       view a PKGBUILD/diff and approve it
+  approve <sel…>      approve staged AUR packages without a diff (try `approve *`)
   show                preview the staged transaction
   apply               build + install the staged transaction
   clear               empty the cart
@@ -200,7 +542,7 @@ commands:
   help                this list
   quit                leave the shell (also: Ctrl-D)
 selectors: `3` (row), `5-8` (range), `glibc` (name), `python-*` (glob)
-note: search/info/upgrade work; the cart verbs (add/show/apply/…) are stubs.";
+note: `upgrade` still bridges to the old loop; `refresh` lands in a later phase.";
 
 /// Run the interactive shell. Returns the desired process exit code.
 #[instrument(skip(cfg))]
@@ -209,9 +551,10 @@ pub fn run(cfg: &Config, devel: bool) -> Result<u8> {
     // Once per session: load the AUR index (+ secondary maps) and the name
     // universe. Not repeated per command; `refresh` (later phase) re-fetches.
     let session = UpgradeSession::load(cfg)?;
-    let names = build_name_universe(session.as_ref());
+    let caches = build_universe(session.as_ref());
     debug!(
-        names = names.len(),
+        names = caches.universe.len(),
+        sync = caches.sync.len(),
         has_index = session.is_some(),
         "shell session loaded"
     );
@@ -219,7 +562,7 @@ pub fn run(cfg: &Config, devel: bool) -> Result<u8> {
         cfg,
         devel,
         session,
-        names,
+        caches,
     };
     let mut state = State::default();
 
@@ -241,7 +584,7 @@ pub fn run(cfg: &Config, devel: bool) -> Result<u8> {
                     // Best-effort: a full history ring shouldn't abort input.
                     rl.add_history_entry(line.as_str()).ok();
                 }
-                if let Flow::Exit(code) = dispatch(&command::parse(&line), &mut state, &mut env) {
+                if let Flow::Exit(code) = state.dispatch(&command::parse(&line), &mut env) {
                     break code;
                 }
             }
@@ -260,27 +603,37 @@ pub fn run(cfg: &Config, devel: bool) -> Result<u8> {
     Ok(code)
 }
 
-/// Build the sorted, de-duplicated name universe: every AUR pkgname + pkgbase
-/// from the index, plus sync-repo pkgnames (best-effort). Backs glob resolution
-/// and, in a later phase, tab-completion. Built once per session; a missing
-/// index or unreadable alpm just yields a smaller universe, never an error.
-fn build_name_universe(session: Option<&UpgradeSession>) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
+/// The per-session name caches, built once at startup in a single alpm pass.
+struct NameCaches {
+    /// Sorted, de-duplicated — every AUR pkgname + pkgbase from the index plus
+    /// sync-repo names, each as a [`PkgTarget`] (the universe a user can name).
+    /// Backs glob resolution and, later, tab-completion.
+    universe: Vec<PkgTarget>,
+    /// Sync-repo pkgnames, for `add`'s coarse repo/AUR classification.
+    sync: HashSet<PkgName>,
+}
+
+/// Build the [`NameCaches`] for a session. A missing index or unreadable alpm
+/// just yields smaller caches, never an error.
+fn build_universe(session: Option<&UpgradeSession>) -> NameCaches {
+    let mut universe: Vec<PkgTarget> = Vec::new();
     if let Some(s) = session {
         let by = s.secondary();
-        names.extend(by.by_name.keys().map(|n| n.clone().into_inner()));
-        names.extend(by.by_pkgbase.keys().map(|n| n.clone().into_inner()));
+        universe.extend(by.by_name.keys().map(PkgTarget::from));
+        universe.extend(by.by_pkgbase.keys().map(PkgTarget::from));
     }
+    let mut sync = HashSet::new();
     if let Ok(alpm) = alpm_db::open() {
         for db in alpm.syncdbs() {
             for pkg in db.pkgs() {
-                names.push(pkg.name().to_owned());
+                universe.push(PkgTarget::new(pkg.name()));
+                sync.insert(PkgName::new(pkg.name()));
             }
         }
     }
-    names.sort_unstable();
-    names.dedup();
-    names
+    universe.sort_unstable();
+    universe.dedup();
+    NameCaches { universe, sync }
 }
 
 /// Production [`ShellEnv`]: the loaded session + stdout, bridging `upgrade` to
@@ -289,7 +642,7 @@ struct RealEnv<'a> {
     cfg: &'a Config,
     devel: bool,
     session: Option<UpgradeSession>,
-    names: Vec<String>,
+    caches: NameCaches,
 }
 
 impl ShellEnv for RealEnv<'_> {
@@ -344,8 +697,139 @@ impl ShellEnv for RealEnv<'_> {
         Ok(())
     }
 
-    fn names(&self) -> &[String] {
-        &self.names
+    fn names(&self) -> &[PkgTarget] {
+        &self.caches.universe
+    }
+
+    fn classify(&self, target: &PkgTarget) -> Option<Source> {
+        // Repo wins ties: pacman owns sync packages, and the resolver routes a
+        // shared name to the repo lane anyway, so auto-approving it is honest.
+        if self.caches.sync.contains(target.bare()) {
+            return Some(Source::Repo);
+        }
+        let session = self.session.as_ref()?;
+        session
+            .secondary()
+            .lookup(session.index(), target.as_str())
+            .map(|_| Source::Aur)
+    }
+
+    fn aur_policy(&self) -> AurApproval {
+        // The one place config `review_default` finally drives behaviour:
+        // `skip` ⇒ AUR stages pre-approved, everything else ⇒ needs review.
+        if self.cfg.review_default == "skip" {
+            AurApproval::Auto
+        } else {
+            AurApproval::Review
+        }
+    }
+
+    fn pkgbase_of(&self, target: &PkgTarget) -> Option<PkgBase> {
+        let session = self.session.as_ref()?;
+        session
+            .secondary()
+            .lookup(session.index(), target.as_str())
+            .map(|e| e.pkgbase.clone())
+    }
+
+    fn review(&mut self, target: &PkgTarget) -> Result<ReviewOutcome> {
+        let Some(session) = &self.session else {
+            ui::warn("no AUR index; nothing to review");
+            return Ok(ReviewOutcome::Skipped);
+        };
+        let Some(entry) = session.secondary().lookup(session.index(), target.as_str()) else {
+            ui::warn(&format!("{}: not an AUR package", target.as_str()));
+            return Ok(ReviewOutcome::Skipped);
+        };
+        let pkgbase = entry.pkgbase.clone();
+        let new_ver = entry.version();
+
+        // Materialise the worktree + resolve the installed counterpart exactly
+        // like `build::prepare_one`, so the diff base and review header match
+        // what `apply` would show. Fresh `add` targets are unhinted.
+        let mirror = MirrorRepo::open(&paths::aur_repo_path())?;
+        let wt = mirror::worktree::add_or_reset(&mirror, &pkgbase, &paths::pkg_worktree(&pkgbase))?;
+        let alpm = alpm_db::open()?;
+        let pac = PacmanIndex::build(&alpm);
+        let counterpart = pac.counterpart_with_hint(entry, None);
+
+        match review::review(
+            &mirror,
+            &pkgbase,
+            &new_ver,
+            counterpart.as_ref(),
+            &wt,
+            self.cfg.review_history_scan_max,
+            false,
+        ) {
+            Ok(review::Outcome::Approved) => Ok(ReviewOutcome::Approved),
+            Ok(review::Outcome::Skipped) => Ok(ReviewOutcome::Skipped),
+            // An abort at the review prompt ends the pass but not the shell.
+            Err(Error::UserAbort) => Ok(ReviewOutcome::Aborted),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn apply(&mut self, cart: &Cart) -> Result<ApplyOutcome> {
+        let Some(session) = &self.session else {
+            ui::warn("no AUR index loaded; cannot apply");
+            return Ok(ApplyOutcome::Failed);
+        };
+        let alpm = alpm_db::open()?;
+        let pac = PacmanIndex::build(&alpm);
+
+        // Install half: reuse the `-S` pipeline (resolve → plan table → confirm
+        // → stratified build + install). The cart's reviewed set rides along so
+        // approved AUR pkgbases aren't re-prompted for their diff.
+        let targets = cart.install_targets();
+        if !targets.is_empty() {
+            let mut reviewed = cart.reviewed().clone();
+            let opts = InstallOpts {
+                noconfirm: false,
+                asdeps: false,
+                gate: ConfirmGate::Ask,
+            };
+            let report = match build::install_with_index(
+                self.cfg,
+                session.index(),
+                Some(session.secondary()),
+                &pac,
+                &targets,
+                opts,
+                &mut reviewed,
+            ) {
+                Ok(report) => report,
+                // Declining the plan confirm aborts the whole apply, cart kept.
+                Err(Error::UserAbort) => return Ok(ApplyOutcome::Declined),
+                Err(e) => return Err(e),
+            };
+            if !report.failed.is_empty()
+                || !report.skipped_dep.is_empty()
+                || !report.interrupted.is_empty()
+            {
+                return Ok(ApplyOutcome::Failed);
+            }
+        }
+
+        // Remove half: `pacman -R`, filtered to packages actually installed so a
+        // retry after a partial failure doesn't trip on an already-gone target.
+        // (One atomic add+remove transaction is the phase-6 native-commit goal;
+        // until then this is two transactions bridged by the sudo cache.)
+        let removals: Vec<String> = cart
+            .removals()
+            .iter()
+            .filter(|n| pac.is_installed(n.as_str()))
+            .map(|n| n.clone().into_inner())
+            .collect();
+        if !removals.is_empty() {
+            let mut args = vec!["-R".to_owned()];
+            args.extend(removals);
+            if invoke::exec_pacman(self.cfg, &args)? != 0 {
+                ui::warn("removal step did not complete");
+                return Ok(ApplyOutcome::Failed);
+            }
+        }
+        Ok(ApplyOutcome::Succeeded)
     }
 }
 
@@ -353,16 +837,28 @@ impl ShellEnv for RealEnv<'_> {
 mod tests {
     use super::*;
 
+    use std::collections::HashMap;
+
     /// Scripted [`ShellEnv`] capturing output + recording calls, with a
-    /// pre-seeded search result and name universe, so dispatch is testable
-    /// without a terminal, index, or alpm.
+    /// pre-seeded search result, name universe, classification table, and
+    /// scripted review/apply outcomes, so dispatch is testable without a
+    /// terminal, index, or alpm.
     #[derive(Default)]
     struct FakeEnv {
         lines: Vec<String>,
         upgrades: usize,
         search_result: Vec<ListItem>,
         info_calls: Vec<Vec<PkgTarget>>,
-        names: Vec<String>,
+        names: Vec<PkgTarget>,
+        /// spec → coarse source; absent ⇒ `classify` returns `None`.
+        classes: HashMap<String, Source>,
+        policy: AurApproval,
+        /// spec → review verdict; absent ⇒ `Approved`.
+        review_outcomes: HashMap<String, ReviewOutcome>,
+        review_calls: Vec<String>,
+        /// What `apply` returns; absent ⇒ `Succeeded`.
+        apply_outcome: Option<ApplyOutcome>,
+        apply_calls: usize,
     }
 
     impl ShellEnv for FakeEnv {
@@ -380,9 +876,38 @@ mod tests {
             self.info_calls.push(targets.to_vec());
             Ok(())
         }
-        fn names(&self) -> &[String] {
+        fn names(&self) -> &[PkgTarget] {
             &self.names
         }
+        fn classify(&self, target: &PkgTarget) -> Option<Source> {
+            self.classes.get(target.as_str()).copied()
+        }
+        fn aur_policy(&self) -> AurApproval {
+            self.policy
+        }
+        fn pkgbase_of(&self, target: &PkgTarget) -> Option<PkgBase> {
+            Some(PkgBase::from(target.as_str()))
+        }
+        fn review(&mut self, target: &PkgTarget) -> Result<ReviewOutcome> {
+            self.review_calls.push(target.as_str().to_owned());
+            Ok(self
+                .review_outcomes
+                .remove(target.as_str())
+                .unwrap_or(ReviewOutcome::Approved))
+        }
+        fn apply(&mut self, _cart: &Cart) -> Result<ApplyOutcome> {
+            self.apply_calls += 1;
+            Ok(self.apply_outcome.take().unwrap_or(ApplyOutcome::Succeeded))
+        }
+    }
+
+    /// A `FakeEnv` that classifies the given specs (everything else is unknown).
+    fn env_with(classes: &[(&str, Source)]) -> FakeEnv {
+        let mut env = FakeEnv::default();
+        for (spec, source) in classes {
+            env.classes.insert((*spec).to_owned(), *source);
+        }
+        env
     }
 
     fn li(label: &str, name: &str) -> ListItem {
@@ -395,7 +920,7 @@ mod tests {
     fn dispatch_one(input: &str) -> (Flow, FakeEnv) {
         let mut env = FakeEnv::default();
         let mut state = State::default();
-        let flow = dispatch(&command::parse(input), &mut state, &mut env);
+        let flow = state.dispatch(&command::parse(input), &mut env);
         (flow, env)
     }
 
@@ -451,18 +976,158 @@ mod tests {
     }
 
     #[test]
-    fn cart_verbs_are_acknowledged_stubs() {
-        for input in ["add foo", "drop foo", "show", "apply", "clear"] {
-            let (flow, env) = dispatch_one(input);
-            assert_eq!(flow, Flow::Continue, "stub should continue: {input}");
-            assert!(
-                env.lines
-                    .iter()
-                    .any(|l| l.contains("isn't implemented yet")),
-                "stub for `{input}` should acknowledge itself: {:?}",
-                env.lines
-            );
-        }
+    fn add_stages_with_source_and_default_approval() {
+        let mut env = env_with(&[("glibc", Source::Repo), ("yay-bin", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add glibc yay-bin"), &mut env);
+        assert_eq!(state.cart.items().len(), 2);
+        // Repo auto-approves; AUR needs review.
+        assert!(!state.cart.all_approved());
+        assert_eq!(state.cart.pending_review().len(), 1);
+        assert_eq!(state.cart.pending_review()[0].spec(), "yay-bin");
+    }
+
+    #[test]
+    fn add_unknown_package_is_not_staged() {
+        let mut env = FakeEnv::default(); // classifies nothing
+        let mut state = State::default();
+        state.dispatch(&command::parse("add nope"), &mut env);
+        assert!(state.cart.is_empty());
+        assert!(env.lines.iter().any(|l| l.contains("unknown package")));
+    }
+
+    #[test]
+    fn add_dedups_silently() {
+        let mut env = env_with(&[("foo", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo"), &mut env);
+        state.dispatch(&command::parse("add foo"), &mut env);
+        assert_eq!(state.cart.items().len(), 1);
+        assert!(env.lines.iter().any(|l| l.contains("already staged")));
+    }
+
+    #[test]
+    fn drop_unstages_a_cart_row() {
+        let mut env = env_with(&[("foo", Source::Aur), ("bar", Source::Repo)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo bar"), &mut env);
+        state.dispatch(&command::parse("drop foo"), &mut env);
+        let specs: Vec<&str> = state.cart.items().iter().map(CartItem::spec).collect();
+        assert_eq!(specs, vec!["bar"]);
+    }
+
+    #[test]
+    fn clear_empties_the_cart() {
+        let mut env = env_with(&[("foo", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo"), &mut env);
+        state.dispatch(&command::parse("clear"), &mut env);
+        assert!(state.cart.is_empty());
+    }
+
+    #[test]
+    fn approve_clears_the_gate_without_review() {
+        let mut env = env_with(&[("yay-bin", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add yay-bin"), &mut env);
+        state.dispatch(&command::parse("approve yay-bin"), &mut env);
+        assert!(state.cart.all_approved());
+        assert!(env.review_calls.is_empty(), "approve opens no diff");
+        // The pkgbase is recorded so apply won't re-prompt the build pipeline.
+        assert!(state.cart.reviewed().contains(&PkgBase::from("yay-bin")));
+    }
+
+    #[test]
+    fn approve_glob_star_approves_every_staged_aur_item() {
+        let mut env = env_with(&[("a", Source::Aur), ("b", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add a b"), &mut env);
+        state.dispatch(&command::parse("approve *"), &mut env);
+        assert!(state.cart.all_approved());
+    }
+
+    #[test]
+    fn review_approves_on_an_approved_outcome() {
+        let mut env = env_with(&[("yay-bin", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add yay-bin"), &mut env);
+        state.dispatch(&command::parse("review yay-bin"), &mut env);
+        assert_eq!(env.review_calls, vec!["yay-bin"], "review opened the diff");
+        assert!(state.cart.all_approved());
+    }
+
+    #[test]
+    fn review_skip_leaves_item_pending() {
+        let mut env = env_with(&[("yay-bin", Source::Aur)]);
+        env.review_outcomes
+            .insert("yay-bin".into(), ReviewOutcome::Skipped);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add yay-bin"), &mut env);
+        state.dispatch(&command::parse("review yay-bin"), &mut env);
+        assert!(!state.cart.all_approved(), "skip leaves it needing review");
+    }
+
+    #[test]
+    fn apply_gate_blocks_while_items_need_review() {
+        let mut env = env_with(&[("yay-bin", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add yay-bin"), &mut env);
+        state.dispatch(&command::parse("apply"), &mut env);
+        assert_eq!(env.apply_calls, 0, "apply must not run while pending");
+        assert!(env.lines.iter().any(|l| l.contains("needs review")));
+    }
+
+    #[test]
+    fn apply_runs_when_all_approved_and_clears_on_success() {
+        let mut env = env_with(&[("glibc", Source::Repo)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add glibc"), &mut env);
+        state.dispatch(&command::parse("apply"), &mut env);
+        assert_eq!(env.apply_calls, 1);
+        assert!(state.cart.is_empty(), "a clean apply clears the cart");
+        assert!(env.lines.iter().any(|l| l == "done"));
+    }
+
+    #[test]
+    fn apply_declined_keeps_the_cart() {
+        let mut env = env_with(&[("glibc", Source::Repo)]);
+        env.apply_outcome = Some(ApplyOutcome::Declined);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add glibc"), &mut env);
+        state.dispatch(&command::parse("apply"), &mut env);
+        assert_eq!(state.cart.items().len(), 1, "declined apply keeps the cart");
+    }
+
+    #[test]
+    fn apply_failure_keeps_the_cart_for_retry() {
+        let mut env = env_with(&[("glibc", Source::Repo)]);
+        env.apply_outcome = Some(ApplyOutcome::Failed);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add glibc"), &mut env);
+        state.dispatch(&command::parse("apply"), &mut env);
+        assert_eq!(state.cart.items().len(), 1, "failed apply keeps the cart");
+        assert!(env.lines.iter().any(|l| l.contains("didn't apply")));
+    }
+
+    #[test]
+    fn remove_stages_an_uninstall() {
+        let mut env = FakeEnv::default();
+        let mut state = State::default();
+        state.dispatch(&command::parse("remove oldpkg"), &mut env);
+        assert_eq!(state.cart.removals(), &[PkgName::from("oldpkg")]);
+    }
+
+    #[test]
+    fn show_reports_pending_then_ready() {
+        let mut env = env_with(&[("yay-bin", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add yay-bin"), &mut env);
+        state.dispatch(&command::parse("show"), &mut env);
+        assert!(env.lines.iter().any(|l| l.contains("need review")));
+        state.dispatch(&command::parse("approve yay-bin"), &mut env);
+        env.lines.clear();
+        state.dispatch(&command::parse("show"), &mut env);
+        assert!(env.lines.iter().any(|l| l.contains("all approved")));
     }
 
     #[test]
@@ -483,7 +1148,7 @@ mod tests {
             ..FakeEnv::default()
         };
         let mut state = State::default();
-        let flow = dispatch(&command::parse("search foo"), &mut state, &mut env);
+        let flow = state.dispatch(&command::parse("search foo"), &mut env);
         assert_eq!(flow, Flow::Continue);
         assert!(
             env.lines
@@ -512,8 +1177,9 @@ mod tests {
         let mut env = FakeEnv::default();
         let mut state = State {
             last_list: vec![li("aur/foo 1-1", "foo"), li("extra/bar 2-1", "bar")],
+            ..State::default()
         };
-        dispatch(&command::parse("info 2"), &mut state, &mut env);
+        state.dispatch(&command::parse("info 2"), &mut env);
         assert_eq!(env.info_calls, vec![vec![PkgTarget::new("bar")]]);
     }
 
@@ -521,7 +1187,7 @@ mod tests {
     fn info_by_name_passes_through() {
         let mut env = FakeEnv::default();
         let mut state = State::default();
-        dispatch(&command::parse("info zlib"), &mut state, &mut env);
+        state.dispatch(&command::parse("info zlib"), &mut env);
         assert_eq!(env.info_calls, vec![vec![PkgTarget::new("zlib")]]);
     }
 
@@ -532,7 +1198,7 @@ mod tests {
             ..FakeEnv::default()
         };
         let mut state = State::default();
-        dispatch(&command::parse("info python-*"), &mut state, &mut env);
+        state.dispatch(&command::parse("info python-*"), &mut env);
         assert_eq!(
             env.info_calls,
             vec![vec![
@@ -547,8 +1213,9 @@ mod tests {
         let mut env = FakeEnv::default();
         let mut state = State {
             last_list: vec![li("only 1-1", "only")],
+            ..State::default()
         };
-        dispatch(&command::parse("info 9"), &mut state, &mut env);
+        state.dispatch(&command::parse("info 9"), &mut env);
         assert!(env.info_calls.is_empty(), "must not show on a bad index");
         assert!(
             env.lines.iter().any(|l| l.contains("info:")),

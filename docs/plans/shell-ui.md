@@ -1,6 +1,7 @@
 # Plan: shell-like (REPL) UI for interactive `gaur`
 
-Status: phases 1–2 implemented; cart / approval / apply (phase 3+) proposed.
+Status: phases 1–3 implemented; the `upgrade` procedure (phase 4) + polish
+(phase 5) + native combined commit (phase 6) remain.
 
 ## Goal
 
@@ -265,7 +266,7 @@ from the prompt, so `indicatif` bars and the existing review prompt work as toda
 src/cli/shell.rs            run(): session hoist + REPL loop + rustyline wiring   [done]
 src/cli/shell/command.rs    Command enum + parse() (shell-words → verb)           [done]
 src/cli/shell/selector.rs   Selector enum + resolve()                             [done]
-src/cli/shell/cart.rs       Cart + CartItem + apply() (resolve_targets/apply_plan/-R)  [phase 3]
+src/cli/shell/cart.rs       Cart + CartItem + Source/Approval/ApplyOutcome         [done]
 src/cli/shell/complete.rs   rustyline Completer over verbs + the name universe    [pending]
 ```
 
@@ -391,14 +392,37 @@ Each phase is independently shippable and leaves the flag CLI fully working.
    patterns, `PkgTarget` for `info`/`-Si` targets — threaded through
    `search_sync`/`cmd_search`/`cmd_info`. (`shell.rs` + `selector.rs` + `command.rs`.)
    **Pending:** the rustyline `Completer`.
-3. **Cart + approval + apply (interim, pacman calls).** `add`/`discard`/`remove`/
-   `clear`/`show` build the `Cart` with per-item `Approval`; `review <sel>`
-   (approve/skip/discard cycle over `build::review::review`) and `approve [*]`
-   move AUR items to approved; `apply` gates on all-approved, then preview
-   (`change_set_table` incl. "will remove" rows) → `confirm` → `apply_plan` + repo
-   `pacman -S` + `pacman -R`; a failed/Ctrl-C'd build folds into the cart and
-   returns to the prompt. The felt payload — staged installs with review in the
-   shell.
+3. **Cart + approval + apply (interim, pacman calls). — DONE.**
+   `add`/`drop`(alias `discard`)/`remove`/`clear`/`show` build the `Cart` with
+   per-item `Source` + `Approval`; `review <sel>` runs `build::review::review`
+   (approve/skip/abort) and `approve [*]` moves AUR items to approved without a
+   diff; `apply` gates on all-approved, then runs the install half through the
+   existing `-S` pipeline (`install_with_index` → plan table → conditional
+   confirm → `apply_plan`) plus `pacman -R` for removals. A clean run clears the
+   applied rows; a declined plan keeps the cart; a failed/interrupted build
+   returns to the prompt with the cart intact for `drop`-and-retry. Cart staging,
+   the approval gate, and the apply-clears/keeps logic are unit-tested behind the
+   `ShellEnv` fake; the verbs are methods on `State`. Landed in
+   `src/cli/shell/cart.rs` + the cart arms in `src/cli/shell.rs`.
+
+   **As implemented (deviations from the sketch above):**
+   - The apply preview is the `-S` pipeline's `print::plan` table (+ its
+     `only_requested` confirm gate), **not** `ui::change_set_table` — that table
+     is upgrade-shaped (`PkgUpgrade` roots with old→new), so it belongs to the
+     phase-4 `upgrade`-seeded cart, not phase-3 fresh installs.
+   - `review`/`approve` record the approved pkgbase in `Cart::reviewed`, which
+     `apply` threads into the build pipeline so an approved AUR root isn't
+     re-prompted. Pulled-in AUR **dependencies** (not staged roots) still get the
+     normal `review_default`-driven review at build time — an honest interim.
+   - "will remove" preview rows (read back from a `trans_prepare`) are **not**
+     wired yet; removals just list as `pacman -R` targets. Order is install-then-
+     remove (two transactions); the atomic combined commit is still phase 6.
+   - `review_default` finally drives behaviour here: `"skip"` ⇒ AUR auto-approve
+     (`AurApproval::Auto`), else needs-review. The dedicated `aur_approval` knob
+     is still TBD.
+   - Coarse `add`-time classification prefers Repo on a name in both sync + AUR
+     (matches the resolver's own ordering); it only sets the approval policy and
+     the `show` label — the real routing is the resolver's at `apply`.
 4. **`upgrade` procedure in the shell.** `upgrade [sel…]` refreshes + reloads the
    session, recomputes candidates, seeds the cart (repo approved / AUR
    needs-review); port the cost overlay (sizes, build-time, `built` tag). Retire
