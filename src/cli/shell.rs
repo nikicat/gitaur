@@ -30,18 +30,21 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::index;
 use crate::mirror::{self, MirrorRepo};
-use crate::names::{PkgBase, PkgName, PkgTarget, SearchTerm};
+use crate::names::{PkgBase, PkgName, PkgTarget, RepoName, SearchTerm};
 use crate::pacman::alpm_db::{self, PacmanIndex};
 use crate::pacman::invoke::{self, PkgUpgrade, REPO_AUR};
 use crate::paths;
 use crate::ui::{self, UpgradeSelection};
 use cart::{
     ApplyOutcome, Approval, ApproveResult, AurApproval, Cart, CartItem, ReviewOutcome, Source,
+    StageClass,
 };
 use command::Command;
+use console::style;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, instrument};
 
 pub mod cart;
@@ -56,6 +59,10 @@ pub struct ListItem {
     pub target: PkgTarget,
     /// Preformatted display label (without the leading number).
     pub label: String,
+    /// Repo bucket (`core`, `extra`, …, or `aur`) this row came from, so a
+    /// repo-name selector (`add extra`) can filter the list. `None` for rows
+    /// whose source isn't a repo (e.g. cart-derived selector lists).
+    pub repo: Option<RepoName>,
 }
 
 /// Mutable per-session shell state the dispatch core threads between commands.
@@ -94,11 +101,11 @@ pub trait ShellEnv {
     fn show_info(&mut self, targets: &[PkgTarget]) -> Result<()>;
     /// Sorted universe of package targets, for glob resolution + completion.
     fn names(&self) -> &[PkgTarget];
-    /// Coarse-classify a target for staging: a sync-repo package, an AUR
-    /// package, or `None` when it's neither (a typo / unknown name). Only
-    /// decides the approval policy and the `show` label — the real install
-    /// routing is the resolver's call at `apply`.
-    fn classify(&self, target: &PkgTarget) -> Option<Source>;
+    /// Coarse-classify a target for staging: a sync-repo package (with its
+    /// concrete repo), an AUR package, or `None` when it's neither (a typo /
+    /// unknown name). Only decides the approval policy and the `show` label —
+    /// the real install routing is the resolver's call at `apply`.
+    fn classify(&self, target: &PkgTarget) -> Option<StageClass>;
     /// Whether AUR items stage pre-approved (config `review_default == "skip"`).
     fn aur_policy(&self) -> AurApproval;
     /// The pkgbase a staged AUR target resolves to, for the reviewed set fed
@@ -106,6 +113,12 @@ pub trait ShellEnv {
     fn pkgbase_of(&self, target: &PkgTarget) -> Option<PkgBase>;
     /// Run the PKGBUILD review (diff-or-full) for one staged AUR target.
     fn review(&mut self, target: &PkgTarget) -> Result<ReviewOutcome>;
+    /// Render the staged transaction table — the numbered install rows + the
+    /// removal rows — colored, column-aligned, with a per-AUR-row "last
+    /// modified" age. The header + approval summary stay in the pure dispatch
+    /// core ([`State::show`]); this is the I/O-shaped presentation (color,
+    /// width math, wall-clock age) that belongs behind the env seam.
+    fn render_cart(&mut self, cart: &Cart);
     /// Run the staged transaction: resolve + preview + confirm + build/install +
     /// removals. Reads the cart; the dispatch core updates it from the outcome.
     fn apply(&mut self, cart: &Cart) -> Result<ApplyOutcome>;
@@ -231,7 +244,7 @@ impl State {
             env.print("usage: info <pkg|number|range|glob>…");
             return;
         }
-        let targets = match selector::resolve(args, &self.last_list, env.names()) {
+        let targets = match self.resolve_against_list(args, env) {
             Ok(t) => t,
             Err(e) => {
                 env.print(&format!("info: {e}"));
@@ -293,7 +306,7 @@ impl State {
             env.print("usage: add <pkg|number|range|glob>…");
             return;
         }
-        let targets = match selector::resolve(args, &self.last_list, env.names()) {
+        let targets = match self.resolve_against_list(args, env) {
             Ok(t) => t,
             Err(e) => {
                 env.print(&format!("add: {e}"));
@@ -307,10 +320,15 @@ impl State {
         let policy = env.aur_policy();
         for t in targets {
             match env.classify(&t) {
-                Some(source) => {
+                Some(StageClass { source, repo }) => {
                     let name = t.as_str().to_owned();
-                    if self.cart.add(CartItem::new(t, source, policy)) {
-                        env.print(&format!("staged {name} ({})", source.label()));
+                    // Show the concrete repo (`core`/`extra`) when known, else
+                    // the coarse source label.
+                    let label = repo
+                        .clone()
+                        .map_or_else(|| source.label().to_owned(), RepoName::into_inner);
+                    if self.cart.add(CartItem::new(t, source, repo, policy)) {
+                        env.print(&format!("staged {name} ({label})"));
                     } else {
                         env.print(&format!("{name} is already staged"));
                     }
@@ -355,7 +373,7 @@ impl State {
             env.print("usage: remove <pkg|number|range|glob>…");
             return;
         }
-        let targets = match selector::resolve(args, &self.last_list, env.names()) {
+        let targets = match self.resolve_against_list(args, env) {
             Ok(t) => t,
             Err(e) => {
                 env.print(&format!("remove: {e}"));
@@ -471,8 +489,14 @@ impl State {
         }
     }
 
-    /// `show`: render the staged transaction — installs (with source +
-    /// approval), removals, and whether `apply` is ready.
+    /// `show`: render the staged transaction — a header, the install/removal
+    /// table (delegated to the env for color + alignment + age), and whether
+    /// `apply` is ready.
+    ///
+    /// The header and the approval summary are deterministic and stay here in
+    /// the pure core (so they're unit-testable via the fake env); the table body
+    /// — color, column widths, per-AUR-row age — is I/O-shaped presentation and
+    /// goes through [`ShellEnv::render_cart`].
     fn show<E: ShellEnv>(&self, env: &mut E) {
         let cart = &self.cart;
         if cart.is_empty() {
@@ -484,23 +508,7 @@ impl State {
             cart.items().len(),
             cart.removals().len()
         ));
-        for (i, it) in cart.items().iter().enumerate() {
-            // Upgrade rows carry their old→new transition; fresh installs don't.
-            let ver = it
-                .version_transition()
-                .map(|v| format!("  {v}"))
-                .unwrap_or_default();
-            env.print(&format!(
-                "{:>3}  {:4}  {:8}  {}{ver}",
-                i + 1,
-                it.source.label(),
-                it.approval.label(),
-                it.spec()
-            ));
-        }
-        for name in cart.removals() {
-            env.print(&format!("     remove          {name}"));
-        }
+        env.render_cart(cart);
         let pending = cart.pending_review().len();
         if pending == 0 {
             env.print("all approved — run `apply`");
@@ -542,48 +550,119 @@ impl State {
         }
     }
 
-    /// Resolve selector `args` against the cart: numbers index the staged rows;
+    /// Resolve selector `args` against the cart: a repo name (`aur`, `core`, …)
+    /// selects every staged row from that repo; numbers index the staged rows;
     /// names/globs match staged specs. Mirrors the verb-scoping rule in the
     /// design (cart verbs act on what's staged, not the search list).
     fn resolve_against_cart(&self, args: &[String]) -> std::result::Result<Vec<PkgTarget>, String> {
-        let list: Vec<ListItem> = self
+        let rows: Vec<RepoRow> = self
             .cart
             .items()
             .iter()
-            .map(|it| ListItem {
+            .map(|it| RepoRow {
                 target: PkgTarget::new(it.spec()),
-                label: String::new(),
+                repo: Some(it.repo_label()),
             })
             .collect();
-        let universe: Vec<PkgTarget> = self
-            .cart
-            .items()
+        let args = expand_repo_tokens(args, &rows);
+        let list: Vec<ListItem> = rows
             .iter()
-            .map(|it| PkgTarget::new(it.spec()))
+            .map(|r| ListItem {
+                target: r.target.clone(),
+                label: String::new(),
+                repo: r.repo.clone(),
+            })
             .collect();
-        selector::resolve(args, &list, &universe)
+        let universe: Vec<PkgTarget> = rows.iter().map(|r| r.target.clone()).collect();
+        selector::resolve(&args, &list, &universe)
+    }
+
+    /// Resolve selector `args` against the last result list: a repo name selects
+    /// every list row from that repo; numbers/ranges index the list; names/globs
+    /// resolve against the full name universe. The list verbs (`add`, `info`,
+    /// `remove`) share this so `add extra` and `add 3` behave the same way.
+    fn resolve_against_list<E: ShellEnv>(
+        &self,
+        args: &[String],
+        env: &E,
+    ) -> std::result::Result<Vec<PkgTarget>, String> {
+        let rows: Vec<RepoRow> = self
+            .last_list
+            .iter()
+            .map(|it| RepoRow {
+                target: it.target.clone(),
+                repo: it.repo.clone(),
+            })
+            .collect();
+        let args = expand_repo_tokens(args, &rows);
+        selector::resolve(&args, &self.last_list, env.names())
     }
 }
 
-/// Filter `candidates` to those a selector matches: numbers index the candidate
-/// list, names/globs match candidate names. Reuses the selector core (the same
-/// one `add`/`info`/cart verbs use), so `upgrade glibc python-*` works the same.
+/// One `(target, repo)` pair fed to [`expand_repo_tokens`] — the minimal view of
+/// a cart row or list row a repo-name selector needs.
+struct RepoRow {
+    target: PkgTarget,
+    repo: Option<RepoName>,
+}
+
+/// Rewrite repo-name tokens (`aur`, `core`, `extra`, …) into the targets of the
+/// rows whose repo matches, so `drop aur` / `add extra` act on a whole repo.
+///
+/// A token that matches no row's repo is passed through unchanged for the
+/// number/range/name/glob selector to handle — so a real package that happens
+/// to share a repo's name still resolves normally when nothing in the current
+/// scope is from that repo. Matching is case-insensitive. The expansion emits
+/// selector tokens (the matched targets' names) so the one resolution path in
+/// [`selector::resolve`] still does the indexing, dedup, and ordering.
+fn expand_repo_tokens(args: &[String], rows: &[RepoRow]) -> Vec<String> {
+    args.iter()
+        .flat_map(|a| {
+            let matched: Vec<String> = rows
+                .iter()
+                .filter(|r| {
+                    r.repo
+                        .as_ref()
+                        .is_some_and(|repo| repo.as_str().eq_ignore_ascii_case(a))
+                })
+                .map(|r| r.target.as_str().to_owned())
+                .collect();
+            if matched.is_empty() {
+                vec![a.clone()]
+            } else {
+                matched
+            }
+        })
+        .collect()
+}
+
+/// Filter `candidates` to those a selector matches: a repo name (`aur`, `core`,
+/// …) selects every candidate from that repo; numbers index the candidate list;
+/// names/globs match candidate names. Reuses the selector core (the same one
+/// `add`/`info`/cart verbs use), so `upgrade glibc python-*` and `upgrade aur`
+/// work the same.
 fn select_from_candidates(
     args: &[String],
     candidates: &[PkgUpgrade],
 ) -> std::result::Result<Vec<PkgUpgrade>, String> {
-    let list: Vec<ListItem> = candidates
+    let rows: Vec<RepoRow> = candidates
         .iter()
-        .map(|u| ListItem {
+        .map(|u| RepoRow {
             target: PkgTarget::new(u.name.as_str()),
-            label: String::new(),
+            repo: Some(RepoName::from(u.repo.as_str())),
         })
         .collect();
-    let universe: Vec<PkgTarget> = candidates
+    let args = expand_repo_tokens(args, &rows);
+    let list: Vec<ListItem> = rows
         .iter()
-        .map(|u| PkgTarget::new(u.name.as_str()))
+        .map(|r| ListItem {
+            target: r.target.clone(),
+            label: String::new(),
+            repo: r.repo.clone(),
+        })
         .collect();
-    let picked = selector::resolve(args, &list, &universe)?;
+    let universe: Vec<PkgTarget> = rows.iter().map(|r| r.target.clone()).collect();
+    let picked = selector::resolve(&args, &list, &universe)?;
     let names: HashSet<&str> = picked.iter().map(PkgTarget::as_str).collect();
     Ok(candidates
         .iter()
@@ -610,8 +689,9 @@ commands:
   refresh             re-fetch the AUR mirror + index
   help                this list
   quit                leave the shell (also: Ctrl-D)
-selectors: `3` (row), `5-8` (range), `glibc` (name), `python-*` (glob)
-note: `upgrade` still bridges to the old loop; `refresh` lands in a later phase.";
+selectors: `3` (row), `5-8` (range), `glibc` (name), `python-*` (glob),
+           `aur`/`core`/… (whole repo — e.g. `drop aur`, `add extra`)
+note: `refresh` lands in a later phase.";
 
 /// Run the interactive shell. Returns the desired process exit code.
 #[instrument(skip(cfg))]
@@ -678,8 +758,11 @@ struct NameCaches {
     /// sync-repo names, each as a [`PkgTarget`] (the universe a user can name).
     /// Backs glob resolution and, later, tab-completion.
     universe: Vec<PkgTarget>,
-    /// Sync-repo pkgnames, for `add`'s coarse repo/AUR classification.
-    sync: HashSet<PkgName>,
+    /// Sync-repo pkgname → its repo (`core`, `extra`, …), for `add`'s coarse
+    /// repo/AUR classification and the concrete repo column. The first sync DB
+    /// (pacman.conf order) that declares a name wins, matching what pacman would
+    /// pull.
+    sync: HashMap<PkgName, RepoName>,
 }
 
 /// Build the [`NameCaches`] for a session. A missing index or unreadable alpm
@@ -691,12 +774,15 @@ fn build_universe(session: Option<&UpgradeSession>) -> NameCaches {
         universe.extend(by.by_name.keys().map(PkgTarget::from));
         universe.extend(by.by_pkgbase.keys().map(PkgTarget::from));
     }
-    let mut sync = HashSet::new();
+    let mut sync = HashMap::new();
     if let Ok(alpm) = alpm_db::open() {
         for db in alpm.syncdbs() {
             for pkg in db.pkgs() {
                 universe.push(PkgTarget::new(pkg.name()));
-                sync.insert(PkgName::new(pkg.name()));
+                // First DB to declare the name wins (pacman.conf precedence),
+                // so `core` shadows a later `testing` carrying the same pkg.
+                sync.entry(PkgName::new(pkg.name()))
+                    .or_insert_with(|| RepoName::from(db.name()));
             }
         }
     }
@@ -759,6 +845,7 @@ impl ShellEnv for RealEnv<'_> {
             .map(|r| ListItem {
                 target: r.picked(),
                 label: r.label(color),
+                repo: Some(RepoName::from(r.repo_name())),
             })
             .collect())
     }
@@ -778,17 +865,23 @@ impl ShellEnv for RealEnv<'_> {
         &self.caches.universe
     }
 
-    fn classify(&self, target: &PkgTarget) -> Option<Source> {
+    fn classify(&self, target: &PkgTarget) -> Option<StageClass> {
         // Repo wins ties: pacman owns sync packages, and the resolver routes a
         // shared name to the repo lane anyway, so auto-approving it is honest.
-        if self.caches.sync.contains(target.bare()) {
-            return Some(Source::Repo);
+        if let Some(repo) = self.caches.sync.get(target.bare()) {
+            return Some(StageClass {
+                source: Source::Repo,
+                repo: Some(repo.clone()),
+            });
         }
         let session = self.session.as_ref()?;
         session
             .secondary()
             .lookup(session.index(), target.as_str())
-            .map(|_| Source::Aur)
+            .map(|_| StageClass {
+                source: Source::Aur,
+                repo: None,
+            })
     }
 
     fn aur_policy(&self) -> AurApproval {
@@ -847,6 +940,78 @@ impl ShellEnv for RealEnv<'_> {
         }
     }
 
+    fn render_cart(&mut self, cart: &Cart) {
+        let colored = Colored::detect();
+        let items = cart.items();
+        let now = SystemTime::now();
+
+        // Column widths over the plain (uncolored) cell text — padding is then
+        // applied on that plain width so embedded ANSI codes don't skew columns.
+        let repo_w = Width::widest(items.iter().map(|i| Width::of(i.repo_label().as_str())));
+        let appr_w = Width::widest(items.iter().map(|i| Width::of(i.approval.label())));
+        let name_w = Width::widest(items.iter().map(|i| Width::of(i.spec())));
+        let old_w = Width::widest(
+            items
+                .iter()
+                .filter_map(|i| i.upgrade.as_ref())
+                .map(|u| Width::of(&u.old_ver.to_string())),
+        );
+        let new_w = Width::widest(
+            items
+                .iter()
+                .filter_map(|i| i.upgrade.as_ref())
+                .map(|u| Width::of(&u.new_ver.to_string())),
+        );
+        // The fixed-width version block (`old → new`), so a fresh-install row's
+        // blank keeps the trailing age column aligned with the upgrade rows.
+        let ver_w = if old_w.is_zero() && new_w.is_zero() {
+            Width::ZERO
+        } else {
+            old_w + new_w + ARROW_PAD
+        };
+
+        for (i, it) in items.iter().enumerate() {
+            let repo = it.repo_label();
+            let repo_cell =
+                repo_w.pad_left(colored.paint(repo.as_str(), |s| ui::repo(s).to_string()));
+
+            let appr = it.approval.label();
+            let appr_cell = appr_w.pad_left(colored.paint(appr, |s| match it.approval {
+                Approval::Approved => style(s).green().to_string(),
+                Approval::NeedsReview => style(s).yellow().to_string(),
+            }));
+
+            let name = it.spec();
+            let name_cell = name_w.pad_left(colored.paint(name, |s| style(s).bold().to_string()));
+
+            let ver_cell = version_cell(it, old_w, new_w, ver_w, colored);
+            // "Last modified" age, AUR rows only (yay-style staleness hint).
+            let age_cell = match (it.source, self.aur_last_modified(it)) {
+                (Source::Aur, Some(modified)) => {
+                    let age = now.duration_since(modified).unwrap_or_default();
+                    let label = format!("({} ago)", ui::human_age(age));
+                    format!(
+                        "  {}",
+                        colored.paint(&label, |s| ui::dim(s).to_string()).rendered
+                    )
+                }
+                _ => String::new(),
+            };
+
+            self.print(&format!(
+                "{:>3}  {repo_cell}  {appr_cell}  {name_cell}{ver_cell}{age_cell}",
+                i + 1
+            ));
+        }
+
+        for name in cart.removals() {
+            let tag = colored
+                .paint("remove", |s| style(s).red().to_string())
+                .rendered;
+            self.print(&format!("     {tag}  {name}"));
+        }
+    }
+
     fn apply(&mut self, cart: &Cart) -> Result<ApplyOutcome> {
         let Some(session) = &self.session else {
             ui::warn("no AUR index loaded; cannot apply");
@@ -895,6 +1060,19 @@ impl ShellEnv for RealEnv<'_> {
 }
 
 impl RealEnv<'_> {
+    /// When the AUR pkgbase a staged row resolves to was last modified (its
+    /// branch-tip commit time), for the `show` table's age column. `None` when
+    /// there's no index, the row isn't an AUR package, or the timestamp is
+    /// unrecorded (`0` in pre-`commit_time_unix` index archives).
+    fn aur_last_modified(&self, item: &CartItem) -> Option<SystemTime> {
+        let session = self.session.as_ref()?;
+        let entry = session.secondary().lookup(session.index(), item.spec())?;
+        let secs = u64::try_from(entry.commit_time_unix)
+            .ok()
+            .filter(|&s| s > 0)?;
+        Some(UNIX_EPOCH + Duration::from_secs(secs))
+    }
+
     /// Pure fresh-install cart (no upgrade rows): the `-S` pipeline owns the
     /// plan table + its only-when-deps confirm and the stratified build/install.
     /// The cart's reviewed set rides along so approved AUR pkgbases aren't
@@ -1029,6 +1207,130 @@ fn outcome_of(report: &build::RunReport) -> ApplyOutcome {
     }
 }
 
+/// The ` → ` separator between the old and new version in an upgrade row.
+const ARROW: &str = " → ";
+/// Display width of [`ARROW`] (the arrow glyph is one column, flanked by two
+/// spaces). Separate from `ARROW.len()` (5 bytes) so the version-block width
+/// math and the rendered separator can't drift.
+const ARROW_PAD: Width = Width(3);
+
+/// A terminal column width in display cells, used to align the `show` table.
+///
+/// A newtype (not a bare `usize`) so a width can't be confused with an index or
+/// a count, and so the pad-on-visible-width policy lives in one place — see
+/// [`Self::pad_left`].
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct Width(usize);
+
+impl Width {
+    const ZERO: Self = Self(0);
+
+    /// Visible width of a plain (un-colored) cell. Cells are ASCII (names,
+    /// versions, repo labels), so char count equals display columns.
+    fn of(s: &str) -> Self {
+        Self(s.chars().count())
+    }
+
+    /// The widest of a set of cell widths — the column width. `ZERO` if empty.
+    fn widest(widths: impl Iterator<Item = Self>) -> Self {
+        widths.max().unwrap_or(Self::ZERO)
+    }
+
+    fn is_zero(self) -> bool {
+        self == Self::ZERO
+    }
+
+    /// `self` spaces — the blank for a fixed-width column with no content.
+    fn blanks(self) -> String {
+        " ".repeat(self.0)
+    }
+
+    /// The padding needed to widen a cell of width `inner` to `self`.
+    const fn gap(self, inner: Self) -> Self {
+        Self(self.0.saturating_sub(inner.0))
+    }
+
+    /// Left-justify `cell` to `self` (rendered text, then trailing spaces).
+    fn pad_left(self, cell: Cell) -> String {
+        let Cell { rendered, width } = cell;
+        format!("{rendered}{}", self.gap(width).blanks())
+    }
+
+    /// Right-justify `cell` to `self` (leading spaces, then rendered text).
+    fn pad_right(self, cell: Cell) -> String {
+        let Cell { rendered, width } = cell;
+        format!("{}{rendered}", self.gap(width).blanks())
+    }
+}
+
+impl std::ops::Add for Width {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self(self.0 + rhs.0)
+    }
+}
+
+/// A rendered table cell: the (possibly colored) display string plus the width
+/// of its *plain* text, so [`Width::pad_left`] aligns on visible width even when
+/// `rendered` carries ANSI escapes.
+struct Cell {
+    rendered: String,
+    width: Width,
+}
+
+/// Whether the table renders with ANSI color — a two-state enum rather than a
+/// bare `bool`, so `Colored::No` reads as intent and the color branch lives in
+/// one place ([`Self::paint`]).
+#[derive(Clone, Copy)]
+enum Colored {
+    Yes,
+    No,
+}
+
+impl Colored {
+    /// Detect from the global color mode ([`ui::color_on`]).
+    fn detect() -> Self {
+        if ui::color_on() { Self::Yes } else { Self::No }
+    }
+
+    /// Render `plain`, applying `paint` only when color is enabled. The returned
+    /// [`Cell`] remembers `plain`'s visible width for later alignment.
+    fn paint(self, plain: &str, paint: impl FnOnce(&str) -> String) -> Cell {
+        Cell {
+            width: Width::of(plain),
+            rendered: match self {
+                Self::Yes => paint(plain),
+                Self::No => plain.to_owned(),
+            },
+        }
+    }
+}
+
+/// The version cell for one cart row: `old → new` for an upgrade, a blank of the
+/// same width for a fresh install (so the trailing age column stays aligned),
+/// or empty when the cart has no upgrade rows at all (`ver_w` is zero). Includes
+/// its own leading column separator.
+fn version_cell(
+    it: &CartItem,
+    old_w: Width,
+    new_w: Width,
+    ver_w: Width,
+    colored: Colored,
+) -> String {
+    if ver_w.is_zero() {
+        return String::new();
+    }
+    let Some(u) = it.upgrade.as_ref() else {
+        return format!("  {}", ver_w.blanks());
+    };
+    let old = u.old_ver.to_string();
+    let new = u.new_ver.to_string();
+    let old_c = old_w.pad_right(colored.paint(&old, |s| style(s).red().to_string()));
+    let new_c = new_w.pad_left(colored.paint(&new, |s| style(s).green().to_string()));
+    let arrow = colored.paint(ARROW, |s| ui::dim(s).to_string()).rendered;
+    format!("  {old_c}{arrow}{new_c}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1077,8 +1379,13 @@ mod tests {
         fn names(&self) -> &[PkgTarget] {
             &self.names
         }
-        fn classify(&self, target: &PkgTarget) -> Option<Source> {
-            self.classes.get(target.as_str()).copied()
+        fn classify(&self, target: &PkgTarget) -> Option<StageClass> {
+            // The fake tracks only the coarse source; the concrete repo (which
+            // drives the display + `drop core`) is exercised via `upgrade`-seeded
+            // rows, whose `from_upgrade` carries the real repo name.
+            self.classes
+                .get(target.as_str())
+                .map(|&source| StageClass { source, repo: None })
         }
         fn aur_policy(&self) -> AurApproval {
             self.policy
@@ -1092,6 +1399,10 @@ mod tests {
                 .review_outcomes
                 .remove(target.as_str())
                 .unwrap_or(ReviewOutcome::Approved))
+        }
+        fn render_cart(&mut self, _cart: &Cart) {
+            // The table rendering (color, alignment, age) is RealEnv's job; the
+            // pure dispatch core under test prints the header + summary itself.
         }
         fn apply(&mut self, _cart: &Cart) -> Result<ApplyOutcome> {
             self.apply_calls += 1;
@@ -1112,6 +1423,16 @@ mod tests {
         ListItem {
             target: PkgTarget::new(name),
             label: label.to_owned(),
+            repo: None,
+        }
+    }
+
+    /// A list row tagged with its repo, for the `add <repo>` filter tests.
+    fn li_repo(repo: &str, name: &str) -> ListItem {
+        ListItem {
+            target: PkgTarget::new(name),
+            label: format!("{repo}/{name} 1-1"),
+            repo: Some(RepoName::from(repo)),
         }
     }
 
@@ -1461,5 +1782,109 @@ mod tests {
         let (flow, env) = dispatch_one("info");
         assert_eq!(flow, Flow::Continue);
         assert!(env.lines.iter().any(|l| l.contains("usage: info")));
+    }
+
+    fn cart_specs(state: &State) -> Vec<PkgTarget> {
+        state
+            .cart
+            .items()
+            .iter()
+            .map(|i| PkgTarget::new(i.spec()))
+            .collect()
+    }
+
+    #[test]
+    fn drop_by_repo_filter_unstages_every_aur_row() {
+        let mut env = env_with(&[
+            ("foo", Source::Aur),
+            ("bar", Source::Repo),
+            ("baz", Source::Aur),
+        ]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo bar baz"), &mut env);
+        state.dispatch(&command::parse("drop aur"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["bar"], "`drop aur` drops AUR rows");
+    }
+
+    #[test]
+    fn drop_by_concrete_repo_filter_targets_one_sync_db() {
+        // `upgrade`-seeded rows carry their concrete repo, so a repo-name
+        // selector can single out `core` without touching `extra`/`aur`.
+        let mut env = FakeEnv {
+            upgrade_candidates: vec![
+                up("core", "glibc"),
+                up("extra", "firefox"),
+                up("aur", "yay-bin"),
+            ],
+            ..FakeEnv::default()
+        };
+        let mut state = State::default();
+        state.dispatch(&command::parse("upgrade"), &mut env);
+        state.dispatch(&command::parse("drop core"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["firefox", "yay-bin"]);
+    }
+
+    #[test]
+    fn add_by_repo_filter_stages_matching_list_rows() {
+        let mut env = env_with(&[("firefox", Source::Repo), ("vim", Source::Repo)]);
+        env.search_result = vec![
+            li_repo("extra", "firefox"),
+            li_repo("core", "glibc"),
+            li_repo("extra", "vim"),
+        ];
+        let mut state = State::default();
+        // `search` remembers the list `add extra` then filters against.
+        state.dispatch(&command::parse("search x"), &mut env);
+        state.dispatch(&command::parse("add extra"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["firefox", "vim"]);
+    }
+
+    #[test]
+    fn upgrade_by_repo_filter_seeds_only_that_repo() {
+        let mut env = FakeEnv {
+            upgrade_candidates: vec![up("core", "glibc"), up("aur", "yay-bin")],
+            ..FakeEnv::default()
+        };
+        let mut state = State::default();
+        state.dispatch(&command::parse("upgrade aur"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["yay-bin"]);
+    }
+
+    #[test]
+    fn approve_by_repo_filter_clears_every_aur_row() {
+        let mut env = env_with(&[("a", Source::Aur), ("b", Source::Aur), ("c", Source::Repo)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add a b c"), &mut env);
+        state.dispatch(&command::parse("approve aur"), &mut env);
+        assert!(
+            state.cart.all_approved(),
+            "`approve aur` clears the AUR gate"
+        );
+    }
+
+    #[test]
+    fn expand_repo_tokens_expands_known_repos_and_passes_others_through() {
+        let rows = vec![
+            RepoRow {
+                target: PkgTarget::new("glibc"),
+                repo: Some(RepoName::from("core")),
+            },
+            RepoRow {
+                target: PkgTarget::new("yay-bin"),
+                repo: Some(RepoName::from("aur")),
+            },
+        ];
+        // A repo name expands to its rows' targets…
+        assert_eq!(expand_repo_tokens(&[s("aur")], &rows), vec!["yay-bin"]);
+        // …case-insensitively…
+        assert_eq!(expand_repo_tokens(&[s("CORE")], &rows), vec!["glibc"]);
+        // …while numbers, names, and globs pass through untouched.
+        assert_eq!(expand_repo_tokens(&[s("3")], &rows), vec!["3"]);
+        assert_eq!(expand_repo_tokens(&[s("nginx")], &rows), vec!["nginx"]);
+        assert_eq!(expand_repo_tokens(&[s("py-*")], &rows), vec!["py-*"]);
+    }
+
+    fn s(t: &str) -> String {
+        t.to_owned()
     }
 }

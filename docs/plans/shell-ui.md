@@ -72,13 +72,18 @@ gaur> quit
    `apply` interrupted (Ctrl+C) or failed mid-build drops back to the *shell*
    with the cart intact and the offending pkgbase badged, so the user can
    `discard` it and `apply` the rest — never restart the command.
-5. **Selection by numbers *and* package names with wildcards.** Commands that
-   present a list (`search`, `upgrade`, `show`) remember it; selector arguments
-   accept numbers (`3`), ranges (`5-8`), names (`glibc`), and globs (`python-*`).
-   Numbers/ranges index the last list. The *universe* a name/glob resolves
-   against is verb-scoped: `add` resolves against the AUR index + sync DBs (you
-   can add anything); `discard`/`review`/`approve` resolve against the **cart**
-   (you act on what's staged); `approve *` means "every staged AUR package".
+5. **Selection by numbers *and* package names with wildcards *and* repo names.**
+   Commands that present a list (`search`, `upgrade`, `show`) remember it;
+   selector arguments accept numbers (`3`), ranges (`5-8`), names (`glibc`),
+   globs (`python-*`), and **repo names** (`aur`, `core`, `extra`, …) that select
+   every row from that repo — `drop aur` un-stages all AUR rows, `add extra`
+   stages every `extra` row from the last list. Numbers/ranges index the last
+   list. The *universe* a name/glob/repo resolves against is verb-scoped: `add`
+   resolves against the last list + AUR index + sync DBs (you can add anything);
+   `discard`/`review`/`approve` resolve against the **cart** (you act on what's
+   staged); `approve *` means "every staged AUR package". A repo-name token only
+   expands when something in the verb's scope is from that repo, so a real
+   package sharing a repo's name still resolves normally otherwise.
 6. **`apply` is one atomic add+remove transaction** (target state) — a single
    native libalpm transaction carrying repo adds, AUR file adds, *and* removals,
    so "package(group) X replaces package(group) Y" lands without a window where
@@ -446,8 +451,17 @@ Each phase is independently shippable and leaves the flag CLI fully working.
 
    **As implemented (deviations / deferred):**
    - The cost overlay lands in the **apply preview**, not the `upgrade` list (the
-     shell has no picker to carry per-row cost cells) — `upgrade`/`show` render
-     each row as `№  source  approval  name  old → new`.
+     shell has no picker to carry per-row cost cells) — `upgrade`/`show` render a
+     colored, column-aligned table: `№  repo  approval  name  old → new  (age)`.
+     The `repo` cell is the **concrete** sync-DB (`core`/`extra`/…, yay-style
+     hashed color) rather than the coarse `repo`/`aur`; the `name` and `old → new`
+     versions are separate aligned columns; and AUR rows carry a dimmed "last
+     modified" age (`(3d ago)`) from the pkgbase's branch-tip commit time. The
+     table body renders behind the `ShellEnv::render_cart` seam (color + width
+     math + wall-clock age are I/O-shaped), while `show`'s header + approval
+     summary stay in the pure dispatch core. Repo names are a typed
+     `names::RepoName`, and the table aligns via a `Width`/`Colored`/`Cell`
+     cluster so padding is on visible width, not byte length.
    - Repo `repo_skipped` (the `--ignore` set) is **recomputed** at apply from the
      live candidate set minus the staged repo upgrades, so a stale cart can't pin
      the wrong packages.

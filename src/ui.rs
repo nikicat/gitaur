@@ -220,9 +220,43 @@ pub fn human_duration(seconds: u64) -> String {
     }
 }
 
+/// Format an elapsed age as a single coarse unit — `3d`, `5h`, `12m`, or `now`.
+///
+/// The AUR "last modified" column (yay-style) only needs "how stale is this
+/// PKGBUILD?", so one unit is enough; rounds down to the largest non-zero unit
+/// and floors sub-minute ages at `now`.
+pub fn human_age(age: std::time::Duration) -> String {
+    let secs = age.as_secs();
+    if secs >= 86_400 {
+        format!("{}d", secs / 86_400)
+    } else if secs >= 3_600 {
+        format!("{}h", secs / 3_600)
+    } else if secs >= 60 {
+        format!("{}m", secs / 60)
+    } else {
+        "now".to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Single-unit "time since" rounding for the AUR last-modified column:
+    /// floors at `now` under a minute, then the largest non-zero of m/h/d.
+    #[test]
+    fn human_age_single_coarse_unit() {
+        use std::time::Duration;
+        let age = |s| human_age(Duration::from_secs(s));
+        assert_eq!(age(0), "now");
+        assert_eq!(age(59), "now");
+        assert_eq!(age(60), "1m");
+        assert_eq!(age(59 * 60), "59m");
+        assert_eq!(age(3_600), "1h");
+        assert_eq!(age(23 * 3_600), "23h");
+        assert_eq!(age(86_400), "1d");
+        assert_eq!(age(3 * 86_400 + 5 * 3_600), "3d");
+    }
 
     /// Unit boundaries and rounding: bare bytes stay integer, the 1024 cliff
     /// rolls over to the next unit, and KiB+ carry two decimals (pacman parity).

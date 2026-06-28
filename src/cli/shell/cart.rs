@@ -11,7 +11,7 @@
 //! live behind the [`super::ShellEnv`] trait.
 
 use crate::build::Target;
-use crate::names::{PkgBase, PkgName, PkgTarget};
+use crate::names::{PkgBase, PkgName, PkgTarget, RepoName};
 use crate::pacman::invoke::{PkgUpgrade, REPO_AUR};
 use std::collections::HashSet;
 
@@ -36,6 +36,19 @@ impl Source {
             Self::Aur => "aur",
         }
     }
+}
+
+/// Coarse staging classification of a name: the source lane plus, for repo
+/// packages, the concrete sync-DB it lives in (`core`, `extra`, …).
+///
+/// The concrete `repo` is display-only — it drives the `show` table's repo
+/// column and the `drop core`/`add extra` repo-filter selectors. The real
+/// install routing is still the resolver's call at apply time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageClass {
+    pub source: Source,
+    /// Concrete sync-repo for [`Source::Repo`]; `None` for AUR.
+    pub repo: Option<RepoName>,
 }
 
 /// How AUR packages enter the cart: needing review, or pre-approved.
@@ -94,6 +107,11 @@ pub struct CartItem {
     pub target: Target,
     pub source: Source,
     pub approval: Approval,
+    /// Concrete sync-repo (`core`, `extra`, …) for a repo package; `None` for
+    /// AUR rows and for repo rows staged before the source DB was known. Drives
+    /// the `show` table's repo column and the `drop core` repo filter — see
+    /// [`Self::repo_label`].
+    pub repo: Option<RepoName>,
     /// `Some` when this row came from `upgrade` — it carries the old→new
     /// versions for the `show` table and routes repo rows through the partial
     /// `pacman -Syu` lane at apply (rather than a fresh `pacman -S`).
@@ -102,14 +120,21 @@ pub struct CartItem {
 
 impl CartItem {
     /// Stage a fresh install of `target` from `source`, defaulting the approval
-    /// per `source` + the AUR policy. The build pipeline's [`Target`] starts
-    /// unhinted — `resolver::expand_pkgbase_targets` infers a counterpart hint
-    /// on rewrite if needed.
-    pub fn new(target: PkgTarget, source: Source, aur: AurApproval) -> Self {
+    /// per `source` + the AUR policy. `repo` is the concrete sync-DB for a repo
+    /// package (display only). The build pipeline's [`Target`] starts unhinted —
+    /// `resolver::expand_pkgbase_targets` infers a counterpart hint on rewrite
+    /// if needed.
+    pub fn new(
+        target: PkgTarget,
+        source: Source,
+        repo: Option<RepoName>,
+        aur: AurApproval,
+    ) -> Self {
         Self {
             target: Target::bare(target.into_inner()),
             source,
             approval: Approval::default_for(source, aur),
+            repo,
             upgrade: None,
         }
     }
@@ -128,10 +153,14 @@ impl CartItem {
             Source::Aur => Target::with_hint(u.name.as_str().to_owned(), u.name.clone()),
             Source::Repo => Target::bare(u.name.as_str().to_owned()),
         };
+        // AUR rows label as `aur` from the source; a repo row carries its
+        // concrete sync-DB so the table shows `core`/`extra`/… not just `repo`.
+        let repo = (source == Source::Repo).then(|| RepoName::from(u.repo.as_str()));
         Self {
             target,
             source,
             approval: Approval::default_for(source, aur),
+            repo,
             upgrade: Some(u),
         }
     }
@@ -139,6 +168,17 @@ impl CartItem {
     /// The freeform user-typed spec this item stages.
     pub fn spec(&self) -> &str {
         &self.target.spec
+    }
+
+    /// The repo bucket this row displays in and a repo filter matches against:
+    /// the concrete sync-DB for a known repo package, `aur` for an AUR row, or
+    /// `repo` when a repo package was staged before its source DB was resolved.
+    pub fn repo_label(&self) -> RepoName {
+        match (self.source, &self.repo) {
+            (Source::Aur, _) => RepoName::from(REPO_AUR),
+            (Source::Repo, Some(r)) => r.clone(),
+            (Source::Repo, None) => RepoName::from("repo"),
+        }
     }
 
     /// A repo *upgrade* row — applied via the partial `pacman -Syu` lane, not a
@@ -330,7 +370,7 @@ mod tests {
     use super::*;
 
     fn item(spec: &str, source: Source) -> CartItem {
-        CartItem::new(PkgTarget::new(spec), source, AurApproval::Review)
+        CartItem::new(PkgTarget::new(spec), source, None, AurApproval::Review)
     }
 
     fn target(spec: &str) -> PkgTarget {
@@ -345,7 +385,7 @@ mod tests {
 
     #[test]
     fn aur_auto_approve_policy_skips_review() {
-        let it = CartItem::new(target("yay-bin"), Source::Aur, AurApproval::Auto);
+        let it = CartItem::new(target("yay-bin"), Source::Aur, None, AurApproval::Auto);
         assert_eq!(it.approval, Approval::Approved);
     }
 
@@ -465,12 +505,26 @@ mod tests {
             Some("yay-bin")
         );
         assert!(!aur.is_repo_upgrade());
+        // AUR rows label `aur` from the source, not a stored concrete repo.
+        assert_eq!(aur.repo, None);
+        assert_eq!(aur.repo_label(), "aur");
 
         let repo = CartItem::from_upgrade(upgrade("core", "glibc"), AurApproval::Review);
         assert_eq!(repo.source, Source::Repo);
         assert_eq!(repo.approval, Approval::Approved);
         assert!(repo.is_repo_upgrade());
         assert_eq!(repo.version_transition().as_deref(), Some("1-1 → 2-1"));
+        // A repo row carries its concrete sync-DB for the table's repo column.
+        assert_eq!(repo.repo_label(), "core");
+    }
+
+    #[test]
+    fn repo_label_falls_back_when_source_db_unknown() {
+        // A repo package staged without a concrete repo (e.g. a fresh `add`
+        // before classification surfaced the DB) still labels as `repo`.
+        assert_eq!(item("glibc", Source::Repo).repo_label(), "repo");
+        // AUR always labels `aur`.
+        assert_eq!(item("yay-bin", Source::Aur).repo_label(), "aur");
     }
 
     #[test]

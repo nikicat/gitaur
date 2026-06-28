@@ -161,6 +161,19 @@ impl fmt::Display for SearchTerm {
 #[rkyv(compare(PartialEq, PartialOrd))]
 pub struct VirtualName(String);
 
+/// One pacman sync-repo name (`core`, `extra`, `multilib`, …) or the `aur`
+/// sentinel for AUR-sourced rows.
+///
+/// Distinct from the package-name newtypes because it identifies a *source
+/// bucket*, not a package: a repo name labels the `show`/upgrade table's first
+/// column and backs the `drop core` / `add extra` repo-filter selectors. Typing
+/// it stops a repo name from being passed where a [`PkgName`] / [`PkgBase`] is
+/// expected (they share lexical shape — there's a `base`/`extra` package too).
+/// Not archived: repo names come from the live alpm sync DBs and the upgrade
+/// scan, never from the rkyv index.
+#[derive(Debug, Clone, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RepoName(String);
+
 macro_rules! impl_name_wrapper {
     ($ty:ident) => {
         impl $ty {
@@ -268,6 +281,7 @@ impl_name_wrapper!(PkgName);
 impl_name_wrapper!(PkgBase);
 impl_name_wrapper!(PkgTarget);
 impl_name_wrapper!(VirtualName);
+impl_name_wrapper!(RepoName);
 
 // Cross-type conversions, intentionally only in the "narrowing → widening"
 // direction. A classified `PkgBase` or `PkgName` can be re-presented as an

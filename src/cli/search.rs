@@ -13,6 +13,7 @@ use crate::error::{Error, Result};
 use crate::index::{self, IndexEntry, secondary::Secondary};
 use crate::names::{PkgTarget, SearchTerm};
 use crate::pacman::alpm_db::{self, RepoHit};
+use crate::pacman::invoke::REPO_AUR;
 use crate::paths;
 use crate::runopts;
 use crate::ui;
@@ -44,6 +45,15 @@ impl Row<'_> {
         match self {
             Row::Repo(r) => PkgTarget::from(&r.name),
             Row::Aur(e) => PkgTarget::from(&e.pkgbase),
+        }
+    }
+
+    /// The repo bucket this row belongs to (`core`, `extra`, …, or `aur`), for
+    /// the shell's repo-filter selectors (`add extra`).
+    pub(crate) const fn repo_name(&self) -> &str {
+        match self {
+            Row::Repo(r) => r.repo.as_str(),
+            Row::Aur(_) => REPO_AUR,
         }
     }
 
