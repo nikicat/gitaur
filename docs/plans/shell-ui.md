@@ -1,7 +1,7 @@
 # Plan: shell-like (REPL) UI for interactive `gaur`
 
-Status: phases 1–3 implemented; the `upgrade` procedure (phase 4) + polish
-(phase 5) + native combined commit (phase 6) remain.
+Status: phases 1–4 implemented; polish (phase 5) + native combined commit
+(phase 6) remain.
 
 ## Goal
 
@@ -267,6 +267,7 @@ src/cli/shell.rs            run(): session hoist + REPL loop + rustyline wiring 
 src/cli/shell/command.rs    Command enum + parse() (shell-words → verb)           [done]
 src/cli/shell/selector.rs   Selector enum + resolve()                             [done]
 src/cli/shell/cart.rs       Cart + CartItem + Source/Approval/ApplyOutcome         [done]
+src/cli/shell/upgrade.rs    refresh+reload, cost-overlay preview (ex-upgrade_loop) [done]
 src/cli/shell/complete.rs   rustyline Completer over verbs + the name universe    [pending]
 ```
 
@@ -423,10 +424,32 @@ Each phase is independently shippable and leaves the flag CLI fully working.
    - Coarse `add`-time classification prefers Repo on a name in both sync + AUR
      (matches the resolver's own ordering); it only sets the approval policy and
      the `show` label — the real routing is the resolver's at `apply`.
-4. **`upgrade` procedure in the shell.** `upgrade [sel…]` refreshes + reloads the
-   session, recomputes candidates, seeds the cart (repo approved / AUR
-   needs-review); port the cost overlay (sizes, build-time, `built` tag). Retire
-   `upgrade_loop.rs` and the dialoguer multi-select table.
+4. **`upgrade` procedure in the shell. — DONE.** `upgrade [sel…]` refreshes +
+   reloads the session in place (so `search`/`info`/classification see fresh
+   data), recomputes candidates, and seeds the cart (repo approved / AUR
+   needs-review per config). `CartItem` gained `upgrade: Option<PkgUpgrade>` —
+   AUR upgrade rows hint their foreign pkgname (the loop's `resolve_aur` trick),
+   and repo upgrade rows route through a **partial `pacman -Syu`** lane
+   (`--ignore` every repo candidate the user didn't stage) instead of `pacman
+   -S`. `apply` branches: a pure fresh-install cart keeps the phase-3 `-S`
+   pipeline; an upgrade cart resolves the AUR/build half once, renders the
+   ported cost-overlay `change_set_table` preview (sizes from the synced db,
+   build-time + `built` from the metrics store), takes one confirm, then runs
+   the `-Syu` repo lane + `apply_plan` + removals. The `upgrade_loop` driver +
+   dialoguer picker are gone; its reusable helpers (preview, metrics overlay,
+   the synced/system snapshots) moved to `src/cli/shell/upgrade.rs`. The
+   single-shot `-Syu` flag path keeps its own `ui::select_upgrades` picker.
+
+   **As implemented (deviations / deferred):**
+   - The cost overlay lands in the **apply preview**, not the `upgrade` list (the
+     shell has no picker to carry per-row cost cells) — `upgrade`/`show` render
+     each row as `№  source  approval  name  old → new`.
+   - Repo `repo_skipped` (the `--ignore` set) is **recomputed** at apply from the
+     live candidate set minus the staged repo upgrades, so a stale cart can't pin
+     the wrong packages.
+   - A cart mixing fresh `add`s with `upgrade` rows applies correctly, but the
+     change-set preview's roots are the upgrade rows; fresh installs show under
+     the pulled-in/dep section.
 5. **Polish.** Tab-completion (verbs + cart/universe), `refresh`, per-root dep
    nesting in `show`, history `Hinter`, `help <topic>`, config knobs
    (`aur_approval`, prompt/history).
@@ -463,7 +486,8 @@ Mirrors the existing two-tier philosophy (`docs/TESTING.md`) and the loop's seam
 | --- | --- | --- |
 | `src/cli/shell.rs` | `dispatch`/`ShellEnv`/`run`, `State`, `ListItem` | REPL core (done); grows the cart + apply env methods |
 | `src/cli/shell/selector.rs` | `resolve` | numbers/ranges/names/globs → targets (done) |
-| `src/cli/upgrade_loop.rs` | `UpgradeSession`, `recompute_remaining`, `resolve_aur`, `preview*`, `candidate_metrics`, `SessionState::fold` | reuse for `upgrade`/`show`/`apply`; retire in phase 4 |
+| `src/cli/shell/upgrade.rs` | `refresh_and_reload`, `preview`, `preview_metrics`, `system_pac`/`synced_pac` | refresh+reload + the apply cost-overlay preview (the reusable half of the retired `upgrade_loop`) |
+| `src/build/upgrade.rs` | `UpgradeSession::{recompute_remaining,pkgbase_of}` | recompute candidates for `upgrade` |
 | `src/cli/search.rs` | `Row`, `label`, `picked` | reused for the shell's `search` rows (done) |
 | `src/build.rs` | `resolve_targets`, `apply_plan`, `cmd_install`, `Target::{with_hint,bare}`, `RunReport` | the apply engine + fold |
 | `src/build/review.rs` | `review()` → approve/skip/discard/view/edit | the `review` command's diff cycle |

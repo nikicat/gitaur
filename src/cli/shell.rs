@@ -5,34 +5,36 @@
 //! wizard-style `dialoguer` flows. See `docs/plans/shell-ui.md` for the full
 //! design and phasing.
 //!
-//! **Phase 3 status:** the session is hoisted once at start (the AUR index +
+//! **Phase 4 status:** the session is hoisted at start (the AUR index +
 //! secondary maps via [`UpgradeSession`], a sorted name universe for
-//! globs/completion, and the sync-repo name set for coarse classification).
-//! The read-only verbs work (`search`/`info`), and the cart is live: `add` /
-//! `drop` / `remove` / `clear` stage a [`cart::Cart`]; `review` / `approve`
-//! move AUR items past the approval gate; `show` previews it; `apply` gates on
-//! all-approved, then runs the build+install (reusing the `-S` pipeline) plus
-//! `pacman -R` for removals. `upgrade` still bridges to the existing loop
-//! (phase 1); `refresh` lands in phase 5.
+//! globs/completion, and the sync-repo name set for coarse classification) and
+//! is *reloaded* on `upgrade`. The cart is live: `add` / `drop` / `remove` /
+//! `clear` stage a [`cart::Cart`]; `upgrade` refreshes + seeds the available
+//! upgrades (repo approved / AUR needs-review); `review` / `approve` move AUR
+//! items past the approval gate; `show` previews it; `apply` gates on
+//! all-approved, then runs the partial `pacman -Syu` repo lane + the AUR
+//! build/install + `pacman -R` removals, with the cost-overlay change-set
+//! preview ([`upgrade`]). This replaced the old `upgrade_loop` driver +
+//! dialoguer picker. `refresh` lands in phase 5.
 //!
-//! The [`ShellEnv`]/[`State::dispatch`] split keeps command handling unit-testable
-//! with a scripted fake (mirrors the `LoopEnv`/`drive` pattern in
-//! [`crate::cli::upgrade_loop`]): the side-effecting I/O (classification, the
-//! PKGBUILD diff, the build) lives behind the trait so the cart mutations and
-//! the approval gate are exercised without a terminal, index, or `makepkg`.
+//! The [`ShellEnv`]/[`State::dispatch`] split keeps command handling
+//! unit-testable with a scripted fake: the side-effecting I/O (classification,
+//! the PKGBUILD diff, the refresh+recompute, the build) lives behind the trait
+//! so the cart mutations and the approval gate are exercised without a
+//! terminal, index, or `makepkg`.
 
 use crate::build::{self, ConfirmGate, InstallOpts, UpgradeSession, review};
+use crate::cli::dispatch;
 use crate::cli::search::Row;
-use crate::cli::upgrade_loop;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::index;
 use crate::mirror::{self, MirrorRepo};
 use crate::names::{PkgBase, PkgName, PkgTarget, SearchTerm};
 use crate::pacman::alpm_db::{self, PacmanIndex};
-use crate::pacman::invoke;
+use crate::pacman::invoke::{self, PkgUpgrade, REPO_AUR};
 use crate::paths;
-use crate::ui;
+use crate::ui::{self, UpgradeSelection};
 use cart::{
     ApplyOutcome, Approval, ApproveResult, AurApproval, Cart, CartItem, ReviewOutcome, Source,
 };
@@ -45,6 +47,7 @@ use tracing::{debug, info, instrument};
 pub mod cart;
 pub mod command;
 pub mod selector;
+pub mod upgrade;
 
 /// One row of the most recent result list, addressable by its 1-based number.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,9 +84,10 @@ pub enum Flow {
 pub trait ShellEnv {
     /// Emit one line of user-facing output.
     fn print(&mut self, line: &str);
-    /// Run an upgrade pass. Phase 1/2 delegate to the existing upgrade loop;
-    /// phases 3–4 replace this with cart-based staging.
-    fn upgrade(&mut self) -> Result<()>;
+    /// Refresh the mirror + index, reload the session (so `search`/`info` see
+    /// fresh data too), and return the current upgrade candidates (repo ∪ AUR)
+    /// for `upgrade` to seed into the cart.
+    fn upgrade(&mut self) -> Result<Vec<PkgUpgrade>>;
     /// Run a combined repo + AUR search; returns rows for the numbered list.
     fn search(&mut self, terms: &[SearchTerm]) -> Result<Vec<ListItem>>;
     /// Print `-Si`-style info for the already-resolved targets.
@@ -141,12 +145,7 @@ impl State {
                 Flow::Continue
             }
             Command::Upgrade(args) => {
-                if !args.is_empty() {
-                    env.print("note: per-package upgrade filtering arrives in a later phase; running the full upgrade");
-                }
-                if let Err(e) = env.upgrade() {
-                    env.print(&format!("upgrade: {e}"));
-                }
+                self.upgrade(args, env);
                 Flow::Continue
             }
             Command::Add(args) => {
@@ -246,6 +245,44 @@ impl State {
         if let Err(e) = env.show_info(&targets) {
             env.print(&format!("info: {e}"));
         }
+    }
+
+    /// `upgrade [sel…]`: refresh + recompute the available upgrades and seed
+    /// them into the cart (repo → approved, AUR → needs-review per config). With
+    /// `sel…`, seed only the matching subset (numbers index the freshly computed
+    /// list; names/globs match candidate names). Then `show`s the cart.
+    fn upgrade<E: ShellEnv>(&mut self, args: &[String], env: &mut E) {
+        let candidates = match env.upgrade() {
+            Ok(c) => c,
+            Err(e) => {
+                env.print(&format!("upgrade: {e}"));
+                return;
+            }
+        };
+        if candidates.is_empty() {
+            env.print("nothing to upgrade");
+            return;
+        }
+        let to_seed = if args.is_empty() {
+            candidates
+        } else {
+            match select_from_candidates(args, &candidates) {
+                Ok(v) => v,
+                Err(e) => {
+                    env.print(&format!("upgrade: {e}"));
+                    return;
+                }
+            }
+        };
+        let policy = env.aur_policy();
+        let mut staged = 0;
+        for u in to_seed {
+            if self.cart.add(CartItem::from_upgrade(u, policy)) {
+                staged += 1;
+            }
+        }
+        env.print(&format!("{staged} upgrade(s) staged"));
+        self.show(env);
     }
 
     /// `add <sel…>`: classify each selected target and stage it. Selectors
@@ -448,8 +485,13 @@ impl State {
             cart.removals().len()
         ));
         for (i, it) in cart.items().iter().enumerate() {
+            // Upgrade rows carry their old→new transition; fresh installs don't.
+            let ver = it
+                .version_transition()
+                .map(|v| format!("  {v}"))
+                .unwrap_or_default();
             env.print(&format!(
-                "{:>3}  {:4}  {:8}  {}",
+                "{:>3}  {:4}  {:8}  {}{ver}",
                 i + 1,
                 it.source.label(),
                 it.approval.label(),
@@ -521,6 +563,33 @@ impl State {
             .collect();
         selector::resolve(args, &list, &universe)
     }
+}
+
+/// Filter `candidates` to those a selector matches: numbers index the candidate
+/// list, names/globs match candidate names. Reuses the selector core (the same
+/// one `add`/`info`/cart verbs use), so `upgrade glibc python-*` works the same.
+fn select_from_candidates(
+    args: &[String],
+    candidates: &[PkgUpgrade],
+) -> std::result::Result<Vec<PkgUpgrade>, String> {
+    let list: Vec<ListItem> = candidates
+        .iter()
+        .map(|u| ListItem {
+            target: PkgTarget::new(u.name.as_str()),
+            label: String::new(),
+        })
+        .collect();
+    let universe: Vec<PkgTarget> = candidates
+        .iter()
+        .map(|u| PkgTarget::new(u.name.as_str()))
+        .collect();
+    let picked = selector::resolve(args, &list, &universe)?;
+    let names: HashSet<&str> = picked.iter().map(PkgTarget::as_str).collect();
+    Ok(candidates
+        .iter()
+        .filter(|u| names.contains(u.name.as_str()))
+        .cloned()
+        .collect())
 }
 
 /// The `help` command body. A flat command list; per-command topics land with
@@ -650,10 +719,18 @@ impl ShellEnv for RealEnv<'_> {
         println!("{line}");
     }
 
-    fn upgrade(&mut self) -> Result<()> {
-        // The loop returns its own exit code; inside the shell we only care
-        // whether it errored — control returns to the prompt either way.
-        upgrade_loop::run(self.cfg, self.devel).map(|_code| ())
+    fn upgrade(&mut self) -> Result<Vec<PkgUpgrade>> {
+        // Refresh the mirror + index and reload the session in place, so the
+        // fresh data backs subsequent `search`/`info`/classification too.
+        let session = upgrade::refresh_and_reload(self.cfg)?;
+        self.caches = build_universe(session.as_ref());
+        self.session = session;
+        match &self.session {
+            Some(session) => session.recompute_remaining(self.devel),
+            // No AUR index even after a refresh: repo upgrades are still
+            // queryable straight from the synced db.
+            None => invoke::query_repo_upgrades(),
+        }
     }
 
     fn search(&mut self, terms: &[SearchTerm]) -> Result<Vec<ListItem>> {
@@ -775,61 +852,180 @@ impl ShellEnv for RealEnv<'_> {
             ui::warn("no AUR index loaded; cannot apply");
             return Ok(ApplyOutcome::Failed);
         };
-        let alpm = alpm_db::open()?;
-        let pac = PacmanIndex::build(&alpm);
+        let pac = upgrade::system_pac()?;
 
-        // Install half: reuse the `-S` pipeline (resolve → plan table → confirm
-        // → stratified build + install). The cart's reviewed set rides along so
-        // approved AUR pkgbases aren't re-prompted for their diff.
-        let targets = cart.install_targets();
-        if !targets.is_empty() {
-            let mut reviewed = cart.reviewed().clone();
-            let opts = InstallOpts {
-                noconfirm: false,
-                asdeps: false,
-                gate: ConfirmGate::Ask,
-            };
-            let report = match build::install_with_index(
-                self.cfg,
-                session.index(),
-                Some(session.secondary()),
-                &pac,
-                &targets,
-                opts,
-                &mut reviewed,
-            ) {
-                Ok(report) => report,
-                // Declining the plan confirm aborts the whole apply, cart kept.
-                Err(Error::UserAbort) => return Ok(ApplyOutcome::Declined),
-                Err(e) => return Err(e),
-            };
-            if !report.failed.is_empty()
-                || !report.skipped_dep.is_empty()
-                || !report.interrupted.is_empty()
-            {
-                return Ok(ApplyOutcome::Failed);
-            }
+        // The upgrade rows (repo + AUR) drive the cost-overlay preview and the
+        // partial `-Syu` lane; their absence means a pure fresh-install cart.
+        let roots: Vec<PkgUpgrade> = cart
+            .items()
+            .iter()
+            .filter_map(|i| i.upgrade.clone())
+            .collect();
+
+        let outcome = if roots.is_empty() {
+            self.apply_installs(session, &pac, cart)?
+        } else {
+            self.apply_upgrades(session, &pac, cart, &roots)?
+        };
+        if outcome != ApplyOutcome::Succeeded {
+            return Ok(outcome);
         }
 
-        // Remove half: `pacman -R`, filtered to packages actually installed so a
-        // retry after a partial failure doesn't trip on an already-gone target.
-        // (One atomic add+remove transaction is the phase-6 native-commit goal;
-        // until then this is two transactions bridged by the sudo cache.)
-        let removals: Vec<String> = cart
+        // Remove half (shared): `pacman -R`, filtered to packages actually
+        // installed so a retry after a partial failure doesn't trip on an
+        // already-gone target. One atomic add+remove transaction is the phase-6
+        // native-commit goal; until then this is separate transactions bridged
+        // by the sudo cache.
+        let removals: Vec<&PkgName> = cart
             .removals()
             .iter()
             .filter(|n| pac.is_installed(n.as_str()))
-            .map(|n| n.clone().into_inner())
             .collect();
         if !removals.is_empty() {
+            // Stringify only here, at pacman's argv boundary.
             let mut args = vec!["-R".to_owned()];
-            args.extend(removals);
+            args.extend(removals.iter().map(|n| n.as_str().to_owned()));
             if invoke::exec_pacman(self.cfg, &args)? != 0 {
                 ui::warn("removal step did not complete");
                 return Ok(ApplyOutcome::Failed);
             }
         }
         Ok(ApplyOutcome::Succeeded)
+    }
+}
+
+impl RealEnv<'_> {
+    /// Pure fresh-install cart (no upgrade rows): the `-S` pipeline owns the
+    /// plan table + its only-when-deps confirm and the stratified build/install.
+    /// The cart's reviewed set rides along so approved AUR pkgbases aren't
+    /// re-prompted.
+    fn apply_installs(
+        &self,
+        session: &UpgradeSession,
+        pac: &PacmanIndex,
+        cart: &Cart,
+    ) -> Result<ApplyOutcome> {
+        let targets = cart.install_targets();
+        if targets.is_empty() {
+            return Ok(ApplyOutcome::Succeeded);
+        }
+        let mut reviewed = cart.reviewed().clone();
+        let opts = InstallOpts {
+            noconfirm: false,
+            asdeps: false,
+            gate: ConfirmGate::Ask,
+        };
+        match build::install_with_index(
+            self.cfg,
+            session.index(),
+            Some(session.secondary()),
+            pac,
+            &targets,
+            opts,
+            &mut reviewed,
+        ) {
+            Ok(report) => Ok(outcome_of(&report)),
+            // Declining the plan confirm aborts the whole apply, cart kept.
+            Err(Error::UserAbort) => Ok(ApplyOutcome::Declined),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Upgrade cart: resolve the AUR/build half once, render the cost-overlay
+    /// change-set preview, take one confirm, then run the partial `-Syu` repo
+    /// lane (so AUR builds link against the upgraded libs) and the build/install
+    /// lane.
+    fn apply_upgrades(
+        &self,
+        session: &UpgradeSession,
+        pac: &PacmanIndex,
+        cart: &Cart,
+        roots: &[PkgUpgrade],
+    ) -> Result<ApplyOutcome> {
+        // Resolve the AUR upgrades + any fresh installs once; repo *upgrades*
+        // are excluded (they take the `-Syu` lane below).
+        let targets = cart.install_targets();
+        let plan = build::resolve_targets(
+            self.cfg,
+            session.index(),
+            Some(session.secondary()),
+            pac,
+            &targets,
+            false,
+        )?;
+
+        // Sizes from the freshly-synced db (the new versions' real download
+        // cost); build-time from the metrics store.
+        let size_pac = upgrade::synced_pac()?;
+        let metrics = upgrade::preview_metrics(session, roots, Some(&plan));
+        upgrade::preview(roots, Some(&plan), &size_pac, &metrics);
+        if !ui::confirm("Proceed with this transaction?", false)
+            .map_err(|e| Error::other(format!("confirm: {e}")))?
+        {
+            return Ok(ApplyOutcome::Declined);
+        }
+
+        // Repo upgrades first, via a partial `pacman -Syu` that ignores every
+        // repo candidate the user didn't stage.
+        let repo_sel = self.repo_upgrade_selection(session, cart)?;
+        if !repo_sel.repo.is_empty() {
+            dispatch::run_repo_upgrade(self.cfg, &repo_sel)?;
+        }
+
+        // Build + install the AUR (and any fresh-install) half. Already gated by
+        // the confirm above, so `apply_plan` doesn't re-ask.
+        let mut reviewed = cart.reviewed().clone();
+        let opts = InstallOpts {
+            noconfirm: false,
+            asdeps: false,
+            gate: ConfirmGate::AlreadyConfirmed,
+        };
+        let report = build::apply_plan(self.cfg, session.index(), pac, &plan, opts, &mut reviewed)?;
+        Ok(outcome_of(&report))
+    }
+
+    /// Turn the staged repo upgrades into the partial-`-Syu` selection: the
+    /// staged ones are upgraded; every other current repo candidate is
+    /// `--ignore`d. Recomputes the candidate set so a stale cart can't pin the
+    /// wrong packages.
+    fn repo_upgrade_selection(
+        &self,
+        session: &UpgradeSession,
+        cart: &Cart,
+    ) -> Result<UpgradeSelection> {
+        let staged: HashSet<PkgName> = cart
+            .repo_upgrades()
+            .iter()
+            .map(|u| u.name.clone())
+            .collect();
+        let mut repo = Vec::new();
+        let mut repo_skipped = Vec::new();
+        for u in session
+            .recompute_remaining(self.devel)?
+            .into_iter()
+            .filter(|u| u.repo != REPO_AUR)
+        {
+            if staged.contains(&u.name) {
+                repo.push(u.name);
+            } else {
+                repo_skipped.push(u.name);
+            }
+        }
+        Ok(UpgradeSelection {
+            repo,
+            repo_skipped,
+            aur: Vec::new(),
+        })
+    }
+}
+
+/// Map a build [`RunReport`](build::RunReport) to the cart-apply outcome: any
+/// failure, dep-skip, or interrupt keeps the cart for a retry.
+fn outcome_of(report: &build::RunReport) -> ApplyOutcome {
+    if report.failed.is_empty() && report.skipped_dep.is_empty() && report.interrupted.is_empty() {
+        ApplyOutcome::Succeeded
+    } else {
+        ApplyOutcome::Failed
     }
 }
 
@@ -850,6 +1046,8 @@ mod tests {
         search_result: Vec<ListItem>,
         info_calls: Vec<Vec<PkgTarget>>,
         names: Vec<PkgTarget>,
+        /// What `upgrade` returns (the recomputed candidates to seed).
+        upgrade_candidates: Vec<PkgUpgrade>,
         /// spec → coarse source; absent ⇒ `classify` returns `None`.
         classes: HashMap<String, Source>,
         policy: AurApproval,
@@ -865,9 +1063,9 @@ mod tests {
         fn print(&mut self, line: &str) {
             self.lines.push(line.to_owned());
         }
-        fn upgrade(&mut self) -> Result<()> {
+        fn upgrade(&mut self) -> Result<Vec<PkgUpgrade>> {
             self.upgrades += 1;
-            Ok(())
+            Ok(self.upgrade_candidates.clone())
         }
         fn search(&mut self, _terms: &[SearchTerm]) -> Result<Vec<ListItem>> {
             Ok(self.search_result.clone())
@@ -965,14 +1163,48 @@ mod tests {
         }
     }
 
+    fn up(repo: &str, name: &str) -> PkgUpgrade {
+        use crate::version::Version;
+        PkgUpgrade {
+            repo: repo.to_owned(),
+            name: PkgName::from(name),
+            old_ver: Version::from("1-1"),
+            new_ver: Version::from("2-1"),
+        }
+    }
+
     #[test]
-    fn upgrade_bridges_to_the_loop_and_continues() {
+    fn upgrade_seeds_the_cart_repo_approved_aur_needs_review() {
+        let mut env = FakeEnv {
+            upgrade_candidates: vec![up("core", "glibc"), up("aur", "yay-bin")],
+            ..FakeEnv::default()
+        };
+        let mut state = State::default();
+        state.dispatch(&command::parse("upgrade"), &mut env);
+        assert_eq!(env.upgrades, 1, "upgrade recomputes once");
+        assert_eq!(state.cart.items().len(), 2, "both candidates staged");
+        // Repo upgrade auto-approves; AUR upgrade needs review.
+        assert_eq!(state.cart.pending_review().len(), 1);
+        assert_eq!(state.cart.pending_review()[0].spec(), "yay-bin");
+    }
+
+    #[test]
+    fn upgrade_with_selector_seeds_only_the_subset() {
+        let mut env = FakeEnv {
+            upgrade_candidates: vec![up("core", "glibc"), up("aur", "yay-bin")],
+            ..FakeEnv::default()
+        };
+        let mut state = State::default();
+        state.dispatch(&command::parse("upgrade yay-bin"), &mut env);
+        let specs: Vec<&str> = state.cart.items().iter().map(CartItem::spec).collect();
+        assert_eq!(specs, vec!["yay-bin"]);
+    }
+
+    #[test]
+    fn upgrade_with_nothing_to_do_stages_nothing() {
         let (flow, env) = dispatch_one("upgrade");
         assert_eq!(flow, Flow::Continue);
-        assert_eq!(
-            env.upgrades, 1,
-            "upgrade should call the bridge exactly once"
-        );
+        assert!(env.lines.iter().any(|l| l.contains("nothing to upgrade")));
     }
 
     #[test]

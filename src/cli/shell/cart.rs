@@ -1,10 +1,9 @@
 //! The staged transaction the shell builds up, run by `apply`.
 //!
-//! `add`/`drop`/`remove`/`clear` mutate a [`Cart`]; `review`/`approve` move AUR
-//! items past the approval gate; `apply` runs the whole thing in one go. None of
-//! it is persisted — quitting drops the cart (matching the session-only stance
-//! of [`crate::cli::upgrade_loop`]'s `SessionState`). See
-//! `docs/plans/shell-ui.md` for the design.
+//! `add`/`drop`/`remove`/`clear` mutate a [`Cart`]; `upgrade` seeds it with the
+//! available upgrades; `review`/`approve` move AUR items past the approval gate;
+//! `apply` runs the whole thing in one go. None of it is persisted — quitting
+//! drops the cart. See `docs/plans/shell-ui.md` for the design.
 //!
 //! This module is the pure data model: staging, dedup, and the approval-state
 //! transitions, all unit-tested here without I/O. The side effects the verbs
@@ -13,6 +12,7 @@
 
 use crate::build::Target;
 use crate::names::{PkgBase, PkgName, PkgTarget};
+use crate::pacman::invoke::{PkgUpgrade, REPO_AUR};
 use std::collections::HashSet;
 
 /// Where a staged install came from.
@@ -89,29 +89,69 @@ impl Approval {
 #[derive(Debug, Clone)]
 pub struct CartItem {
     /// Carries the counterpart hint through expand → resolve → prepare, exactly
-    /// like the upgrade loop. Fresh `add` items are unhinted; the upgrade
-    /// procedure (phase 4) seeds hinted ones.
+    /// like the upgrade loop. Fresh `add` items are unhinted; `upgrade` seeds
+    /// hinted ones (the foreign pkgname).
     pub target: Target,
     pub source: Source,
     pub approval: Approval,
+    /// `Some` when this row came from `upgrade` — it carries the old→new
+    /// versions for the `show` table and routes repo rows through the partial
+    /// `pacman -Syu` lane at apply (rather than a fresh `pacman -S`).
+    pub upgrade: Option<PkgUpgrade>,
 }
 
 impl CartItem {
-    /// Stage `target` from `source`, defaulting the approval per `source` + the
-    /// AUR policy. The build pipeline's [`Target`] starts unhinted —
-    /// `resolver::expand_pkgbase_targets` infers a counterpart hint on rewrite
-    /// if needed.
+    /// Stage a fresh install of `target` from `source`, defaulting the approval
+    /// per `source` + the AUR policy. The build pipeline's [`Target`] starts
+    /// unhinted — `resolver::expand_pkgbase_targets` infers a counterpart hint
+    /// on rewrite if needed.
     pub fn new(target: PkgTarget, source: Source, aur: AurApproval) -> Self {
         Self {
             target: Target::bare(target.into_inner()),
             source,
             approval: Approval::default_for(source, aur),
+            upgrade: None,
+        }
+    }
+
+    /// Stage an upgrade candidate (from `upgrade`). The source follows the
+    /// candidate's repo (`REPO_AUR` ⇒ AUR), and AUR rows hint their foreign
+    /// pkgname so the counterpart resolves to the right installed pkg — exactly
+    /// what the loop's `resolve_aur` did.
+    pub fn from_upgrade(u: PkgUpgrade, aur: AurApproval) -> Self {
+        let source = if u.repo == REPO_AUR {
+            Source::Aur
+        } else {
+            Source::Repo
+        };
+        let target = match source {
+            Source::Aur => Target::with_hint(u.name.as_str().to_owned(), u.name.clone()),
+            Source::Repo => Target::bare(u.name.as_str().to_owned()),
+        };
+        Self {
+            target,
+            source,
+            approval: Approval::default_for(source, aur),
+            upgrade: Some(u),
         }
     }
 
     /// The freeform user-typed spec this item stages.
     pub fn spec(&self) -> &str {
         &self.target.spec
+    }
+
+    /// A repo *upgrade* row — applied via the partial `pacman -Syu` lane, not a
+    /// fresh `pacman -S`.
+    pub fn is_repo_upgrade(&self) -> bool {
+        self.source == Source::Repo && self.upgrade.is_some()
+    }
+
+    /// `old → new` for an upgrade row, `None` for a fresh install (for `show`).
+    pub fn version_transition(&self) -> Option<String> {
+        self.upgrade
+            .as_ref()
+            .map(|u| format!("{} → {}", u.old_ver, u.new_ver))
     }
 }
 
@@ -262,10 +302,26 @@ impl Cart {
         self.items.iter().all(|i| i.approval == Approval::Approved)
     }
 
-    /// The targets the install half of `apply` resolves and builds. `apply` only
-    /// runs once everything is approved, so this is every staged item's target.
+    /// The targets the install/build half of `apply` resolves through the `-S`
+    /// pipeline: AUR rows (install or upgrade) and fresh repo installs. Repo
+    /// *upgrades* are excluded — they go through the partial `pacman -Syu` lane
+    /// ([`Self::repo_upgrades`]).
     pub fn install_targets(&self) -> Vec<Target> {
-        self.items.iter().map(|i| i.target.clone()).collect()
+        self.items
+            .iter()
+            .filter(|i| !i.is_repo_upgrade())
+            .map(|i| i.target.clone())
+            .collect()
+    }
+
+    /// The staged repo *upgrade* rows, applied via `pacman -Syu` (ignoring every
+    /// repo upgrade candidate the user didn't stage).
+    pub fn repo_upgrades(&self) -> Vec<&PkgUpgrade> {
+        self.items
+            .iter()
+            .filter(|i| i.is_repo_upgrade())
+            .filter_map(|i| i.upgrade.as_ref())
+            .collect()
     }
 }
 
@@ -387,5 +443,57 @@ mod tests {
         let targets = cart.install_targets();
         let specs: Vec<&str> = targets.iter().map(|t| t.spec.as_str()).collect();
         assert_eq!(specs, vec!["foo", "bar"]);
+    }
+
+    fn upgrade(repo: &str, name: &str) -> PkgUpgrade {
+        use crate::version::Version;
+        PkgUpgrade {
+            repo: repo.to_owned(),
+            name: PkgName::from(name),
+            old_ver: Version::from("1-1"),
+            new_ver: Version::from("2-1"),
+        }
+    }
+
+    #[test]
+    fn from_upgrade_tags_source_and_hint() {
+        let aur = CartItem::from_upgrade(upgrade("aur", "yay-bin"), AurApproval::Review);
+        assert_eq!(aur.source, Source::Aur);
+        assert_eq!(aur.approval, Approval::NeedsReview);
+        assert_eq!(
+            aur.target.hint.as_ref().map(PkgName::as_str),
+            Some("yay-bin")
+        );
+        assert!(!aur.is_repo_upgrade());
+
+        let repo = CartItem::from_upgrade(upgrade("core", "glibc"), AurApproval::Review);
+        assert_eq!(repo.source, Source::Repo);
+        assert_eq!(repo.approval, Approval::Approved);
+        assert!(repo.is_repo_upgrade());
+        assert_eq!(repo.version_transition().as_deref(), Some("1-1 → 2-1"));
+    }
+
+    #[test]
+    fn repo_upgrades_split_from_install_targets() {
+        let mut cart = Cart::default();
+        cart.add(CartItem::from_upgrade(
+            upgrade("core", "glibc"),
+            AurApproval::Review,
+        ));
+        cart.add(CartItem::from_upgrade(
+            upgrade("aur", "yay-bin"),
+            AurApproval::Review,
+        ));
+        cart.add(item("firefox", Source::Repo)); // a fresh repo install
+        // Repo upgrades take the -Syu lane; the rest take the -S/build pipeline.
+        assert_eq!(
+            cart.repo_upgrades()
+                .iter()
+                .map(|u| u.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["glibc"]
+        );
+        let install: Vec<String> = cart.install_targets().into_iter().map(|t| t.spec).collect();
+        assert_eq!(install, vec!["yay-bin", "firefox"]);
     }
 }
