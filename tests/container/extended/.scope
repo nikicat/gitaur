@@ -48,3 +48,10 @@
 #   - makepkg_fails_stops_pipeline.sh    (PKGBUILD with `exit 1` in build())
 #   - missing_dep_errors_with_hint.sh
 #   - corrupt_index_recoverable.sh       (truncate index.bin, expect -Sy fix)
+#
+# Shell (REPL):
+#   (landed: 07_shell_cart_apply.sh — add → gate → approve → apply, via the
+#    shell_cart_e2e PTY driver)
+#   - shell_apply_failure_keeps_cart.sh  (failing build → cart kept → drop → apply)
+#   - shell_ctrl_c_bails_to_prompt.sh    (SIGINT mid-build returns to the prompt)
+#   - shell_remove_stages_uninstall.sh   (`remove` → pacman -R at apply)
