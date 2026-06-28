@@ -1,29 +1,21 @@
-//! Aligned pacman/yay-style tables: install plans, upgrade plans, and the
-//! interactive upgrade picker that shares their formatting. The change-set
-//! preview lives in [`super::change_set`] — it reuses [`Paint`],
-//! [`sort_for_display`], [`col_widths`], and [`render_row`] (all
-//! `pub(super)` for that reason).
+//! Aligned pacman/yay-style tables: install plans and upgrade plans. The
+//! interactive `-Syu` picker is gone (the shell's cart replaced it); the
+//! change-set preview lives in [`super::change_set`] — it reuses [`Paint`],
+//! [`sort_for_display`], [`col_widths`], and [`render_row`] (all `pub(super)`
+//! for that reason).
 
-use super::cost::{PreviewMetrics, built_suffix, cost_of_root, time_col};
 use super::{color_on, dim};
-use crate::config::Config;
 use crate::names::PkgName;
 use crate::pacman::invoke::{PkgUpgrade, REPO_AUR};
 use crate::pacman::verdiff::{self, BumpKind};
 
 use console::style;
-use dialoguer::MultiSelect;
-use dialoguer::theme::Theme;
-use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::io::IsTerminal;
 
 /// Whether a rendered row carries ANSI color.
 ///
-/// The picker needs both a plain form (dialoguer measures byte width to plan
-/// its redraw) and a colored form (shown via the theme), independent of the
-/// global color gate — so the choice is an explicit per-render argument rather
-/// than a re-read of [`color_on`].
+/// An explicit per-render argument rather than a re-read of [`color_on`], so
+/// the change-set preview can render a plain form (for width measurement) and a
+/// colored form from the same code path.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Paint {
     Plain,
@@ -39,34 +31,6 @@ impl Paint {
 impl From<bool> for Paint {
     fn from(colored: bool) -> Self {
         if colored { Self::Colored } else { Self::Plain }
-    }
-}
-
-/// A picker row's initial checkbox state.
-///
-/// Repo rows start [`Check::Checked`]; AUR rows follow `cfg.aur_default_select`;
-/// a row badged by a prior batch this session is forced [`Check::Unchecked`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Check {
-    Checked,
-    Unchecked,
-}
-
-impl Check {
-    /// Lower to the `bool` mask `dialoguer::MultiSelect::defaults` consumes —
-    /// the one boundary where the typed state meets a flat-array API.
-    const fn is_checked(self) -> bool {
-        matches!(self, Self::Checked)
-    }
-}
-
-impl From<bool> for Check {
-    fn from(checked: bool) -> Self {
-        if checked {
-            Self::Checked
-        } else {
-            Self::Unchecked
-        }
     }
 }
 
@@ -161,18 +125,13 @@ pub fn upgrade_table(plan: &[PkgUpgrade]) {
     eprintln!();
 }
 
-/// User's choice from the interactive `-Syu` picker.
+/// The repo half of an `apply`'s upgrade transaction.
 ///
-/// Pkgnames split by where the caller needs them: `repo` joins `pacman
-/// -Syu`'s subset, `repo_skipped` becomes the `--ignore=` list, `aur` is
-/// the queue for `cmd_install`.
-///
-/// `aur` carries the full [`PkgUpgrade`] (not just pkgname) so the user's
-/// installed-version + intent survive the picker → install boundary. The
-/// install pipeline uses the foreign pkgname as the counterpart hint for
-/// review labelling — without it, asking to install a pkgbase whose entry
-/// declares many `provides=` (e.g. .NET's shared `aspnet-runtime` virtual)
-/// would have to guess which installed pkg is the one the user meant.
+/// Built by the shell's `apply` (`repo_upgrade_selection`) and consumed by
+/// [`crate::cli::dispatch::run_repo_upgrade`]: `repo` is the staged subset,
+/// `repo_skipped` becomes the `--ignore=` list for the partial `pacman -Syu`.
+/// `aur` is unused on this path (the AUR half goes through the build pipeline),
+/// but kept so the type can also describe a full repo+AUR selection.
 // No `Eq` — `PkgUpgrade.old_ver` / `new_ver` are `Version`, whose `PartialEq`
 // is vercmp (not bytes-equal), and so doesn't satisfy `Eq`'s reflexivity
 // guarantee in the bytes-distinct-but-vercmp-equal corner case. `Vec<_>` /
@@ -188,292 +147,6 @@ impl UpgradeSelection {
     pub const fn is_empty(&self) -> bool {
         self.repo.is_empty() && self.aur.is_empty()
     }
-}
-
-/// Why an AUR row carries a badge after a prior batch in the same loop session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RowStatus {
-    /// A build (or its stratum's `pacman -U`) failed, or a dep failure blocked
-    /// it.
-    Failed,
-    /// A build was Ctrl+C'd back to the table.
-    Interrupted,
-    /// The user skipped its PKGBUILD review this session.
-    Skipped,
-}
-
-/// Per-row session state the no-arg upgrade loop overlays on the picker.
-///
-/// Keyed by the AUR row's pkgname (repo rows never carry loop state). The
-/// single-shot `-Syu` path passes an empty one — it has no prior batch to
-/// remember. A badged row also defaults to unchecked: a thing that just failed
-/// or was passed on shouldn't silently re-arm itself.
-#[derive(Debug, Default)]
-pub struct RowAnnotations {
-    status: HashMap<PkgName, RowStatus>,
-    reviewed: HashSet<PkgName>,
-}
-
-impl RowAnnotations {
-    /// Badge `name` with a post-batch status (failed / interrupted / skipped).
-    pub fn set_status(&mut self, name: PkgName, status: RowStatus) {
-        self.status.insert(name, status);
-    }
-
-    /// Mark `name`'s PKGBUILD as already reviewed this session (renders a `✓`
-    /// so the user knows the build won't re-prompt).
-    pub fn mark_reviewed(&mut self, name: PkgName) {
-        self.reviewed.insert(name);
-    }
-
-    /// The badge status overlaid on `name`, if any. Lets the loop's tests
-    /// verify the failed/interrupted/skipped wiring without rendering.
-    pub fn status_of(&self, name: &PkgName) -> Option<RowStatus> {
-        self.status.get(name).copied()
-    }
-
-    /// Whether `name` is flagged reviewed.
-    pub fn is_reviewed(&self, name: &PkgName) -> bool {
-        self.reviewed.contains(name)
-    }
-
-    /// The [`Badge`] for one row — its session status (if any) plus whether its
-    /// PKGBUILD was already reviewed. Empty for repo rows and for AUR rows the
-    /// loop hasn't touched yet.
-    fn badge(&self, name: &PkgName) -> Badge {
-        Badge {
-            status: self.status.get(name).copied(),
-            reviewed: self.reviewed.contains(name),
-        }
-    }
-}
-
-/// One row's trailing session annotation: an optional status and a reviewed
-/// tick. Carries the *state*, not its rendering — [`Badge::render`] turns it
-/// into the trailing string at draw time, and [`Badge::check_override`] answers
-/// whether it should pre-uncheck the row.
-#[derive(Clone, Copy, Default)]
-struct Badge {
-    status: Option<RowStatus>,
-    reviewed: bool,
-}
-
-impl Badge {
-    /// A status badge forces the row [`Check::Unchecked`]; otherwise no
-    /// override (the row keeps its base default). Reviewed-only rows are *not*
-    /// pre-unchecked — review history doesn't change intent to install.
-    const fn check_override(self) -> Option<Check> {
-        if self.status.is_some() {
-            Some(Check::Unchecked)
-        } else {
-            None
-        }
-    }
-
-    /// Trailing decoration for the row (`  (failed)  ✓`), or empty when the row
-    /// carries no session state. [`Paint::Colored`] paints the status word and
-    /// the reviewed tick; the plain form is what the picker measures for wrap.
-    fn render(self, paint: Paint) -> String {
-        let mut out = String::new();
-        if let Some(status) = self.status {
-            let label = match status {
-                RowStatus::Failed => "(failed)",
-                RowStatus::Interrupted => "(interrupted)",
-                RowStatus::Skipped => "(skipped)",
-            };
-            let painted = if paint.colored() {
-                match status {
-                    RowStatus::Failed => style(label).red().bold().to_string(),
-                    RowStatus::Interrupted => style(label).yellow().to_string(),
-                    RowStatus::Skipped => style(label).dim().to_string(),
-                }
-            } else {
-                label.to_owned()
-            };
-            out.push_str("  ");
-            out.push_str(&painted);
-        }
-        if self.reviewed {
-            out.push_str("  ");
-            out.push_str(&if paint.colored() {
-                style("✓").green().to_string()
-            } else {
-                "✓".to_owned()
-            });
-        }
-        out
-    }
-}
-
-/// `dialoguer::Theme` shim that swaps each plain item back to its colored
-/// rendering at draw time. dialoguer 0.11 measures wrap from `items[i].len()`
-/// (raw bytes); feeding it ANSI-styled labels makes its redraw over-clear and
-/// overwrite output above the prompt. We feed it plain labels and recolor
-/// here — output strings aren't measured, so wrap math stays correct.
-struct UpgradePickerTheme<'a> {
-    colored: HashMap<&'a str, String>,
-}
-
-impl<'a> UpgradePickerTheme<'a> {
-    const fn new(colored: HashMap<&'a str, String>) -> Self {
-        Self { colored }
-    }
-}
-
-impl Theme for UpgradePickerTheme<'_> {
-    fn format_multi_select_prompt_item(
-        &self,
-        f: &mut dyn fmt::Write,
-        text: &str,
-        checked: bool,
-        active: bool,
-    ) -> fmt::Result {
-        let prefix = match (checked, active) {
-            (true, true) => "> [x]",
-            (true, false) => "  [x]",
-            (false, true) => "> [ ]",
-            (false, false) => "  [ ]",
-        };
-        let display = self.colored.get(text).map_or(text, String::as_str);
-        write!(f, "{prefix} {display}")
-    }
-}
-
-/// Render the upgrade plan as a `dialoguer::MultiSelect` and split the user's
-/// selection into the three buckets `UpgradeSelection` carries.
-///
-/// Falls back to the default mask without prompting when `noconfirm` is set
-/// or stdin is not a TTY — same UX rule as [`super::confirm`]. Default mask is
-/// "repo rows checked, AUR rows per `cfg.aur_default_select`"; the AUR knob
-/// lets users opt into yay/paru parity (everything pre-selected).
-///
-/// `metrics` overlays the per-AUR-row cost columns: a right-aligned build-time
-/// estimate (`~Xm Ys` / `~?`, dimmed when stale) and a trailing `built` tag
-/// when the artifact is already on disk. The single-shot `-Syu` picker passes
-/// an empty overlay (it has no loop session to read the metrics store), so its
-/// rows render exactly as before.
-pub fn select_upgrades(
-    plan: &[PkgUpgrade],
-    cfg: &Config,
-    noconfirm: bool,
-    annotations: &RowAnnotations,
-    metrics: &PreviewMetrics,
-) -> std::io::Result<UpgradeSelection> {
-    if plan.is_empty() {
-        return Ok(UpgradeSelection::default());
-    }
-    let ordered = sort_for_display(plan);
-    let badges: Vec<Badge> = ordered.iter().map(|u| annotations.badge(&u.name)).collect();
-    // A row carrying a session badge (failed / interrupted / skipped) defaults
-    // to unchecked regardless of the AUR knob — see [`Badge::check_override`].
-    let defaults: Vec<Check> = ordered
-        .iter()
-        .zip(&badges)
-        .map(|(u, b)| b.check_override().unwrap_or_else(|| default_for(u, cfg)))
-        .collect();
-
-    let interactive = !noconfirm && std::io::stdin().is_terminal();
-    let selected: Vec<usize> = if interactive {
-        let (repo_w, name_w, old_w) = col_widths(&ordered);
-        // The build-time column sits after the (padded) new-version cell, so
-        // it needs `new_w` to align and `time_w` (max visible cell) to size
-        // itself. Repo rows / first-time AUR rows fill it with blanks.
-        let new_w = ordered.iter().map(|u| u.new_ver.len()).max().unwrap_or(0);
-        let costs: Vec<_> = ordered.iter().map(|u| cost_of_root(u, metrics)).collect();
-        let time_w = costs.iter().map(|c| c.visible_len()).max().unwrap_or(0);
-        let colored = color_on();
-        // Pass plain-ASCII labels to dialoguer so its redraw
-        // (`clear_preserve_prompt`) measures byte length ≈ visible width;
-        // it counts bytes against terminal columns to estimate wrap and
-        // would otherwise over-clear every redraw — eating lines above the
-        // prompt — when items carry ANSI escapes. Colour is reapplied at
-        // render time via [`UpgradePickerTheme`]. The cost columns and session
-        // badges trail the version cell, so they don't perturb column
-        // alignment (the build-time cell is the last *aligned* column; the
-        // `built` tag and badges trail it unaligned).
-        let cost_cols = |u: &PkgUpgrade, cost, paint: Paint| {
-            let new_pad = " ".repeat(new_w.saturating_sub(u.new_ver.len()));
-            format!(
-                "{new_pad}  {}{}",
-                time_col(cost, time_w, paint.colored()),
-                built_suffix(cost, paint.colored()),
-            )
-        };
-        let ascii_rows: Vec<String> = ordered
-            .iter()
-            .zip(&badges)
-            .zip(&costs)
-            .map(|((u, b), &cost)| {
-                format!(
-                    "{}{}{}",
-                    render_row(u, repo_w, name_w, old_w, Paint::Plain),
-                    cost_cols(u, cost, Paint::Plain),
-                    b.render(Paint::Plain),
-                )
-            })
-            .collect();
-        let theme = UpgradePickerTheme::new(if colored {
-            ordered
-                .iter()
-                .zip(&ascii_rows)
-                .zip(&badges)
-                .zip(&costs)
-                .map(|(((u, p), b), &cost)| {
-                    let colored_row = format!(
-                        "{}{}{}",
-                        render_row(u, repo_w, name_w, old_w, Paint::Colored),
-                        cost_cols(u, cost, Paint::Colored),
-                        b.render(Paint::Colored),
-                    );
-                    (p.as_str(), colored_row)
-                })
-                .collect()
-        } else {
-            HashMap::new()
-        });
-        let mask: Vec<bool> = defaults.iter().map(|c| c.is_checked()).collect();
-        MultiSelect::with_theme(&theme)
-            .with_prompt("Select upgrades to apply (space toggles, a inverts, enter confirms)")
-            .items(&ascii_rows)
-            .defaults(&mask)
-            // Suppress dialoguer's post-interaction "report" line — it would
-            // re-list every selected row as a single wrapped line, duplicating
-            // the table the user just confirmed.
-            .report(false)
-            .interact()
-            .map_err(std::io::Error::other)?
-    } else {
-        defaults
-            .iter()
-            .enumerate()
-            .filter_map(|(i, c)| c.is_checked().then_some(i))
-            .collect()
-    };
-
-    let picked: HashSet<usize> = selected.into_iter().collect();
-    let mut sel = UpgradeSelection::default();
-    for (i, u) in ordered.iter().enumerate() {
-        let is_aur = u.repo == REPO_AUR;
-        match (is_aur, picked.contains(&i)) {
-            (true, true) => sel.aur.push((*u).clone()),
-            (true, false) => {}
-            (false, true) => sel.repo.push(u.name.clone()),
-            (false, false) => sel.repo_skipped.push(u.name.clone()),
-            // (sel.repo / repo_skipped are typed `Vec<PkgName>`; the
-            //  pacman -Syu --ignore boundary in `run_repo_upgrade` joins
-            //  them via slice::join which routes through `Borrow<str>`.)
-        }
-    }
-    Ok(sel)
-}
-
-fn default_for(u: &PkgUpgrade, cfg: &Config) -> Check {
-    let checked = if u.repo == REPO_AUR {
-        cfg.aur_default_select
-    } else {
-        true
-    };
-    Check::from(checked)
 }
 
 /// Sort `plan` by (repo group, severity-descending, name) without copying.
@@ -516,8 +189,7 @@ pub(super) fn col_widths(rows: &[&PkgUpgrade]) -> (usize, usize, usize) {
 }
 
 /// Format one upgrade row at the given column widths. Shared by the static
-/// `upgrade_table`, the interactive picker, and the change-set preview, so all
-/// three stay visually identical.
+/// `upgrade_table` and the change-set preview, so both stay visually identical.
 pub(super) fn render_row(
     u: &PkgUpgrade,
     repo_w: usize,
@@ -698,71 +370,6 @@ mod tests {
         );
     }
 
-    /// AUR rows default off (opt-in), repo rows default on. Toggling the
-    /// config knob flips the AUR side without touching repo behavior.
-    #[test]
-    fn default_for_respects_aur_knob() {
-        use crate::config::defaults::default_config;
-        let cfg_off = default_config();
-        let mut cfg_on = cfg_off.clone();
-        cfg_on.aur_default_select = true;
-        let repo = PkgUpgrade {
-            repo: "extra".into(),
-            name: "vim".into(),
-            old_ver: "1-1".into(),
-            new_ver: "1-2".into(),
-        };
-        let aur = PkgUpgrade {
-            repo: REPO_AUR.into(),
-            name: "paru-bin".into(),
-            old_ver: "1-1".into(),
-            new_ver: "1-2".into(),
-        };
-        assert_eq!(default_for(&repo, &cfg_off), Check::Checked);
-        assert_eq!(default_for(&repo, &cfg_on), Check::Checked);
-        assert_eq!(default_for(&aur, &cfg_off), Check::Unchecked);
-        assert_eq!(default_for(&aur, &cfg_on), Check::Checked);
-    }
-
-    /// Only a *status* badge pre-unchecks a row — a reviewed-only row keeps its
-    /// base default, since review history doesn't change intent to install.
-    #[test]
-    fn badge_check_override_keys_on_status_not_review() {
-        let failed = Badge {
-            status: Some(RowStatus::Failed),
-            reviewed: true,
-        };
-        assert_eq!(failed.check_override(), Some(Check::Unchecked));
-        let reviewed_only = Badge {
-            status: None,
-            reviewed: true,
-        };
-        assert_eq!(reviewed_only.check_override(), None);
-        assert_eq!(Badge::default().check_override(), None);
-    }
-
-    /// The plain render carries the status word and the reviewed tick; an empty
-    /// badge renders nothing (so untouched rows stay byte-for-byte unchanged).
-    #[test]
-    fn badge_render_plain_text() {
-        let both = Badge {
-            status: Some(RowStatus::Failed),
-            reviewed: true,
-        };
-        let s = both.render(Paint::Plain);
-        assert!(s.contains("(failed)"), "missing status: {s:?}");
-        assert!(s.contains('✓'), "missing reviewed tick: {s:?}");
-        assert_eq!(
-            Badge {
-                status: Some(RowStatus::Interrupted),
-                reviewed: false,
-            }
-            .render(Paint::Plain),
-            "  (interrupted)"
-        );
-        assert_eq!(Badge::default().render(Paint::Plain), "");
-    }
-
     /// Empty version cells (provides-only matches) must not break the
     /// name-column padding or panic on the format machinery.
     #[test]
@@ -803,60 +410,5 @@ mod tests {
         ];
         upgrade_table(&ups);
         upgrade_table(&[]);
-    }
-
-    /// `UpgradePickerTheme` must never hand dialoguer an ANSI-bearing string
-    /// for an item: that's the whole reason the theme exists. Items always
-    /// arrive plain; the theme paints them on the way out. Cover both the
-    /// hit (key present in the map → colored output) and the miss (key
-    /// absent → plain fallback), plus every `(checked, active)` prefix.
-    #[test]
-    fn picker_theme_paints_known_rows_and_falls_back_for_unknown() {
-        let mut colored = HashMap::new();
-        colored.insert(
-            "extra  vim",
-            "\u{1b}[38;5;244mextra\u{1b}[0m  vim".to_owned(),
-        );
-        let theme = UpgradePickerTheme::new(colored);
-
-        let mut buf = String::new();
-        theme
-            .format_multi_select_prompt_item(&mut buf, "extra  vim", true, true)
-            .unwrap();
-        assert!(buf.starts_with("> [x] "), "wrong prefix: {buf:?}");
-        assert!(
-            buf.contains("\u{1b}[38;5;244m"),
-            "colored mapping was not applied: {buf:?}"
-        );
-
-        let mut buf = String::new();
-        theme
-            .format_multi_select_prompt_item(&mut buf, "aur  unmapped", false, false)
-            .unwrap();
-        assert_eq!(buf, "  [ ] aur  unmapped");
-    }
-
-    /// All four `(checked, active)` cells must emit the prefix dialoguer's
-    /// `SimpleTheme` would emit — that's the contract we replaced, and the
-    /// regression test for it is that the cursor + checkbox glyphs stay
-    /// where the user expects them.
-    #[test]
-    fn picker_theme_prefix_matrix() {
-        let theme = UpgradePickerTheme::new(HashMap::new());
-        for (checked, active, expected) in [
-            (true, true, "> [x] "),
-            (true, false, "  [x] "),
-            (false, true, "> [ ] "),
-            (false, false, "  [ ] "),
-        ] {
-            let mut buf = String::new();
-            theme
-                .format_multi_select_prompt_item(&mut buf, "x", checked, active)
-                .unwrap();
-            assert!(
-                buf.starts_with(expected),
-                "checked={checked} active={active} → {buf:?} (want prefix {expected:?})"
-            );
-        }
     }
 }

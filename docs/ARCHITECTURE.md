@@ -20,9 +20,11 @@ branch (~154 k of them, ~2 GiB pack). Three big moving parts:
    into a `Plan`, drives `makepkg` per pkgbase in stratified order, then
    `pacman -U`'s the results.
 
-Anything pacman owns (`-Q`, `-R`, `-T`, `-D`, `-F`, `-U`, and the
-`pacman.conf` it reads) is forwarded verbatim. `gitaur` only owns `-S`
-family operations and the AUR-related half of `-Syu`.
+Anything pacman owns (`-Q`, `-R`, `-T`, `-D`, `-F`, `-U`, `-Su` system
+upgrades, and the `pacman.conf` it reads) is forwarded verbatim. `gitaur`
+owns `-S <pkg>` (install), `-Sy` (mirror refresh), `-Ss`/`-Si` (search/info),
+and `-Sc` (clean). AUR upgrades are the interactive shell's job (`gaur` →
+`upgrade`), not the `-Syu` flag — that's a plain `pacman -Syu` passthrough.
 
 ## Module map
 
@@ -34,9 +36,10 @@ src/
 ├── cli.rs           top-level CLI entry: pre-scan routes pacman-owned ops, then clap
 ├── cli/
 │   ├── flags.rs        pacman-style clustered flag parser (-Syyu → S,y,y,u)
-│   ├── dispatch.rs     routes to mirror / index / build subcommands
+│   ├── dispatch.rs     routes to mirror / index / build subcommands; -Su → pacman
 │   ├── search.rs       `gaur <term>...` — yay-style fuzzy search → multi-select → install
-│   └── upgrade_loop.rs the no-arg `gaur` upgrade loop (session, picker, retry)
+│   ├── shell.rs        the interactive no-arg REPL (cart / approval / apply)
+│   └── shell/          command, selector, cart, upgrade (refresh+reload + cost preview)
 │
 ├── mirror.rs        cmd_refresh: clone-or-fetch + index update
 ├── mirror/
@@ -81,7 +84,7 @@ src/
 │
 ├── ui.rs            colored CLI output (banners, package lists, bars, prompts)
 ├── ui/
-│   ├── tables.rs       aligned install/upgrade tables + the interactive picker
+│   ├── tables.rs       aligned install/upgrade tables (shared rendering primitives)
 │   ├── change_set.rs   pre-apply change-set preview for the upgrade loop
 │   ├── cost.rs         per-row cost cells shared by tables.rs + change_set.rs
 │   ├── progress.rs     indicatif bars / spinners
@@ -361,7 +364,7 @@ installed. Two sources populate it:
 | Source       | Hint                                                                 |
 | ------------ | -------------------------------------------------------------------- |
 | `-S <name>`  | `None` — `expand_pkgbase_targets` derives it from the spec on rewrite |
-| `-Syu` picker | `Some(PkgUpgrade.name)` — the foreign pkgname that triggered the upgrade |
+| shell `upgrade` | `Some(PkgUpgrade.name)` — the foreign pkgname that triggered the upgrade (`CartItem::from_upgrade`) |
 
 `expand_pkgbase_targets` records `hints[pkgbase] = hint_or_inferred`
 whenever it rewrites a target via the pkgname or provides path
@@ -437,8 +440,12 @@ Notation:
   and pkgname = the canonical AUR name.
 - "—" in Smoke would mean correct in code (unit-tested in
   `alpm_db::tests` and `resolver::pkgbase_expand::tests`) but no
-  end-to-end fixture yet. Every row currently has a Smoke entry — keep
-  it that way when adding new behaviour.
+  end-to-end fixture yet. Every row had a Smoke entry; when adding new
+  behaviour, keep it that way.
+- `†` marks a row whose smoke test drove the old `-Syu` *flag* upgrade path,
+  which is now a plain `pacman -Syu` passthrough — the behaviour moved to the
+  shell's `upgrade`, and its e2e coverage is pending a shell-flow (PTY) port.
+  The underlying logic stays unit-tested.
 
 | #   | User's localdb                                          | `P` declares                                 | Command + hint origin                | Provenance               | Review header                                          | Smoke |
 | --- | ------------------------------------------------------- | -------------------------------------------- | ------------------------------------ | ------------------------ | ------------------------------------------------------ | ----- |
@@ -450,7 +457,7 @@ Notation:
 | 6   | `X @ v_old` (foreign), P ≠ X                            | pkgbase-level `provides = (X)`               | `-S X` · hint derived (X via provides) | `Provides` (pkgbase)   | `upgrade: P v_old → v_new  [provides X]`               | 38    |
 | 7   | `X @ v_old` (foreign), only X installed                 | `provides = (X, Y)`                          | `-S X` · hint derived (X)            | `Provides` (single hit)  | `upgrade: P v_old → v_new  [provides X]`               | 37    |
 | 8a  | `X @ v_alt`, `Y @ v_old` both foreign                   | `provides = (X, Y)` (X first)                | `-S Y` · hint = Y                    | `Provides` (hint → Y)    | `upgrade: P v_old → v_new  [provides Y]`               | 32    |
-| 8b  | `X @ v_new`, `Y @ v_old` both foreign                   | `provides = (X, Y)` (X first)                | `-Syu` picker row → hint = Y         | `Provides` (hint → Y)    | `upgrade: P v_old → v_new  [provides Y]`               | 33    |
+| 8b  | `X @ v_new`, `Y @ v_old` both foreign                   | `provides = (X, Y)` (X first)                | shell `upgrade` → hint = Y           | `Provides` (hint → Y)    | `upgrade: P v_old → v_new  [provides Y]`               | 33† (retired) |
 | 9   | `X @ v_old` (foreign)                                   | pkgbase-level `provides = (X)`               | `-S P` · hint none (user typed pkgbase) | `Provides` (pkgbase)  | `upgrade: P v_old → v_new  [provides X]`               | 39    |
 | 10  | one sibling X of split P (canonical)                    | split `P` with pkgnames X, Y, Z              | `-S X` · hint = X                    | `Pkgname` (X)            | `upgrade: P v_old → v_new`                             | 06    |
 | 11  | `X @ v_old` (canonical, P = X)                          | pkgname = X **and** `replaces = (X)` (stale) | `-S X` · hint = X                    | `Pkgname` beats stale Replaces | `upgrade: P v_old → v_new` (no `[replaces …]`)   | 35    |
@@ -473,9 +480,11 @@ Rules the matrix encodes:
 - **Same version is "reinstall" only for Pkgname provenance** (case 2).
   Same version under Replaces / Provides is still a cross-identity
   upgrade transition and shows as `upgrade:` plus the `[…]` annotation.
-- **`-Syu` is the only place a hint comes from outside the spec string**
-  (case 8b): the picker carries `PkgUpgrade.name`, which `cmd_install`
-  wraps as `Target::with_hint(spec, name)`.
+- **The shell's `upgrade` is the only place a hint comes from outside the
+  spec string** (case 8b): each `PkgUpgrade` carries `name`, which
+  `CartItem::from_upgrade` wraps as `Target::with_hint(spec, name)`. (The
+  retired `-Syu` flag picker used to be this source; the flag is now a plain
+  `pacman -Syu` passthrough.)
 
 The matrix is intentionally scoped to *counterpart resolution* (the
 `prepare_one` → `counterpart_with_hint` decision). Sibling concerns like
@@ -506,16 +515,18 @@ branches feed it:
 | `-Syu` row → spec is foreign-installed pkgname X    | **pacman shortcut**               | yes — same `[X]` + deps as by_name rewrite |
 | `-S X` where X is also in a sync repo               | pacman shortcut                   | yes when X is also an AUR split pkgname    |
 
-The pacman-shortcut row is the regression target for smoke 44 (the
-google-cloud-cli-bq bug). The `pac.is_installed(bare) || pac.in_sync(bare)`
+The pacman-shortcut row was the regression target for the
+google-cloud-cli-bq bug (old smoke 44, retired with the `-Syu` flag's
+upgrade path — the scenario is reached via the shell's `upgrade` now, and
+its e2e port is pending). The `pac.is_installed(bare) || pac.in_sync(bare)`
 short-circuit was originally a pure "let pacman handle this" lane, but
 it also fires for foreign-installed pkgnames that happen to be siblings
 of an AUR split pkgbase. Without recording the selection there too,
 `install_stratum` had no filter and `pacman -U`'d every sibling
 makepkg packaged from the same PKGBUILD. Twin to the
-`record_target_hint`-at-the-top-of-the-loop fix (which has its own
-regression in smoke 33): both bookkeeping passes (hint, selection) must
-run on the shortcut path, not only on the rewrite path.
+`record_target_hint` fix (whose old regression was smoke 33): both
+bookkeeping passes (hint, selection) must run on the shortcut path, not
+only on the rewrite path.
 
 `select_outputs` enforces the selection by `(pkgname, version)` rather
 than pkgname alone. The version gate also kills a separate hazard:

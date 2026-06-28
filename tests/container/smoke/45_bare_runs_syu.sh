@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Bare `gitaur` is the yay parity shortcut for `-Syu` (refresh + upgrade).
+# Bare, non-interactive `gitaur` is a plain `pacman -Syu` passthrough (the
+# interactive shell owns the AUR-aware upgrade flow; with no TTY there's
+# nobody to drive it).
 #
-# The distinguishing marker for the upgrade branch (vs. a plain `-Sy`) is
-# the `pacman -Syu` invocation that follows the picker: `pacman::invoke`
-# prints `:: about to elevate via sudo:` immediately before exec'ing the
-# pacman command. A bare `-Sy` refresh never calls pacman, so that line
-# only appears when dispatch routed through the upgrade branch. If the
-# container has no pending upgrades the dispatch prints `:: nothing to
-# do` instead — we accept either.
+# The distinguishing marker is the elevation `pacman::invoke` prints —
+# `:: about to elevate via sudo:` — immediately before exec'ing `pacman
+# -Syu`. A plain `-Sy` refresh never calls pacman, so that line only
+# appears when dispatch routed to the passthrough. (If pacman finds nothing
+# to upgrade it prints its own "nothing to do" — we accept either.)
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 

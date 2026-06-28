@@ -33,9 +33,11 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
         if interactive {
             return shell::run(cfg, cli.devel || cfg.devel);
         }
-        let syu = vec!["-Syu".to_owned()];
-        let synth = flags::parse(&syu);
-        return handle_s(cfg, cli, &synth, &syu);
+        // Non-interactive bare `gaur` (cron / pipe / `--noconfirm`) is a plain
+        // `pacman -Syu --noconfirm` — there's no human to answer pacman's
+        // prompts, so `--noconfirm` is required (the explicit `-Su` flag keeps
+        // the user's own flags instead).
+        return invoke::exec_pacman(cfg, &["-Syu".to_owned(), "--noconfirm".to_owned()]);
     }
 
     match f.op {
@@ -75,7 +77,6 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
     // followed the op are inside `argv` and never reach `cli.*`. Merge here.
     let noconfirm = cli.noconfirm || f.has_long("noconfirm");
     let asdeps = cli.asdeps || f.has_long("asdeps");
-    let devel = cli.devel || f.has_long("devel");
 
     if f.has('h') || f.has_long("help") {
         // Same auto-generated help as `gaur --help` — clap already lists
@@ -97,60 +98,23 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
         return build::cmd_clean(cfg, argv);
     }
 
+    // `-Su` (system upgrade) is pacman's job, not gitaur's: the interactive
+    // shell (`gaur` → `upgrade`) owns the AUR-aware upgrade flow now, so the
+    // explicit flag just passes the whole argv through to `pacman -Su…` (same
+    // as `-Q`/`-R`/etc.). gitaur's own `-Sy` mirror refresh is deliberately not
+    // run here — `pacman -Sy` syncs its own DBs; refresh the AUR mirror with a
+    // standalone `gaur -Sy` or via the shell.
+    if f.has('u') {
+        return invoke::exec_pacman(cfg, argv);
+    }
+
     let refresh = f.has('y');
-    let upgrade = f.has('u');
     // Pacman convention: -Sy is incremental, -Syy forces a full re-fetch.
     // For gitaur that means re-cloning the bare mirror from scratch.
     let force_reclone = f.op_letters.iter().filter(|c| **c == 'y').count() >= 2;
 
     if refresh {
         mirror::cmd_refresh(cfg, force_reclone)?;
-    }
-
-    if upgrade {
-        // Build the unified repo + AUR plan unprivileged, hand it to the
-        // interactive picker, then act on the user's selection. The picker
-        // falls back to the default mask under `noconfirm` or non-TTY stdin,
-        // so cron / pipes keep working without prompting.
-        let plan = build::collect_upgrade_plan(cfg, cfg.devel || devel)?;
-        if plan.is_empty() {
-            ui::info("nothing to do");
-        } else {
-            // Single-shot `-Syu` has no prior batch (no row annotations) and no
-            // loop session to read the metrics store, so the cost overlay is
-            // empty — rows render as before, without the build-time/built
-            // columns.
-            let sel = ui::select_upgrades(
-                &plan,
-                cfg,
-                noconfirm,
-                &ui::RowAnnotations::default(),
-                &ui::PreviewMetrics::empty(),
-            )
-            .map_err(|e| Error::other(format!("upgrade selection: {e}")))?;
-            if sel.is_empty() {
-                return Err(Error::UserAbort);
-            }
-            run_repo_upgrade(cfg, &sel)?;
-            if !sel.aur.is_empty() {
-                // PkgUpgrade.name is the typed foreign pkgname the picker
-                // matched against the AUR index — that *is* the counterpart
-                // hint we want `prepare_one` to use when classifying which
-                // installed pkg this build will displace. Wrap each row as
-                // a `Target` with an explicit hint so the intent travels
-                // through expand → resolve → prepare instead of being
-                // re-inferred from the spec string.
-                let targets: Vec<build::Target> = sel
-                    .aur
-                    .iter()
-                    .map(|p| build::Target::with_hint(p.name.clone().into_inner(), p.name.clone()))
-                    .collect();
-                let code = build::cmd_install(cfg, &targets, noconfirm, false, true)?;
-                if code != 0 {
-                    return Ok(code);
-                }
-            }
-        }
     }
 
     if !f.positional.is_empty() {
@@ -167,7 +131,7 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
             .map(build::Target::bare)
             .collect();
         return build::cmd_install(cfg, &targets, noconfirm, asdeps, false);
-    } else if !upgrade && !refresh {
+    } else if !refresh {
         return Err(Error::other("no targets specified"));
     }
 
@@ -181,10 +145,15 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
 /// pins the listed versions. If every repo upgrade was deselected we skip the
 /// pacman call entirely; there's nothing to do (and no point asking for sudo).
 ///
-/// Shared by the single-shot `-Syu` handler and the no-arg upgrade loop.
-pub(crate) fn run_repo_upgrade(cfg: &Config, sel: &ui::UpgradeSelection) -> Result<u8> {
+/// Driven by the shell's `apply` (the repo half of an upgrade transaction);
+/// the explicit `-Syu` flag bypasses this entirely as a `pacman` passthrough.
+///
+/// `Ok(())` is "the repo upgrade ran (or there was nothing to do)"; a non-zero
+/// pacman exit surfaces as [`Error::PacmanExit`]. (There's no meaningful success
+/// code to return — `exec_pacman` yields `Ok(0)` or an error, never `Ok(n)`.)
+pub(crate) fn run_repo_upgrade(cfg: &Config, sel: &ui::UpgradeSelection) -> Result<()> {
     if sel.repo.is_empty() {
-        return Ok(0);
+        return Ok(());
     }
     if !sel.repo_skipped.is_empty() {
         ui::warn(&format!(
@@ -197,5 +166,5 @@ pub(crate) fn run_repo_upgrade(cfg: &Config, sel: &ui::UpgradeSelection) -> Resu
         argv.push("--ignore".into());
         argv.push(sel.repo_skipped.join(","));
     }
-    invoke::exec_pacman(cfg, &argv)
+    invoke::exec_pacman(cfg, &argv).map(|_| ())
 }

@@ -22,7 +22,6 @@ pub fn default_config() -> Config {
         devel: false,
         check_repo_updates: true,
         review_default: "prompt".into(),
-        aur_default_select: false,
         // 256 covers ~2 years of dotnet-core-7.0-bin-shaped pkgs (~10
         // updates/month). Old default of 64 routinely missed the diff
         // base on long-untouched installs; bumping the headline cost

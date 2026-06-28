@@ -192,8 +192,9 @@ default; documented here so contributors can pick them up.
 
 **Current gitaur behavior:** if `dotnet-runtime-7.0` is installed
 (foreign) and AUR pkgbase `dotnet-core-7.0-bin` declares
-`provides=dotnet-runtime-7.0`, gitaur's `-Syu` shows the row as an
-upgrade candidate (typed `Target::hint` = the foreign pkgname).
+`provides=dotnet-runtime-7.0`, the shell's `upgrade` seeds the row as an
+upgrade candidate (typed `Target::hint` = the foreign pkgname). (The explicit
+`-Syu` flag no longer does this — it's a plain `pacman -Syu` passthrough.)
 
 **yay behavior:** shows `dotnet-runtime-7.0` as "Packages not in AUR"
 and does *not* propose an upgrade. Conservative.
@@ -211,8 +212,8 @@ and does *not* propose an upgrade. Conservative.
   `dotnet-core-7.0-bin` exists without going looking.
 
 **Proposed middle ground (not implemented):**
-1. Demote provides-only upgrades from the main `-Su` picker by default.
-2. After the picker, print a separate info section:
+1. Demote provides-only upgrades from the `upgrade` candidate set by default.
+2. Alongside, print a separate info section:
    ```
    Foreign pkgs with AUR providers (not auto-proposed):
        dotnet-runtime-7.0  7.0.20.sdk120-2  →  dotnet-core-7.0-bin 7.0.20.sdk410-2  [provides]
@@ -227,16 +228,15 @@ neither has both.
 A config knob (`syu_propose_provides_upgrades = false` default) would
 let users opt back into the current behavior.
 
-### Auto-pre-selection of AUR rows in the picker
+### Auto-pre-selection of AUR rows (resolved: the picker is gone)
 
-`Config::aur_default_select` controls whether AUR upgrade rows are
-pre-checked in the `-Syu` picker. Default is `false` (gitaur's choice
-— "AUR is opt-in"); yay/paru's default is effectively `true` (every
-upgrade pre-selected).
-
-Open question: should the default flip? The current default is
-deliberate but unfamiliar to yay/paru migrants. Worth surfacing in the
-first-run experience either way.
+This used to be `Config::aur_default_select` — whether AUR rows were
+pre-checked in the interactive `-Syu` multi-select picker. That picker has
+been removed: the explicit `-Syu` flag is now a plain `pacman -Syu`
+passthrough, and AUR upgrades live in the shell (`gaur` → `upgrade`), where
+the equivalent "AUR is opt-in" stance is the per-item **approval gate** (repo
+rows auto-approve; AUR rows need `review`/`approve`) rather than a pre-check
+mask. The `aur_default_select` knob was dropped.
 
 ### Should foreign pkgs without an AUR home appear in `-Qu`?
 

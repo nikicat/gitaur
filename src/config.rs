@@ -43,12 +43,6 @@ pub struct Config {
     pub check_repo_updates: bool,
     /// `prompt` | `skip` | `always-show` — PKGBUILD review default.
     pub review_default: String,
-    /// Pre-check AUR rows in the interactive `-Syu` picker. `false` (default)
-    /// matches the "AUR is opt-in" mental model: repo upgrades are usually
-    /// uncontroversial, AUR rebuilds are expensive and worth confirming.
-    /// Flip to `true` to get the yay/paru behavior where every upgrade is
-    /// pre-selected.
-    pub aur_default_select: bool,
     /// Max commits `find_installed_commit` walks back through a pkgbase's
     /// history when looking for the commit that produced the installed
     /// version (so the review screen can diff against it). Fast-moving

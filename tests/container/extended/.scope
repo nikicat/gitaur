@@ -57,6 +57,11 @@
 #   - shell_upgrade_aur_built_tag.sh     (AUR upgrade with a pre-built artifact →
 #       the apply preview's change-set row carries `built`; ports the retired
 #       06_loop_built_tag now that the picker is gone)
+#   - shell_upgrade_provides_hint.sh     (foreign virtual @ provides → shell
+#       `upgrade` seeds it with the foreign-pkgname hint; ports retired smoke 33,
+#       which drove the removed `-Syu` flag upgrade path)
+#   - shell_upgrade_split_picked_sibling.sh (foreign split sibling → `upgrade` +
+#       `apply` installs only the picked sibling; ports retired smoke 44)
 #   - shell_apply_failure_keeps_cart.sh  (failing build → cart kept → drop → apply)
 #   - shell_ctrl_c_bails_to_prompt.sh    (SIGINT mid-build returns to the prompt)
 #   - shell_remove_stages_uninstall.sh   (`remove` → pacman -R at apply)
