@@ -13,8 +13,13 @@ A package depending on / providing itself (or otherwise resolving to itself) mus
 not be treated as a dependency cycle — self-edges should be dropped before cycle
 detection.
 
-## Package size not shown for pacman packages in the update table
+<!-- Resolved/obsolete: "Package size not shown for pacman packages in the
+update table." That table was the interactive `-Syu` picker, now removed; the
+shell's change-set preview already shows repo `download_size` from the syncdb
+(see `src/ui/change_set.rs`, UPDATE_LOOP phase 2). -->
 
-In the update/upgrade table screen, the package size column is blank for plain
-pacman (repo) packages. Size should be populated from the sync DB entry for repo
-packages, the same way it is for AUR packages.
+_(One open bug remains above. Feature roadmaps live in the per-feature plan
+docs: shell phases 5–6 in `shell-ui.md`, GPG key import in
+`gpg-key-auto-import.md`, the `-Syu` discoverability + `-Qf`/`-G` ideas in
+`../COMPARISON.md`'s "Open design questions", and the test backlog in
+`../../tests/container/extended/.scope`.)_
