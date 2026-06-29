@@ -42,14 +42,18 @@ use cart::{
     StageClass, StageResult, UnstageResult,
 };
 use command::Command;
-use rustyline::DefaultEditor;
+use complete::ShellHelper;
+use rustyline::Editor;
 use rustyline::error::ReadlineError;
+use rustyline::history::DefaultHistory;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, instrument};
 
 pub mod cart;
 pub mod command;
+pub mod complete;
 pub mod selector;
 pub mod upgrade;
 
@@ -96,6 +100,11 @@ pub trait ShellEnv {
     /// fresh data too), and return the current upgrade candidates (repo ∪ AUR)
     /// for `upgrade` to seed into the cart.
     fn upgrade(&mut self) -> Result<Vec<PkgUpgrade>>;
+    /// Re-fetch the mirror + index and reload the session (fresh data for
+    /// `search`/`info`/classification/completion) **without** seeding the cart —
+    /// `upgrade` is the stage-the-upgrades variant; `refresh` is just the
+    /// re-fetch.
+    fn refresh(&mut self) -> Result<()>;
     /// Run a combined repo + AUR search; returns rows for the numbered list.
     fn search(&mut self, terms: &[SearchTerm]) -> Result<Vec<ListItem>>;
     /// Print `-Si`-style info for the already-resolved targets.
@@ -200,11 +209,12 @@ impl State {
                 Flow::Continue
             }
             Command::Refresh => {
-                // The mid-session re-fetch lands in phase 5; until then a fresh
-                // upstream snapshot is what restarting `gaur` is for.
-                env.print(
-                    "refresh isn't wired up yet (phase 5) — restart `gaur` to re-fetch the mirror",
-                );
+                // Re-fetch + reload the session; the cart is left untouched
+                // (`upgrade` is the seed-the-cart variant).
+                match env.refresh() {
+                    Ok(()) => env.print("mirror + index refreshed"),
+                    Err(e) => env.print(&format!("refresh: {e}")),
+                }
                 Flow::Continue
             }
         }
@@ -692,8 +702,7 @@ commands:
   help                this list
   quit                leave the shell (also: Ctrl-D)
 selectors: `3` (row), `5-8` (range), `glibc` (name), `python-*` (glob),
-           `aur`/`core`/… (whole repo — e.g. `drop aur`, `add extra`)
-note: `refresh` lands in a later phase.";
+           `aur`/`core`/… (whole repo — e.g. `drop aur`, `add extra`)";
 
 /// Run the interactive shell. Returns the desired process exit code.
 #[instrument(skip(cfg))]
@@ -722,8 +731,10 @@ pub fn run(cfg: &Config, devel: bool) -> Result<u8> {
         env.print("no AUR index yet — run `gaur -Sy` to enable AUR search/info");
     }
 
-    let mut rl =
-        DefaultEditor::new().map_err(|e| Error::other(format!("shell: init line editor: {e}")))?;
+    let helper = ShellHelper::new(Rc::clone(&env.caches.universe));
+    let mut rl: Editor<ShellHelper, DefaultHistory> =
+        Editor::new().map_err(|e| Error::other(format!("shell: init line editor: {e}")))?;
+    rl.set_helper(Some(helper));
     let history = paths::shell_history_path();
     // A missing history file on first run is expected, not an error.
     rl.load_history(&history).ok();
@@ -735,7 +746,15 @@ pub fn run(cfg: &Config, devel: bool) -> Result<u8> {
                     // Best-effort: a full history ring shouldn't abort input.
                     rl.add_history_entry(line.as_str()).ok();
                 }
-                if let Flow::Exit(code) = state.dispatch(&command::parse(&line), &mut env) {
+                let flow = state.dispatch(&command::parse(&line), &mut env);
+                // Refresh Tab's view for the next line: the just-mutated cart,
+                // and the universe (a cheap `Rc` clone — only `upgrade`/`refresh`
+                // actually swaps it). Sharing the same sources the selector
+                // resolver uses keeps "what Tab offers" == "what the verb accepts".
+                if let Some(helper) = rl.helper_mut() {
+                    helper.sync(Rc::clone(&env.caches.universe), cart_targets(&state));
+                }
+                if let Flow::Exit(code) = flow {
                     break code;
                 }
             }
@@ -758,8 +777,10 @@ pub fn run(cfg: &Config, devel: bool) -> Result<u8> {
 struct NameCaches {
     /// Sorted, de-duplicated — every AUR pkgname + pkgbase from the index plus
     /// sync-repo names, each as a [`PkgTarget`] (the universe a user can name).
-    /// Backs glob resolution and, later, tab-completion.
-    universe: Vec<PkgTarget>,
+    /// Backs glob resolution and tab-completion. An `Rc<[_]>` so the rustyline
+    /// completer shares it without copying ~100k names, and a re-`build` on
+    /// `upgrade`/`refresh` just swaps the pointer.
+    universe: Rc<[PkgTarget]>,
     /// Sync-repo pkgname → its repo (`core`, `extra`, …), for `add`'s coarse
     /// repo/AUR classification and the concrete repo column. The first sync DB
     /// (pacman.conf order) that declares a name wins, matching what pacman would
@@ -790,7 +811,22 @@ fn build_universe(session: Option<&UpgradeSession>) -> NameCaches {
     }
     universe.sort_unstable();
     universe.dedup();
-    NameCaches { universe, sync }
+    NameCaches {
+        universe: Rc::from(universe.into_boxed_slice()),
+        sync,
+    }
+}
+
+/// The staged specs as the typed [`PkgTarget`]s the completer offers for cart
+/// verbs (`drop`/`review`/`approve`). Recomputed after each command since the
+/// cart is tiny.
+fn cart_targets(state: &State) -> Vec<PkgTarget> {
+    state
+        .cart
+        .items()
+        .iter()
+        .map(|it| PkgTarget::new(it.spec()))
+        .collect()
 }
 
 /// Production [`ShellEnv`]: the loaded session + stdout, bridging `upgrade` to
@@ -808,17 +844,17 @@ impl ShellEnv for RealEnv<'_> {
     }
 
     fn upgrade(&mut self) -> Result<Vec<PkgUpgrade>> {
-        // Refresh the mirror + index and reload the session in place, so the
-        // fresh data backs subsequent `search`/`info`/classification too.
-        let session = upgrade::refresh_and_reload(self.cfg)?;
-        self.caches = build_universe(session.as_ref());
-        self.session = session;
+        self.reload()?;
         match &self.session {
             Some(session) => session.recompute_remaining(self.devel),
             // No AUR index even after a refresh: repo upgrades are still
             // queryable straight from the synced db.
             None => invoke::query_repo_upgrades(),
         }
+    }
+
+    fn refresh(&mut self) -> Result<()> {
+        self.reload()
     }
 
     fn search(&mut self, terms: &[SearchTerm]) -> Result<Vec<ListItem>> {
@@ -1040,6 +1076,17 @@ impl ShellEnv for RealEnv<'_> {
 }
 
 impl RealEnv<'_> {
+    /// Re-fetch the mirror + index and reload the session in place, rebuilding
+    /// the name caches so fresh data backs subsequent `search`/`info`/
+    /// classification + completion. Shared by `upgrade` (which then recomputes
+    /// candidates) and `refresh` (which stops here).
+    fn reload(&mut self) -> Result<()> {
+        let session = upgrade::refresh_and_reload(self.cfg)?;
+        self.caches = build_universe(session.as_ref());
+        self.session = session;
+        Ok(())
+    }
+
     /// Build the unified change-set table for `show`: resolve the staged set,
     /// collect the pulled-in deps, sizes, and build-time overlay, and hand them
     /// to [`ui::transaction_table`]. Errors bubble up so `render_cart` can fall
@@ -1231,14 +1278,64 @@ mod tests {
 
     use std::collections::HashMap;
 
+    /// The fake env's captured output: every `print`ed line, in order.
+    ///
+    /// A named domain type rather than a bare `Vec<String>` — but deliberately
+    /// *not* [`ui::Table`], which is specifically *rendered-table* lines built
+    /// only inside `ui` (and whose own doc warns against conflating it with other
+    /// string lists). This is a transcript of arbitrary shell output, exposing
+    /// the substring assertions the tests actually make rather than a raw `Vec`.
+    #[derive(Default, Debug)]
+    struct Transcript(Vec<String>);
+
+    impl Transcript {
+        fn push(&mut self, line: &str) {
+            self.0.push(line.to_owned());
+        }
+        fn clear(&mut self) {
+            self.0.clear();
+        }
+        fn is_empty(&self) -> bool {
+            self.0.is_empty()
+        }
+        /// Some printed line contains `needle` — the common assertion.
+        fn contains(&self, needle: &str) -> bool {
+            self.0.iter().any(|l| l.contains(needle))
+        }
+        /// Some printed line satisfies `pred`, for compound / exact-match checks.
+        fn any(&self, pred: impl Fn(&str) -> bool) -> bool {
+            self.0.iter().any(|l| pred(l))
+        }
+        /// The whole transcript as one string, for cross-line substring checks.
+        fn joined(&self) -> String {
+            self.0.join("\n")
+        }
+    }
+
+    /// How many times a scripted env effect ran. A typed counter so the fake's
+    /// call bookkeeping reads `env.upgrades.count()` against a named type instead
+    /// of a bare `usize` that could be compared against anything.
+    #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+    struct CallCount(usize);
+
+    impl CallCount {
+        fn bump(&mut self) {
+            self.0 += 1;
+        }
+        fn count(self) -> usize {
+            self.0
+        }
+    }
+
     /// Scripted [`ShellEnv`] capturing output + recording calls, with a
     /// pre-seeded search result, name universe, classification table, and
     /// scripted review/apply outcomes, so dispatch is testable without a
     /// terminal, index, or alpm.
     #[derive(Default)]
     struct FakeEnv {
-        lines: Vec<String>,
-        upgrades: usize,
+        lines: Transcript,
+        upgrades: CallCount,
+        refreshes: CallCount,
         search_result: Vec<ListItem>,
         info_calls: Vec<Vec<PkgTarget>>,
         names: Vec<PkgTarget>,
@@ -1252,16 +1349,20 @@ mod tests {
         review_calls: Vec<String>,
         /// What `apply` returns; absent ⇒ `Succeeded`.
         apply_outcome: Option<ApplyOutcome>,
-        apply_calls: usize,
+        apply_calls: CallCount,
     }
 
     impl ShellEnv for FakeEnv {
         fn print(&mut self, line: &str) {
-            self.lines.push(line.to_owned());
+            self.lines.push(line);
         }
         fn upgrade(&mut self) -> Result<Vec<PkgUpgrade>> {
-            self.upgrades += 1;
+            self.upgrades.bump();
             Ok(self.upgrade_candidates.clone())
+        }
+        fn refresh(&mut self) -> Result<()> {
+            self.refreshes.bump();
+            Ok(())
         }
         fn search(&mut self, _terms: &[SearchTerm]) -> Result<Vec<ListItem>> {
             Ok(self.search_result.clone())
@@ -1299,7 +1400,7 @@ mod tests {
             // pure dispatch core under test prints the header + summary itself.
         }
         fn apply(&mut self, _cart: &Cart) -> Result<ApplyOutcome> {
-            self.apply_calls += 1;
+            self.apply_calls.bump();
             Ok(self.apply_outcome.take().unwrap_or(ApplyOutcome::Succeeded))
         }
     }
@@ -1361,7 +1462,6 @@ mod tests {
         assert_eq!(flow, Flow::Continue);
         assert!(
             env.lines
-                .iter()
                 .any(|l| l.contains("unknown command") && l.contains("frobnicate")),
             "got: {:?}",
             env.lines
@@ -1372,7 +1472,7 @@ mod tests {
     fn help_lists_the_core_verbs() {
         let (flow, env) = dispatch_one("help");
         assert_eq!(flow, Flow::Continue);
-        let joined = env.lines.join("\n");
+        let joined = env.lines.joined();
         for verb in ["search", "info", "add", "upgrade", "apply", "quit"] {
             assert!(joined.contains(verb), "help text missing `{verb}`");
         }
@@ -1396,7 +1496,7 @@ mod tests {
         };
         let mut state = State::default();
         state.dispatch(&command::parse("upgrade"), &mut env);
-        assert_eq!(env.upgrades, 1, "upgrade recomputes once");
+        assert_eq!(env.upgrades.count(), 1, "upgrade recomputes once");
         assert_eq!(state.cart.items().len(), 2, "both candidates staged");
         // Repo upgrade auto-approves; AUR upgrade needs review.
         assert_eq!(state.cart.pending_review().len(), 1);
@@ -1419,7 +1519,27 @@ mod tests {
     fn upgrade_with_nothing_to_do_stages_nothing() {
         let (flow, env) = dispatch_one("upgrade");
         assert_eq!(flow, Flow::Continue);
-        assert!(env.lines.iter().any(|l| l.contains("nothing to upgrade")));
+        assert!(env.lines.contains("nothing to upgrade"));
+    }
+
+    #[test]
+    fn refresh_reloads_without_seeding_or_touching_the_cart() {
+        let mut env = env_with(&[("foo", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo"), &mut env);
+        state.dispatch(&command::parse("refresh"), &mut env);
+        assert_eq!(env.refreshes.count(), 1, "refresh re-fetches once");
+        assert_eq!(
+            env.upgrades.count(),
+            0,
+            "refresh is not an upgrade recompute"
+        );
+        assert_eq!(
+            state.cart.items().len(),
+            1,
+            "refresh leaves the cart intact"
+        );
+        assert!(env.lines.contains("refreshed"));
     }
 
     #[test]
@@ -1440,7 +1560,7 @@ mod tests {
         let mut state = State::default();
         state.dispatch(&command::parse("add nope"), &mut env);
         assert!(state.cart.is_empty());
-        assert!(env.lines.iter().any(|l| l.contains("unknown package")));
+        assert!(env.lines.contains("unknown package"));
     }
 
     #[test]
@@ -1450,7 +1570,7 @@ mod tests {
         state.dispatch(&command::parse("add foo"), &mut env);
         state.dispatch(&command::parse("add foo"), &mut env);
         assert_eq!(state.cart.items().len(), 1);
-        assert!(env.lines.iter().any(|l| l.contains("already staged")));
+        assert!(env.lines.contains("already staged"));
     }
 
     #[test]
@@ -1520,8 +1640,12 @@ mod tests {
         let mut state = State::default();
         state.dispatch(&command::parse("add yay-bin"), &mut env);
         state.dispatch(&command::parse("apply"), &mut env);
-        assert_eq!(env.apply_calls, 0, "apply must not run while pending");
-        assert!(env.lines.iter().any(|l| l.contains("needs review")));
+        assert_eq!(
+            env.apply_calls.count(),
+            0,
+            "apply must not run while pending"
+        );
+        assert!(env.lines.contains("needs review"));
     }
 
     #[test]
@@ -1530,9 +1654,9 @@ mod tests {
         let mut state = State::default();
         state.dispatch(&command::parse("add glibc"), &mut env);
         state.dispatch(&command::parse("apply"), &mut env);
-        assert_eq!(env.apply_calls, 1);
+        assert_eq!(env.apply_calls.count(), 1);
         assert!(state.cart.is_empty(), "a clean apply clears the cart");
-        assert!(env.lines.iter().any(|l| l == "done"));
+        assert!(env.lines.any(|l| l == "done"));
     }
 
     #[test]
@@ -1553,7 +1677,7 @@ mod tests {
         state.dispatch(&command::parse("add glibc"), &mut env);
         state.dispatch(&command::parse("apply"), &mut env);
         assert_eq!(state.cart.items().len(), 1, "failed apply keeps the cart");
-        assert!(env.lines.iter().any(|l| l.contains("didn't apply")));
+        assert!(env.lines.contains("didn't apply"));
     }
 
     #[test]
@@ -1570,22 +1694,18 @@ mod tests {
         let mut state = State::default();
         state.dispatch(&command::parse("add yay-bin"), &mut env);
         state.dispatch(&command::parse("show"), &mut env);
-        assert!(env.lines.iter().any(|l| l.contains("need review")));
+        assert!(env.lines.contains("need review"));
         state.dispatch(&command::parse("approve yay-bin"), &mut env);
         env.lines.clear();
         state.dispatch(&command::parse("show"), &mut env);
-        assert!(env.lines.iter().any(|l| l.contains("all approved")));
+        assert!(env.lines.contains("all approved"));
     }
 
     #[test]
     fn syntax_error_is_reported_not_fatal() {
         let (flow, env) = dispatch_one("add \"unterminated");
         assert_eq!(flow, Flow::Continue);
-        assert!(
-            env.lines.iter().any(|l| l.contains("syntax error")),
-            "got: {:?}",
-            env.lines
-        );
+        assert!(env.lines.contains("syntax error"), "got: {:?}", env.lines);
     }
 
     #[test]
@@ -1599,14 +1719,12 @@ mod tests {
         assert_eq!(flow, Flow::Continue);
         assert!(
             env.lines
-                .iter()
                 .any(|l| l.starts_with("  1") && l.contains("aur/foo")),
             "row 1 should be numbered: {:?}",
             env.lines
         );
         assert!(
             env.lines
-                .iter()
                 .any(|l| l.contains("  2") && l.contains("extra/bar"))
         );
         assert_eq!(state.last_list.len(), 2, "the list should be remembered");
@@ -1616,7 +1734,7 @@ mod tests {
     fn search_with_no_terms_prints_usage() {
         let (flow, env) = dispatch_one("search");
         assert_eq!(flow, Flow::Continue);
-        assert!(env.lines.iter().any(|l| l.contains("usage: search")));
+        assert!(env.lines.contains("usage: search"));
     }
 
     #[test]
@@ -1664,18 +1782,14 @@ mod tests {
         };
         state.dispatch(&command::parse("info 9"), &mut env);
         assert!(env.info_calls.is_empty(), "must not show on a bad index");
-        assert!(
-            env.lines.iter().any(|l| l.contains("info:")),
-            "got: {:?}",
-            env.lines
-        );
+        assert!(env.lines.contains("info:"), "got: {:?}", env.lines);
     }
 
     #[test]
     fn info_with_no_args_prints_usage() {
         let (flow, env) = dispatch_one("info");
         assert_eq!(flow, Flow::Continue);
-        assert!(env.lines.iter().any(|l| l.contains("usage: info")));
+        assert!(env.lines.contains("usage: info"));
     }
 
     fn cart_specs(state: &State) -> Vec<PkgTarget> {

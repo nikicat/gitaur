@@ -1,8 +1,10 @@
 # Plan: shell-like (REPL) UI for interactive `gaur`
 
 Status: phases 1–4 implemented; phase 5a (one unified renderer) + 5b (sorted-cart
-invariant) **done**; phase 5c (tab-completion, `refresh`, history `Hinter`,
-`help <topic>`, config knobs) + native combined commit (phase 6) remain.
+invariant) **done**; phase 5c partially done — **tab-completion** (the rustyline
+`Completer`) and the **`refresh`** command are in; history `Hinter`, `help
+<topic>`, and config knobs (`aur_approval`) remain, alongside the native combined
+commit (phase 6).
 
 ## Goal
 
@@ -377,8 +379,8 @@ Argument-bearing cart verbs keep raw `String` tokens that the handlers feed to
 ## Dependencies
 
 - **`rustyline`** (added, v18) for the line editor: history
-  (`$XDG_STATE_HOME/gitaur/shell_history`), emacs keybindings, and a `Completer`
-  (pending) over verbs + names.
+  (`$XDG_STATE_HOME/gitaur/shell_history`), emacs keybindings, and the
+  `ShellHelper` `Completer` over verbs + names (phase 5c).
 - **`shell-words`** (added) for tokenizing the input line.
 - Globs reuse the existing **`regex`** dep — no `globset`/`glob` added.
 
@@ -393,7 +395,7 @@ src/cli/shell/command.rs    Command enum + parse() (shell-words → verb)       
 src/cli/shell/selector.rs   Selector enum + resolve()                             [done]
 src/cli/shell/cart.rs       Cart + CartItem + Source/Approval/ApplyOutcome         [done]
 src/cli/shell/upgrade.rs    refresh+reload, cost-overlay preview (ex-upgrade_loop) [done]
-src/cli/shell/complete.rs   rustyline Completer over verbs + the name universe    [pending]
+src/cli/shell/complete.rs   rustyline Completer over verbs + the name universe    [done]
 ```
 
 The control flow is split like `upgrade_loop`'s `drive`/`LoopEnv`: a pure
@@ -517,7 +519,7 @@ Each phase is independently shippable and leaves the flag CLI fully working.
    core against the remembered list + the name universe. `SearchTerm` for query
    patterns, `PkgTarget` for `info`/`-Si` targets — threaded through
    `search_sync`/`cmd_search`/`cmd_info`. (`shell.rs` + `selector.rs` + `command.rs`.)
-   **Pending:** the rustyline `Completer`.
+   The rustyline `Completer` over this universe landed in phase 5c.
 3. **Cart + approval + apply (interim, pacman calls). — DONE.**
    `add`/`drop`(alias `discard`)/`remove`/`clear`/`show` build the `Cart` with
    per-item `Source` + `Approval`; `review <sel>` runs `build::review::review`
@@ -607,8 +609,18 @@ Each phase is independently shippable and leaves the flag CLI fully working.
    - *5b — order consistency. **DONE.*** `Cart::add` keeps the `items` `Vec`
      sorted (`RepoName::rank()` → repo → spec) as an invariant, so the displayed
      `№` *is* the vector index `resolve_against_cart` addresses — they can't drift.
-   - *5c — the rest.* Tab-completion (verbs + cart/universe), `refresh`, history
-     `Hinter`, `help <topic>`, config knobs (`aur_approval`, prompt/history).
+   - *5c — the rest.* **Tab-completion** (verbs + cart/universe) **DONE** — the
+     rustyline `Completer` in `src/cli/shell/complete.rs` is context-aware and
+     positional (verbs for word 1 / `help`; the name universe for
+     `search`/`add`/`info`/`remove`; the cart for `drop`/`review`/`approve`/
+     `upgrade`; nothing for a numeric token or a no-arg verb), recovering the
+     active verb by re-parsing the pre-cursor line so aliases resolve for free.
+     The universe is shared with the session by `Rc<[PkgTarget]>` and the cart
+     snapshot is re-synced after each command, so completion and the selector
+     resolver can't drift. **`refresh` DONE** — re-fetches the mirror + reloads
+     the session (fresh data for `search`/`info`/`upgrade`/completion) without
+     touching the cart. *Remaining:* history `Hinter`, `help <topic>`, config
+     knobs (`aur_approval`, prompt/history).
    ("will remove" rows read back via `trans_prepare` ride with phase 6.)
 6. **Native combined commit (atomic add+remove).** Internal `__commit-txn`
    privileged subcommand: one libalpm transaction over repo adds + AUR file adds +
@@ -643,6 +655,7 @@ Mirrors the existing two-tier philosophy (`docs/TESTING.md`) and the loop's seam
 | --- | --- | --- |
 | `src/cli/shell.rs` | `dispatch`/`ShellEnv`/`run`, `State`, `ListItem`, `RealEnv::render_cart` | REPL core (done); `render_cart` is the bespoke `show` table the phase-5 unification retires |
 | `src/cli/shell/selector.rs` | `resolve` | numbers/ranges/names/globs/**repo** → targets (done) |
+| `src/cli/shell/complete.rs` | `ShellHelper`, `candidates`, `arg_kind` | context-aware tab-completion: verbs / universe / cart per position (done) |
 | `src/cli/shell/cart.rs` | `Cart` (`Vec<CartItem>`), `add`, `repo_label` | phase 5b keeps the `Vec` sorted (repo-rank → name) so `№` == index for `resolve_against_cart` |
 | `src/cli/shell/upgrade.rs` | `refresh_and_reload`, `preview`, `preview_metrics`, `system_pac`/`synced_pac` | refresh+reload + the cost-overlay preview; phase 5 moves `preview`/overlay behind `show`, not `apply` |
 | `src/build/upgrade.rs` | `UpgradeSession::{recompute_remaining,pkgbase_of}` | recompute candidates for `upgrade` |

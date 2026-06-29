@@ -7,6 +7,17 @@
 
 use crate::names::SearchTerm;
 
+/// The canonical command verbs, in help-list order.
+///
+/// The single source of truth for the verbs `help` lists and the completer
+/// offers as first-word / `help <topic>` candidates. Aliases (`install`,
+/// `discard`, `up`, …) intentionally stay out — completion teaches the
+/// canonical name.
+pub const VERBS: &[&str] = &[
+    "search", "info", "add", "drop", "remove", "upgrade", "review", "approve", "show", "apply",
+    "clear", "refresh", "help", "quit",
+];
+
 /// One parsed shell command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -175,6 +186,16 @@ mod tests {
     fn help_takes_optional_topic() {
         assert_eq!(parse("help"), Command::Help(None));
         assert_eq!(parse("help add"), Command::Help(Some("add".into())));
+    }
+
+    #[test]
+    fn verbs_const_matches_the_parser() {
+        // Every advertised verb must parse to itself — guards VERBS against
+        // drifting from the `parse` match (a verb listed but unhandled, or a
+        // renamed canonical name).
+        for verb in VERBS {
+            assert_eq!(parse(verb).verb(), *verb, "`{verb}` doesn't round-trip");
+        }
     }
 
     #[test]
