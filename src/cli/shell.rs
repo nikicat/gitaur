@@ -649,7 +649,7 @@ fn select_from_candidates(
         .iter()
         .map(|u| RepoRow {
             target: PkgTarget::new(u.name.as_str()),
-            repo: Some(RepoName::from(u.repo.as_str())),
+            repo: Some(u.repo.clone()),
         })
         .collect();
     let args = expand_repo_tokens(args, &rows);
@@ -1487,7 +1487,7 @@ mod tests {
     fn up(repo: &str, name: &str) -> PkgUpgrade {
         use crate::version::Version;
         PkgUpgrade {
-            repo: repo.to_owned(),
+            repo: RepoName::from(repo),
             name: PkgName::from(name),
             old_ver: Version::from("1-1"),
             new_ver: Version::from("2-1"),

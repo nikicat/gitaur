@@ -5,7 +5,7 @@
 //! for that reason).
 
 use super::{color_on, dim};
-use crate::names::PkgName;
+use crate::names::{PkgName, RepoName};
 use crate::pacman::invoke::{PkgUpgrade, REPO_AUR};
 use crate::pacman::verdiff::{self, BumpKind};
 
@@ -168,17 +168,27 @@ pub(super) fn sort_for_display(plan: &[PkgUpgrade]) -> Vec<&PkgUpgrade> {
     rows
 }
 
-/// Sort key for `repo`. Pinned positions for the three canonical Arch repos
-/// and AUR last; any other configured repo (testing, custom, ...) lands in
-/// between and breaks ties alphabetically.
-fn repo_rank(repo: &str) -> (u8, &str) {
-    match repo {
+/// Sort key for a repo column: a coarse `rank` (pinned positions for the three
+/// canonical Arch repos, AUR last, any other configured repo in between) with
+/// `tie` breaking equal ranks alphabetically by name. Field order is the
+/// comparison order, so the derived `Ord` sorts rank-then-name.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct RepoRank<'a> {
+    rank: u8,
+    tie: &'a str,
+}
+
+fn repo_rank(repo: &RepoName) -> RepoRank<'_> {
+    // The pinned repos and the AUR sentinel are string literals, so this is the
+    // one spot that drops to `&str` to pattern-match them.
+    let (rank, tie) = match repo.as_str() {
         "core" => (0, ""),
         "extra" => (1, ""),
         "multilib" => (2, ""),
         REPO_AUR => (255, ""),
         other => (10, other),
-    }
+    };
+    RepoRank { rank, tie }
 }
 
 pub(super) fn col_widths(rows: &[&PkgUpgrade]) -> (usize, usize, usize) {
@@ -217,7 +227,7 @@ pub(super) fn render_row(
     let repo_pad = " ".repeat(repo_w.saturating_sub(u.repo.len()));
     format!(
         "{repo}{repo_pad}  {name:<name_w$}  {old_pre}{old_suf}{old_pad}  ->  {new_pre}{new_suf}",
-        repo = super::repo(&u.repo),
+        repo = super::repo(u.repo.as_str()),
         repo_pad = repo_pad,
         name = u.name,
         old_pre = style(old_pre).dim(),

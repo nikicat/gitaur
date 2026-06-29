@@ -155,7 +155,7 @@ impl CartItem {
         };
         // AUR rows label as `aur` from the source; a repo row carries its
         // concrete sync-DB so the table shows `core`/`extra`/… not just `repo`.
-        let repo = (source == Source::Repo).then(|| RepoName::from(u.repo.as_str()));
+        let repo = (source == Source::Repo).then(|| u.repo.clone());
         Self {
             target,
             source,
@@ -488,7 +488,7 @@ mod tests {
     fn upgrade(repo: &str, name: &str) -> PkgUpgrade {
         use crate::version::Version;
         PkgUpgrade {
-            repo: repo.to_owned(),
+            repo: RepoName::from(repo),
             name: PkgName::from(name),
             old_ver: Version::from("1-1"),
             new_ver: Version::from("2-1"),

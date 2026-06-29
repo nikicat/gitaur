@@ -2,7 +2,7 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::names::PkgName;
+use crate::names::{PkgName, RepoName};
 use crate::pacman::alpm_db;
 use crate::runopts;
 use crate::ui;
@@ -14,7 +14,10 @@ use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 use tracing::{debug, error, info, instrument, warn};
 
-/// Sentinel value [`PkgUpgrade::repo`] carries for AUR-sourced rows.
+/// The sentinel value [`PkgUpgrade::repo`] carries for AUR-sourced rows.
+///
+/// Kept as a `&str` (not a [`RepoName`]) so it doubles as a `match` pattern and
+/// a `RepoName == REPO_AUR` comparison target — `RepoName: PartialEq<&str>`.
 pub const REPO_AUR: &str = "aur";
 
 /// One package whose installed version is older than what's available
@@ -25,7 +28,7 @@ pub const REPO_AUR: &str = "aur";
 /// in the upgrade table and the source column shown to the user.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PkgUpgrade {
-    pub repo: String,
+    pub repo: RepoName,
     pub name: PkgName,
     pub old_ver: Version,
     pub new_ver: Version,
@@ -65,7 +68,7 @@ pub fn query_repo_upgrades_in(alpm: &Alpm) -> Vec<PkgUpgrade> {
             let avail = Version::from(spkg.version());
             if installed.is_outdated(&avail) {
                 upgrades.push(PkgUpgrade {
-                    repo: db.name().to_owned(),
+                    repo: RepoName::from(db.name()),
                     name: PkgName::new(ipkg.name()),
                     old_ver: installed,
                     new_ver: avail,
