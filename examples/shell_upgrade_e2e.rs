@@ -27,11 +27,18 @@ fn main() {
         s.contains("loop-repo") && s.contains("1.0-1 → 2.0-1")
     });
 
-    // Apply: the change-set preview + the transaction confirm.
+    // Apply gates on the one-line cost summary + a transaction confirm (phase
+    // 5a folded the old apply-time change-set table into `show`/`upgrade`, so the
+    // table — and its `this batch` total — now prints at `upgrade` above, not
+    // here).
     pty.send(b"apply\r");
-    pty.expect("change-set preview + confirm", |s| {
-        s.contains("this batch") && s.contains("Proceed with this transaction")
+    pty.expect("transaction confirm", |s| {
+        s.contains("Proceed with this transaction")
     });
+    // The size guard from the retired `05_loop_size_from_synced_db`: the staged
+    // upgrade's total (rendered by `upgrade` above) must be a real nonzero figure,
+    // never `total  0 B` — the smoking gun of reading sizes from the stale system
+    // syncdb (cached installed archive → `0`) instead of the freshly-synced db.
     let screen = pty.screen();
     assert!(
         !screen.contains("total  0 B"),
@@ -45,7 +52,12 @@ fn main() {
     pty.expect("sudo gate", |s| s.contains("Continue?"));
     pty.send(b"\r");
 
-    // A clean apply clears the cart — the shell-side proof the upgrade landed.
+    // Wait for the upgrade to finish (a full `pacman -Syu` syncs + downloads, so
+    // it runs well past the gate) before driving `show`: sending it mid-upgrade
+    // races the install and the buffered input is dropped when rustyline re-enters
+    // raw mode. A clean apply prints `done` and clears the cart.
+    pty.expect("apply finished", |s| s.contains("done"));
+    // `show` then reports the cart empty — the shell-side proof the upgrade landed.
     pty.send(b"show\r");
     pty.expect("cart cleared after apply", |s| s.contains("cart is empty"));
 

@@ -6,10 +6,10 @@
 //! scripts the staged-transaction flow against the `test-trivial` AUR fixture:
 //!
 //! ```text
-//!   add test-trivial        → staged, needs review
+//!   add test-trivial        → staged, needs review (cart reprinted)
 //!   apply                   → refused: the approval gate blocks it
 //!   approve test-trivial    → cleared without opening a diff
-//!   apply                   → builds + installs (one sudo "Continue?" gate)
+//!   apply                   → transaction confirm, build, then the sudo gate
 //!   show                    → "cart is empty" — the clean apply emptied it
 //! ```
 //!
@@ -39,15 +39,24 @@ fn main() {
     pty.expect("approved", |s| s.contains("approved test-trivial"));
 
     pty.send(b"apply\r");
-    // No deps are pulled in (only_requested), so the only prompt is the sudo
-    // gate before the final `pacman -U`.
+    // Phase 5a gates apply on a one-line cost summary + a transaction confirm
+    // before any irreversible work; answer it, then the build runs.
+    pty.expect("transaction confirm", |s| {
+        s.contains("Proceed with this transaction")
+    });
+    pty.send(b"\r");
+    // No deps are pulled in (only_requested), so the next and final prompt is the
+    // sudo gate before the privileged `pacman -U`.
     pty.expect("sudo gate", |s| s.contains("Continue?"));
     pty.send(b"\r");
 
-    // A clean apply clears the cart, so `show` reports it empty — the shell-side
-    // proof the build + install succeeded (a failure would keep the cart, and
-    // this expectation would time out with the screen dumped). The line is
-    // buffered until apply returns, so it's safe to send right after the gate.
+    // Wait for the apply to finish (build + privileged `pacman -U`) before
+    // driving the next command: sending `show` mid-install races the install, and
+    // the buffered input is dropped when rustyline re-enters raw mode at the next
+    // prompt. A clean apply prints `done` and clears the cart.
+    pty.expect("apply finished", |s| s.contains("done"));
+    // `show` then reports the cart empty — the shell-side proof the build +
+    // install succeeded (a failure would keep the cart and this would time out).
     pty.send(b"show\r");
     pty.expect("cart cleared after apply", |s| s.contains("cart is empty"));
 
