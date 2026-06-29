@@ -8,7 +8,7 @@
 use super::sync;
 use crate::error::{Error, Result};
 use crate::index::schema::IndexEntry;
-use crate::names::{PkgName, PkgTarget, SearchTerm};
+use crate::names::{PkgName, PkgTarget, RepoName, SearchTerm};
 use crate::version::{Ver, Version};
 use alpm::Alpm;
 use std::collections::{HashMap, HashSet};
@@ -70,7 +70,7 @@ pub enum MatchedVia {
 /// has so the picker can mark them the way `pacman -Ss` does.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RepoHit {
-    pub repo: String,
+    pub repo: RepoName,
     pub name: PkgName,
     pub version: Version,
     pub desc: Option<String>,
@@ -106,7 +106,7 @@ pub fn search_sync(terms: &[SearchTerm]) -> Result<Vec<RepoHit>> {
                 continue;
             }
             hits.push(RepoHit {
-                repo: db.name().to_owned(),
+                repo: RepoName::from(db.name()),
                 name: PkgName::new(p.name()),
                 version: Version::from(p.version()),
                 desc: p.desc().map(str::to_owned),

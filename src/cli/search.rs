@@ -50,7 +50,7 @@ impl Row<'_> {
 
     /// The repo bucket this row belongs to (`core`, `extra`, …, or `aur`), for
     /// the shell's repo-filter selectors (`add extra`).
-    pub(crate) const fn repo_name(&self) -> &str {
+    pub(crate) fn repo_name(&self) -> &str {
         match self {
             Row::Repo(r) => r.repo.as_str(),
             Row::Aur(_) => REPO_AUR,
@@ -249,7 +249,7 @@ fn label_colored(row: &Row<'_>) -> String {
         Row::Repo(r) => {
             let mut head = format!(
                 "{}/{} {}",
-                ui::repo(&r.repo),
+                ui::repo(r.repo.as_str()),
                 style(&r.name).bold(),
                 style(&r.version).green(),
             );
