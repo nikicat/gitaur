@@ -268,10 +268,21 @@ gaur> show
   the user's "find this package in the list" mental model and is the kind of thing
   the per-row color already signals.
 - **Number ↔ selector consistency.** Once `show` numbers rows in sorted order,
-  `drop 3` must index *that* order, not staging order. Introduce a single
-  canonical `Cart::ordered()` (repo → name) used by **both** the renderer and
-  `resolve_against_cart`, so the `№` shown is the `№` accepted. (Today both use
-  staging order, so they already agree; this keeps them agreeing after the sort.)
+  `drop 3` must index *that* order, not staging order. The simplest fix is to
+  **keep the cart's `Vec<CartItem>` sorted** (repo-rank → name) as its invariant,
+  not to compute a sorted *view* on the side: then the displayed `№` is literally
+  the vector index, and `resolve_against_cart` already indexes that same vector,
+  so the two **can't diverge by construction** — no second order to keep in sync.
+  (Today they agree precisely because both iterate the `Vec` in staging order;
+  this keeps that property, just under a sorted invariant.) `Cart::add` /
+  `upgrade`-seed insert in sorted position (or push-then-resort per batch — the
+  cart is tiny). Staging order is dropped, and nothing depends on it:
+  `install_targets`, `pending_review`, `repo_upgrades`, and the resolver are all
+  order-insensitive. Reusing `repo_rank` for the sort key makes the cart's order
+  identical to the table's column sort. **Tradeoff:** a sorted-insert `add` can
+  shift the numbers of existing rows (append wouldn't), so the habit is `show`
+  then numeric `drop`; `drop <name>`/`<repo>`/`<glob>` sidestep numbering
+  entirely.
 - **Resolve on every `show`?** Yes — `show` resolves the staged set to surface
   deps + sizes. It's one resolve (what `apply` does anyway); cache the resolved
   `Plan` keyed on cart contents and invalidate on any cart mutation so repeated
@@ -585,8 +596,10 @@ Each phase is independently shippable and leaves the flag CLI fully working.
      `show`/`status`/`upgrade` resolve the staged set (cached, with graceful
      fallback) and render it; `apply` drops the table and confirms on a one-line
      cost summary.
-   - *5b — order consistency.* Canonical `Cart::ordered()` (repo → name) shared
-     by the renderer and `resolve_against_cart`, so shown `№` == accepted `№`.
+   - *5b — order consistency.* Hold the cart `Vec` sorted (repo-rank → name) as
+     its invariant, so the displayed `№` *is* the vector index that
+     `resolve_against_cart` already uses — number ↔ selector agree by
+     construction, no separate view to sync.
    - *5c — the rest.* Tab-completion (verbs + cart/universe), `refresh`, history
      `Hinter`, `help <topic>`, config knobs (`aur_approval`, prompt/history).
    ("will remove" rows read back via `trans_prepare` ride with phase 6.)
@@ -622,7 +635,8 @@ Mirrors the existing two-tier philosophy (`docs/TESTING.md`) and the loop's seam
 | File | Anchor | Role |
 | --- | --- | --- |
 | `src/cli/shell.rs` | `dispatch`/`ShellEnv`/`run`, `State`, `ListItem`, `RealEnv::render_cart` | REPL core (done); `render_cart` is the bespoke `show` table the phase-5 unification retires |
-| `src/cli/shell/selector.rs` | `resolve` | numbers/ranges/names/globs/**repo** → targets (done); `Cart::ordered()` for `№`↔selector consistency (phase 5b) |
+| `src/cli/shell/selector.rs` | `resolve` | numbers/ranges/names/globs/**repo** → targets (done) |
+| `src/cli/shell/cart.rs` | `Cart` (`Vec<CartItem>`), `add`, `repo_label` | phase 5b keeps the `Vec` sorted (repo-rank → name) so `№` == index for `resolve_against_cart` |
 | `src/cli/shell/upgrade.rs` | `refresh_and_reload`, `preview`, `preview_metrics`, `system_pac`/`synced_pac` | refresh+reload + the cost-overlay preview; phase 5 moves `preview`/overlay behind `show`, not `apply` |
 | `src/build/upgrade.rs` | `UpgradeSession::{recompute_remaining,pkgbase_of}` | recompute candidates for `upgrade` |
 | `src/cli/search.rs` | `Row`, `label`, `picked` | reused for the shell's `search` rows (done) |
