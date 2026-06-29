@@ -40,6 +40,22 @@ pub fn aur_repo_path() -> PathBuf {
     state_dir().join("aur")
 }
 
+/// Timestamp of the last successful AUR-mirror fetch.
+///
+/// Written by [`crate::mirror::cmd_refresh`] and read by the shell's `upgrade`
+/// to throttle redundant network round-trips to within
+/// [`crate::config::Config::refresh_max_age_secs`].
+///
+/// A dedicated stamp rather than an artifact mtime: gix writes no `FETCH_HEAD`,
+/// `packed-refs` is only rewritten every few thousand fetches, and the index /
+/// commit-graph are only touched when refs actually changed — so no existing
+/// file reliably records "we contacted the mirror just now", least of all the
+/// common no-op fetch. Lives under the state dir so the test override and XDG
+/// rules apply uniformly.
+pub fn fetch_stamp_path() -> PathBuf {
+    state_dir().join("last-fetch")
+}
+
 /// Per-pkgbase worktree directory used during builds. `PathBuf::join`
 /// consumes `&PkgBase` via its `AsRef<Path>` impl — no string downgrade.
 pub fn pkg_worktree(pkgbase: &PkgBase) -> PathBuf {

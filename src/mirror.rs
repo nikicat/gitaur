@@ -18,6 +18,7 @@ use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
 pub mod clone;
@@ -154,7 +155,45 @@ pub fn cmd_refresh(cfg: &Config, force_reclone: bool) -> Result<()> {
     // Backstop: wipe any progress rows a mid-download error may have left
     // (each row normally clears itself on completion).
     mp.clear().ok();
+    // A successful refresh (fresh clone, incremental, or a no-op "no ref
+    // updates") just contacted the mirror; stamp it so the shell's `upgrade` can
+    // honour the refresh TTL. `-Sy`/`-Syy`/`refresh`/`upgrade` all pass through
+    // here, so the stamp reflects any fetch path, not just shell ones.
+    if aur.is_ok() {
+        record_fetch_stamp();
+    }
     aur
+}
+
+/// Record "the mirror was fetched just now" so the shell's `upgrade` can skip a
+/// redundant fetch within [`Config::refresh_max_age_secs`]. Best-effort: a write
+/// failure just means the next `upgrade` re-fetches (the pre-TTL behaviour),
+/// never an error. See [`paths::fetch_stamp_path`] for why this is a stamp file
+/// rather than an artifact mtime.
+fn record_fetch_stamp() {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    if let Err(e) = std::fs::write(paths::fetch_stamp_path(), secs.to_string()) {
+        debug!(error = %e, "record AUR fetch stamp");
+    }
+}
+
+/// How long ago the AUR mirror was last fetched, per the stamp
+/// [`record_fetch_stamp`] writes. `None` when it was never fetched (no stamp) or
+/// the stamp is unreadable/garbled — the caller then treats the mirror as stale
+/// and fetches, matching the always-fetch behaviour that predated the TTL. A
+/// future stamp (the clock moved backwards) reads as a zero age rather than
+/// re-fetching on every `upgrade`.
+pub(crate) fn last_fetch_age() -> Option<Duration> {
+    let raw = std::fs::read_to_string(paths::fetch_stamp_path()).ok()?;
+    let secs: u64 = raw.trim().parse().ok()?;
+    let stamped = UNIX_EPOCH + Duration::from_secs(secs);
+    Some(
+        SystemTime::now()
+            .duration_since(stamped)
+            .unwrap_or(Duration::ZERO),
+    )
 }
 
 /// Surface the parallel repo-db sync's outcome once the shared progress display

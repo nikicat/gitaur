@@ -18,16 +18,55 @@ use crate::paths;
 use crate::resolver::Plan;
 use crate::ui::{PreviewMetrics, TxnRoot};
 use std::collections::HashSet;
-use std::time::SystemTime;
-use tracing::warn;
+use std::time::{Duration, SystemTime};
+use tracing::{debug, warn};
 
-/// Refresh the mirror + index, then reload the session so subsequent
-/// `search`/`info`/`upgrade` see fresh data. `Ok(None)` when no index exists
-/// even after the refresh (shouldn't happen once a clone is on disk, but the
-/// caller degrades gracefully).
-pub(crate) fn refresh_and_reload(cfg: &Config) -> Result<Option<UpgradeSession>> {
-    mirror::cmd_refresh(cfg, false)?;
+/// Whether a session reload re-fetches the mirror unconditionally or only when
+/// the on-disk clone has gone stale.
+///
+/// A named policy rather than a bare bool so the call sites read intent: the
+/// explicit `refresh` command forces a fetch, while `upgrade` defers to the TTL
+/// so back-to-back `upgrade`s don't each re-hit the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FetchPolicy {
+    /// Always fetch — the explicit `refresh` command.
+    Always,
+    /// Fetch only when the last fetch predates
+    /// [`Config::refresh_max_age_secs`]; otherwise reload from disk without a
+    /// network round-trip — `upgrade`'s default.
+    WhenStale,
+}
+
+/// Refresh the mirror + index (subject to `policy`), then reload the session so
+/// subsequent `search`/`info`/`upgrade` see current data. Under
+/// [`FetchPolicy::WhenStale`] a recently-fetched mirror skips the network fetch,
+/// but the in-memory session is still reloaded from disk so an external `pacman
+/// -Sy`/`-Syu` is reflected. `Ok(None)` when no index exists even after
+/// (shouldn't happen once a clone is on disk, but the caller degrades
+/// gracefully).
+pub(crate) fn refresh_and_reload(
+    cfg: &Config,
+    policy: FetchPolicy,
+) -> Result<Option<UpgradeSession>> {
+    if should_fetch(cfg, policy) {
+        mirror::cmd_refresh(cfg, false)?;
+    } else {
+        debug!("mirror fetched within the refresh TTL; reloading from disk without a fetch");
+    }
     UpgradeSession::load(cfg)
+}
+
+/// Whether [`refresh_and_reload`] should hit the network: always under
+/// [`FetchPolicy::Always`], else only once the mirror is older than
+/// [`Config::refresh_max_age_secs`] (or was never fetched).
+fn should_fetch(cfg: &Config, policy: FetchPolicy) -> bool {
+    match policy {
+        FetchPolicy::Always => true,
+        FetchPolicy::WhenStale => match mirror::last_fetch_age() {
+            Some(age) => age >= Duration::from_secs(cfg.refresh_max_age_secs),
+            None => true,
+        },
+    }
 }
 
 /// A system-dbpath pacman snapshot — `pacman -S/-U/-Syu` act against this db, so
@@ -174,4 +213,61 @@ fn pkgbase_built(session: &UpgradeSession, pb: &PkgBase) -> bool {
             let pkgnames: Vec<PkgName> = entry.pkgnames.iter().map(|p| p.name.clone()).collect();
             build::artifacts_built(pb, &entry.version(), &pkgnames)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FetchPolicy, should_fetch};
+    use crate::config::Config;
+    use crate::paths;
+    use crate::testing::ScopedStateRoot;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::TempDir;
+
+    /// Write the AUR fetch stamp `ago` seconds in the past (the format
+    /// `mirror::record_fetch_stamp` emits — a Unix-epoch seconds string).
+    fn stamp_secs_ago(ago: u64) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(paths::fetch_stamp_path(), (now - ago).to_string()).unwrap();
+    }
+
+    #[test]
+    fn when_stale_fetches_only_past_the_ttl() {
+        let dir = TempDir::new().unwrap();
+        let _root = ScopedStateRoot::new(dir.path().to_path_buf());
+        let cfg = Config::default();
+        let ttl = cfg.refresh_max_age_secs;
+
+        // No stamp yet → never fetched → fetch.
+        assert!(should_fetch(&cfg, FetchPolicy::WhenStale));
+
+        // Stamped within the TTL → skip the network fetch.
+        stamp_secs_ago(ttl / 2);
+        assert!(!should_fetch(&cfg, FetchPolicy::WhenStale));
+
+        // Stamped past the TTL → stale → fetch.
+        stamp_secs_ago(ttl * 2);
+        assert!(should_fetch(&cfg, FetchPolicy::WhenStale));
+    }
+
+    #[test]
+    fn always_policy_ignores_a_fresh_stamp() {
+        let dir = TempDir::new().unwrap();
+        let _root = ScopedStateRoot::new(dir.path().to_path_buf());
+        let cfg = Config::default();
+        stamp_secs_ago(0); // fresh — would skip under WhenStale
+        assert!(should_fetch(&cfg, FetchPolicy::Always));
+    }
+
+    #[test]
+    fn a_garbled_stamp_reads_as_stale() {
+        let dir = TempDir::new().unwrap();
+        let _root = ScopedStateRoot::new(dir.path().to_path_buf());
+        let cfg = Config::default();
+        std::fs::write(paths::fetch_stamp_path(), "not-a-number").unwrap();
+        assert!(should_fetch(&cfg, FetchPolicy::WhenStale));
+    }
 }

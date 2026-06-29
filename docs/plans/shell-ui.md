@@ -630,35 +630,51 @@ Each phase is independently shippable and leaves the flag CLI fully working.
 
 ## Backlog — shell UX refinements (post-5c)
 
-Found while using the shell; none block the phasing above.
+Found while using the shell; none block the phasing above. **All three DONE.**
 
-1. **`upgrade` should refresh on a TTL, not every time.** Now that `refresh` is
-   an explicit, always-fetch command (phase 5c), `upgrade` no longer needs to
-   re-fetch unconditionally — it calls `upgrade::refresh_and_reload` →
-   `mirror::cmd_refresh(cfg, false)` every time, a network round-trip on every
-   `upgrade`. Gate that fetch on `Config::refresh_max_age_secs` (already defined,
-   default 3600s — but **currently unread**, set only in `config/defaults.rs`):
-   skip the AUR-mirror fetch when its last fetch is younger than the TTL, still
-   reloading the in-memory session. `refresh` keeps forcing a fetch; `-Syy`
-   keeps forcing a full re-clone. Needs a last-fetch timestamp source (the AUR
-   clone's `FETCH_HEAD` mtime, or a tiny recorded stamp).
-2. **`add` / `drop` should print the whole cart.** Today they only print
-   per-item lines (`staged foo (aur)` / `dropped bar`); the user must type `show`
-   to see the resulting transaction. After a mutating
-   `add`/`drop`/`remove`/`clear`, print the **entire cart** — the full `show`
-   summary + table — so the current transaction is always on screen. This reprint
-   is also where (3)'s re-resolution happens.
-3. **Re-resolve on change, not on every `status`.** Move the cost off `show`:
-   resolve the cart **once per mutation** — the commands that change the staged
-   set or the upstream data (`add`/`drop`/`remove`/`clear`/`upgrade`/`refresh`) —
-   and stash the resolved `Plan` (+ size/build-time overlay) on the session;
-   `show`/`status` then just reprints that stash and is instant. Today
-   `RealEnv::transaction_view` does the opposite — `build::resolve_targets`
-   (dependency resolution) + `upgrade::synced_pac` (`alpm_db::open_synced`, a
-   rootless sync-db open) + the metrics SQLite store run on *every* `show`, which
-   is the delay. Note `approve`/`review` change only approval state, not the
-   package set, so they need a cheap re-render of the stashed `Plan`, not a
-   re-resolve. Keep the graceful flat-row fallback when a resolve fails.
+1. **`upgrade` should refresh on a TTL, not every time. — DONE.** `upgrade` now
+   defers its mirror fetch to `Config::refresh_max_age_secs` (default 3600s,
+   previously defined-but-unread). `upgrade::refresh_and_reload` takes a typed
+   `FetchPolicy`: `upgrade` passes `WhenStale` (skip the fetch when the last one
+   is younger than the TTL, still reloading the in-memory session from disk),
+   `refresh` passes `Always` (force a fetch, TTL-ignored); `-Syy` keeps forcing a
+   full re-clone via `cmd_refresh`'s `force_reclone`. The last-fetch timestamp is
+   a small stamp file (`paths::fetch_stamp_path` → `state_dir()/last-fetch`)
+   written by `mirror::cmd_refresh` on every successful refresh and read by
+   `mirror::last_fetch_age` — *not* an artifact mtime, because gix writes no
+   `FETCH_HEAD`, `packed-refs` is rewritten only every ~2000 fetches, and the
+   index/commit-graph are touched only when refs changed, so nothing on disk
+   reliably records the common no-op fetch. A missing/garbled stamp reads as
+   stale (fetch); a future stamp (clock skew) reads as a zero age (skip). Since
+   `cmd_refresh` does both the AUR fetch *and* the repo-db sync, a TTL-fresh
+   `upgrade` skips both network round-trips — the whole point being "no network
+   on a just-refreshed `upgrade`"; `refresh` or TTL expiry restores freshness.
+2. **`add` / `drop` should print the whole cart. — DONE.** After a *successful*
+   cart-changing `add`/`drop`/`remove` (i.e. something actually staged/unstaged —
+   a no-op `add nope` or `drop notincart` stays quiet), the dispatch core calls
+   `State::show`, reprinting the full header + table + approval summary, so the
+   current transaction is always on screen without typing `show`. The per-item
+   acknowledgments (`staged foo (aur)`, `dropped bar`, the exceptional
+   already-staged/unknown notes) are kept — they confirm each action and the
+   `shell_cart_e2e` PTY driver asserts on `staged …`. `clear` keeps its terse
+   `cart cleared` (reprinting an empty cart would just say "cart is empty").
+   `approve`/`review` aren't in scope here (they don't change the package set);
+   the user's next `show` reflects them — and is now a cache hit (see 3).
+3. **Re-resolve on change, not on every `show`. — DONE.** `RealEnv` caches the
+   expensive package-set-dependent half of the `show` view (`ResolvedTxn`: the
+   `synced_pac` size snapshot, the pulled-in dep rows, and the build-time
+   overlay) in `Option<CachedTxn>`, keyed by a `TxnKey` over the staged install
+   targets + removal names (**approval excluded** — it changes only the rendered
+   cell, not the resolution). `render_cart` → `transaction_view` → `ensure_view`
+   re-resolves only on a key miss; the cache is cleared on `reload`
+   (`upgrade`/`refresh` — upstream data moved) and at the start of `apply` (the
+   installed set may move). So a package-set mutation resolves **once** (the
+   reprint from item 2 is that one resolve), repeated `show`s are free, and
+   `approve`/`review` followed by `show` re-derive only the approval-bearing root
+   rows from the live cart against the cached snapshot — no re-resolve. The plan
+   itself isn't cached (only the dep rows/overlay derived from it; `apply`
+   resolves its own live plan). The graceful flat-row fallback on a resolve
+   failure is unchanged.
 
 ## Testing
 

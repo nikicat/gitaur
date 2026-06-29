@@ -329,6 +329,7 @@ impl State {
             return;
         }
         let policy = env.aur_policy();
+        let mut changed = false;
         for t in targets {
             match env.classify(&t) {
                 Some(StageClass { source, repo }) => {
@@ -339,7 +340,10 @@ impl State {
                         .clone()
                         .map_or_else(|| source.label().to_owned(), RepoName::into_inner);
                     match self.cart.add(CartItem::new(t, source, repo, policy)) {
-                        StageResult::Staged => env.print(&format!("staged {name} ({label})")),
+                        StageResult::Staged => {
+                            env.print(&format!("staged {name} ({label})"));
+                            changed = true;
+                        }
                         StageResult::AlreadyStaged => {
                             env.print(&format!("{name} is already staged"));
                         }
@@ -347,6 +351,12 @@ impl State {
                 }
                 None => env.print(&format!("unknown package `{}` — not staged", t.as_str())),
             }
+        }
+        // Keep the resulting transaction on screen so the user needn't `show`
+        // after every stage (post-5c UX). Skipped when nothing actually changed
+        // (all already-staged / unknown), so a no-op `add` stays quiet.
+        if changed {
+            self.show(env);
         }
     }
 
@@ -368,11 +378,20 @@ impl State {
             env.print("drop: nothing in the cart matched");
             return;
         }
+        let mut changed = false;
         for t in targets {
             match self.cart.unstage(&t) {
-                UnstageResult::Unstaged => env.print(&format!("dropped {}", t.as_str())),
+                UnstageResult::Unstaged => {
+                    env.print(&format!("dropped {}", t.as_str()));
+                    changed = true;
+                }
                 UnstageResult::NotStaged => env.print(&format!("{} wasn't staged", t.as_str())),
             }
+        }
+        // Reprint the remaining transaction (or "cart is empty" once the last row
+        // goes) so the current cart is always on screen — post-5c UX.
+        if changed {
+            self.show(env);
         }
     }
 
@@ -395,14 +414,23 @@ impl State {
             env.print("remove: nothing matched");
             return;
         }
+        let mut changed = false;
         for t in targets {
             let name = PkgName::from(t.into_inner());
             match self.cart.stage_remove(name.clone()) {
-                StageResult::Staged => env.print(&format!("staged removal of {name}")),
+                StageResult::Staged => {
+                    env.print(&format!("staged removal of {name}"));
+                    changed = true;
+                }
                 StageResult::AlreadyStaged => {
                     env.print(&format!("{name} is already staged for removal"));
                 }
             }
+        }
+        // Show the resulting transaction (the new "will remove" row included) so
+        // the cart is always on screen — post-5c UX.
+        if changed {
+            self.show(env);
         }
     }
 
@@ -723,6 +751,7 @@ pub fn run(cfg: &Config, devel: bool) -> Result<u8> {
         devel,
         session,
         caches,
+        view: None,
     };
     let mut state = State::default();
 
@@ -836,6 +865,65 @@ struct RealEnv<'a> {
     devel: bool,
     session: Option<UpgradeSession>,
     caches: NameCaches,
+    /// Cached resolution of the cart's package set for `show` — see
+    /// [`CachedTxn`]. `None` until the first render, after a reload, or after an
+    /// `apply` (which may have changed the installed set).
+    view: Option<CachedTxn>,
+}
+
+/// The expensive, package-set-dependent half of the `show` transaction view:
+/// the synced-db size snapshot, the pulled-in dependency rows, and the
+/// build-time overlay. Built by [`RealEnv::resolve_view`] and cached so repeated
+/// `show`s and the post-mutation cart reprint don't redo the resolver + the two
+/// alpm opens + the metrics-store read.
+///
+/// The resolved [`Plan`] itself isn't kept — the render only needs the dep rows
+/// and overlay derived from it, and `apply` resolves its own live plan against
+/// the system db. The approval-bearing root rows aren't stored either: they're
+/// re-derived per render from the live cart, so `approve`/`review` show up on
+/// the next `show` without a re-resolve (only the approval cell changed, not the
+/// resolution).
+struct ResolvedTxn {
+    size_pac: PacmanIndex,
+    repo_deps: Vec<PkgName>,
+    aur_deps: Vec<PkgBase>,
+    metrics: ui::PreviewMetrics,
+}
+
+/// A [`ResolvedTxn`] tagged with the cart package set it was resolved for, so
+/// [`RealEnv::render_cart`] reuses it while that set is unchanged and discards it
+/// the moment `add`/`drop`/`remove`/`clear` (or a reload) moves the set.
+struct CachedTxn {
+    key: TxnKey,
+    resolved: ResolvedTxn,
+}
+
+/// Identity of a cart's *resolution-relevant* state: the staged install targets
+/// plus the removal names. Approval is excluded — it doesn't change what
+/// resolves, only the rendered cell — so `approve`/`review` are a cache hit. Two
+/// carts with equal keys resolve identically against unchanged mirror/db data,
+/// which is why [`RealEnv::reload`] also clears the cache when that data may have
+/// moved.
+#[derive(PartialEq, Eq)]
+struct TxnKey {
+    installs: Vec<PkgTarget>,
+    removals: Vec<PkgName>,
+}
+
+impl TxnKey {
+    fn of(cart: &Cart) -> Self {
+        // The cart keeps `items` sorted (phase 5b), but normalise defensively so
+        // the key is order-independent however it was assembled.
+        let mut installs: Vec<PkgTarget> = cart
+            .items()
+            .iter()
+            .map(|it| PkgTarget::new(it.spec()))
+            .collect();
+        installs.sort_unstable();
+        let mut removals: Vec<PkgName> = cart.removals().to_vec();
+        removals.sort_unstable();
+        Self { installs, removals }
+    }
 }
 
 impl ShellEnv for RealEnv<'_> {
@@ -844,7 +932,11 @@ impl ShellEnv for RealEnv<'_> {
     }
 
     fn upgrade(&mut self) -> Result<Vec<PkgUpgrade>> {
-        self.reload()?;
+        // `upgrade` defers to the refresh TTL — a fetch within
+        // `refresh_max_age_secs` is skipped (the session still reloads), so
+        // back-to-back `upgrade`s don't each pay a network round-trip. The
+        // explicit `refresh` command forces a fetch.
+        self.reload(upgrade::FetchPolicy::WhenStale)?;
         match &self.session {
             Some(session) => session.recompute_remaining(self.devel),
             // No AUR index even after a refresh: repo upgrades are still
@@ -854,7 +946,8 @@ impl ShellEnv for RealEnv<'_> {
     }
 
     fn refresh(&mut self) -> Result<()> {
-        self.reload()
+        // `refresh` is the always-fetch command — it ignores the TTL.
+        self.reload(upgrade::FetchPolicy::Always)
     }
 
     fn search(&mut self, terms: &[SearchTerm]) -> Result<Vec<ListItem>> {
@@ -979,10 +1072,11 @@ impl ShellEnv for RealEnv<'_> {
     }
 
     fn render_cart(&mut self, cart: &Cart) {
-        // Resolve the staged set into the full change set (roots + pulled-in
-        // deps + removals + cost) and render the one unified table. `show` must
-        // never error out, so a resolve failure degrades to the flat staged
-        // rows plus a note (UPDATE_LOOP goal #5 landing behind `show`).
+        // Render the unified change-set table from the cached resolution (roots
+        // + pulled-in deps + removals + cost), re-resolving only when the cart's
+        // package set moved. `show` must never error out, so a resolve failure
+        // degrades to the flat staged rows plus a note (UPDATE_LOOP goal #5
+        // landing behind `show`).
         match self.transaction_view(cart) {
             Ok(table) => {
                 for line in table.lines() {
@@ -999,6 +1093,10 @@ impl ShellEnv for RealEnv<'_> {
     }
 
     fn apply(&mut self, cart: &Cart) -> Result<ApplyOutcome> {
+        // The build/install (and any removals) may change the installed set, so
+        // the cached resolution is stale once apply runs whatever its outcome;
+        // drop it so the next `show` re-resolves against the new system state.
+        self.view = None;
         let Some(session) = self.session.as_ref() else {
             ui::warn("no AUR index loaded; cannot apply");
             return Ok(ApplyOutcome::Failed);
@@ -1076,22 +1174,70 @@ impl ShellEnv for RealEnv<'_> {
 }
 
 impl RealEnv<'_> {
-    /// Re-fetch the mirror + index and reload the session in place, rebuilding
-    /// the name caches so fresh data backs subsequent `search`/`info`/
-    /// classification + completion. Shared by `upgrade` (which then recomputes
-    /// candidates) and `refresh` (which stops here).
-    fn reload(&mut self) -> Result<()> {
-        let session = upgrade::refresh_and_reload(self.cfg)?;
+    /// Re-fetch the mirror + index (subject to `policy`'s TTL) and reload the
+    /// session in place, rebuilding the name caches so fresh data backs
+    /// subsequent `search`/`info`/classification + completion. Shared by
+    /// `upgrade` (which then recomputes candidates) and `refresh` (which stops
+    /// here). Invalidates the `show` resolution cache — the mirror/db data it was
+    /// resolved against may have just changed.
+    fn reload(&mut self, policy: upgrade::FetchPolicy) -> Result<()> {
+        let session = upgrade::refresh_and_reload(self.cfg, policy)?;
         self.caches = build_universe(session.as_ref());
         self.session = session;
+        self.view = None;
         Ok(())
     }
 
-    /// Build the unified change-set table for `show`: resolve the staged set,
-    /// collect the pulled-in deps, sizes, and build-time overlay, and hand them
-    /// to [`ui::transaction_table`]. Errors bubble up so `render_cart` can fall
-    /// back to the flat rows — `show` must never abort.
-    fn transaction_view(&self, cart: &Cart) -> Result<ui::Table> {
+    /// Build the unified change-set table for `show` from the cached resolution,
+    /// re-deriving the approval-bearing root rows from the live cart each call
+    /// (cheap — no I/O). [`ui::transaction_table`] returns an owned [`ui::Table`]
+    /// (it holds no borrow of the cache), so `render_cart` can print it after the
+    /// borrow ends; errors bubble so the caller can fall back to the flat staged
+    /// rows — `show` must never abort.
+    fn transaction_view(&mut self, cart: &Cart) -> Result<ui::Table> {
+        self.ensure_view(cart)?;
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| Error::other("no AUR index loaded"))?;
+        let r = &self
+            .view
+            .as_ref()
+            .expect("ensure_view populated the cache on Ok")
+            .resolved;
+        let roots = txn_roots(cart, session, &r.size_pac);
+        let removals: Vec<PkgName> = cart.removals().to_vec();
+        Ok(ui::transaction_table(
+            &roots,
+            &r.repo_deps,
+            &r.aur_deps,
+            &removals,
+            &r.size_pac,
+            &r.metrics,
+        ))
+    }
+
+    /// Ensure [`Self::view`] holds a resolution valid for `cart`, re-resolving
+    /// only on a package-set change (the [`TxnKey`]) — a reload/apply already
+    /// cleared it. Propagates a resolve error so [`Self::transaction_view`] can
+    /// fall back to flat rows without caching the failure.
+    fn ensure_view(&mut self, cart: &Cart) -> Result<()> {
+        let key = TxnKey::of(cart);
+        if self.view.as_ref().is_some_and(|v| v.key == key) {
+            return Ok(());
+        }
+        let resolved = self.resolve_view(cart)?;
+        self.view = Some(CachedTxn { key, resolved });
+        Ok(())
+    }
+
+    /// Resolve the cart's package set into a [`ResolvedTxn`]: run the dependency
+    /// resolve, then from its plan derive the synced-db size snapshot, the
+    /// pulled-in dep rows, and the build-time overlay (the plan itself isn't
+    /// kept). This is the expensive I/O the cache amortises (`resolve_targets` +
+    /// two alpm opens + the metrics store), recomputed only on a package-set
+    /// change or a reload/apply.
+    fn resolve_view(&self, cart: &Cart) -> Result<ResolvedTxn> {
         let session = self
             .session
             .as_ref()
@@ -1100,13 +1246,17 @@ impl RealEnv<'_> {
         let plan = self.resolve_cart(session, &pac, cart)?;
         // Sizes from the freshly-synced db (the new versions' real download cost).
         let size_pac = upgrade::synced_pac()?;
-        let roots = txn_roots(cart, session, &size_pac);
         let (repo_deps, aur_deps) = upgrade::dep_rows(plan.as_ref());
-        let removals: Vec<PkgName> = cart.removals().to_vec();
+        // Roots feed only the (approval-independent) build-time overlay here; the
+        // render re-derives approval-aware roots from the live cart.
+        let roots = txn_roots(cart, session, &size_pac);
         let metrics = upgrade::preview_metrics(session, &roots, plan.as_ref());
-        Ok(ui::transaction_table(
-            &roots, &repo_deps, &aur_deps, &removals, &size_pac, &metrics,
-        ))
+        Ok(ResolvedTxn {
+            size_pac,
+            repo_deps,
+            aur_deps,
+            metrics,
+        })
     }
 
     /// Resolve the cart's install/build half into a [`Plan`] — the AUR rows and
@@ -1699,6 +1849,61 @@ mod tests {
         env.lines.clear();
         state.dispatch(&command::parse("show"), &mut env);
         assert!(env.lines.contains("all approved"));
+    }
+
+    #[test]
+    fn add_reprints_the_whole_cart() {
+        // A successful stage reprints the transaction so the user sees the cart
+        // without typing `show` (post-5c UX). The pure core's `show` header is
+        // the observable proof here (the table body is RealEnv's job).
+        let mut env = env_with(&[("foo", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo"), &mut env);
+        assert!(
+            env.lines.contains("transaction — 1 to install"),
+            "add should reprint the cart: {:?}",
+            env.lines
+        );
+    }
+
+    #[test]
+    fn add_no_op_stays_quiet() {
+        // An add that stages nothing (unknown package) must not reprint the cart.
+        let mut env = FakeEnv::default(); // classifies nothing
+        let mut state = State::default();
+        state.dispatch(&command::parse("add nope"), &mut env);
+        assert!(
+            !env.lines.any(|l| l.contains("transaction —")),
+            "a no-op add should not reprint: {:?}",
+            env.lines
+        );
+    }
+
+    #[test]
+    fn drop_reprints_the_remaining_cart() {
+        let mut env = env_with(&[("foo", Source::Aur), ("bar", Source::Repo)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo bar"), &mut env);
+        env.lines.clear();
+        state.dispatch(&command::parse("drop foo"), &mut env);
+        assert!(
+            env.lines.contains("transaction — 1 to install"),
+            "drop should reprint the remaining cart: {:?}",
+            env.lines
+        );
+    }
+
+    #[test]
+    fn remove_reprints_the_cart_with_the_removal_row() {
+        let mut env = FakeEnv::default();
+        let mut state = State::default();
+        state.dispatch(&command::parse("remove oldpkg"), &mut env);
+        assert!(
+            env.lines
+                .contains("transaction — 0 to install, 1 to remove"),
+            "remove should reprint the cart: {:?}",
+            env.lines
+        );
     }
 
     #[test]
