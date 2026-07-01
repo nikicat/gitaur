@@ -17,7 +17,6 @@ use crate::names::PkgBase;
 use crate::pacman::alpm_db::{InstalledCounterpart, MatchedVia};
 use crate::ui;
 use crate::version::Ver;
-use dialoguer::Select;
 use gix::ObjectId;
 use std::path::Path;
 use std::process::Command;
@@ -85,28 +84,21 @@ pub fn review(
     // isn't immediately clobbered by re-printing the diff above the prompt.
     let base = show(mirror, pkgbase, new_ver, counterpart, wt, history_scan_max)?;
 
-    let items = menu_items(base.is_some());
+    let actions = menu_actions(base.is_some());
 
     loop {
-        let choice = Select::new()
-            .with_prompt(format!("[{pkgbase}] review"))
-            .items(&items)
-            .default(0)
-            .interact()
-            .map_err(|e| Error::other(format!("prompt: {e}")))?;
-        match items[choice] {
-            "proceed" => return Ok(Outcome::Approved),
-            "view PKGBUILD" => show_pkgbuild(wt)?,
-            "view full diff" => show_diff(
+        match prompt_action(pkgbase, &actions)? {
+            Action::Approve => return Ok(Outcome::Approved),
+            Action::ViewPkgbuild => show_pkgbuild(wt)?,
+            Action::ViewDiff => show_diff(
                 mirror,
                 wt,
                 base.expect("only present when a diff base was found"),
                 Some(FULL_DIFF_CONTEXT),
             )?,
-            "edit" => edit_pkgbuild(wt)?,
-            "skip" => return Ok(Outcome::Skipped),
-            "abort" => return Err(Error::UserAbort),
-            _ => unreachable!("menu choice out of range"),
+            Action::Edit => edit_pkgbuild(wt)?,
+            Action::Skip => return Ok(Outcome::Skipped),
+            Action::Abort => return Err(Error::UserAbort),
         }
     }
 }
@@ -347,17 +339,108 @@ fn diff_command(
     cmd
 }
 
-/// Review menu items, ordered so the default (index 0) is "proceed". The
-/// "view full diff" entry only appears when there is a diff base to render
-/// against — on install/reinstall the initial view is already the whole
-/// PKGBUILD, so a full-context diff would be redundant.
-fn menu_items(has_diff: bool) -> Vec<&'static str> {
-    let mut items = vec!["proceed", "view PKGBUILD"];
-    if has_diff {
-        items.push("view full diff");
+/// One selectable action on the review prompt.
+///
+/// The prompt is plain text, not an interactive menu: each action advertises
+/// a single hotkey (the parenthesized letter in its [`Self::label`]) and the
+/// user types that letter. `Approve` is first so a bare enter — or a
+/// piped/closed stdin — falls back to it, matching the old `Select` default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    /// Include this pkgbase in the build batch.
+    Approve,
+    /// Print the full PKGBUILD source.
+    ViewPkgbuild,
+    /// Show the full-context diff against the installed version's commit.
+    /// Offered only when a diff base was found.
+    ViewDiff,
+    /// Open the PKGBUILD in `$EDITOR`.
+    Edit,
+    /// Drop this pkgbase but keep reviewing the rest.
+    Skip,
+    /// Abort the whole review pass.
+    Abort,
+}
+
+impl Action {
+    /// The key that selects this action, matched case-insensitively against
+    /// the first non-space character the user types.
+    const fn key(self) -> char {
+        match self {
+            Self::Approve => 'a',
+            Self::ViewPkgbuild => 'p',
+            Self::ViewDiff => 'd',
+            Self::Edit => 'e',
+            Self::Skip => 's',
+            Self::Abort => 'q',
+        }
     }
-    items.extend_from_slice(&["edit", "skip", "abort"]);
-    items
+
+    /// The prompt label, with the hotkey parenthesized (`(a)pprove`).
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Approve => "(a)pprove",
+            Self::ViewPkgbuild => "view (p)kgbuild",
+            Self::ViewDiff => "view full (d)iff",
+            Self::Edit => "(e)dit",
+            Self::Skip => "(s)kip",
+            Self::Abort => "(q)uit",
+        }
+    }
+}
+
+/// Review actions in display (and default-fallback) order. "view full diff"
+/// only appears when there is a diff base to render against — on
+/// install/reinstall the initial view is already the whole PKGBUILD, so a
+/// full-context diff would be redundant.
+fn menu_actions(has_diff: bool) -> Vec<Action> {
+    let mut actions = vec![Action::Approve, Action::ViewPkgbuild];
+    if has_diff {
+        actions.push(Action::ViewDiff);
+    }
+    actions.extend_from_slice(&[Action::Edit, Action::Skip, Action::Abort]);
+    actions
+}
+
+/// Resolve a raw input line to an action. An empty line (bare enter) picks
+/// the default — the first action, `Approve` — mirroring the old `Select`'s
+/// `default(0)`. An unrecognized key yields `None` so the caller re-prompts.
+fn parse_action(line: &str, actions: &[Action]) -> Option<Action> {
+    match line.trim().chars().next() {
+        None => actions.first().copied(),
+        Some(c) => {
+            let c = c.to_ascii_lowercase();
+            actions.iter().copied().find(|a| a.key() == c)
+        }
+    }
+}
+
+/// Render the plain-text action prompt and block for one line of input,
+/// re-prompting on an unrecognized key. A closed/piped stdin (EOF) falls back
+/// to the default action so a non-interactive caller can't spin. The prompt
+/// goes to stderr (unbuffered, so no flush) to keep stdout clean for the
+/// PKGBUILD/diff content a caller might pipe.
+fn prompt_action(pkgbase: &PkgBase, actions: &[Action]) -> Result<Action> {
+    let labels = actions
+        .iter()
+        .map(|a| a.label())
+        .collect::<Vec<_>>()
+        .join(", ");
+    loop {
+        eprint!("[{pkgbase}] review — {labels}: ");
+        let mut line = String::new();
+        let read = std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| Error::other(format!("prompt: {e}")))?;
+        if read == 0 {
+            // EOF: behave like the enter-default rather than looping forever.
+            return Ok(actions[0]);
+        }
+        if let Some(action) = parse_action(&line, actions) {
+            return Ok(action);
+        }
+        eprintln!("unrecognized choice — type one of the parenthesized letters");
+    }
 }
 
 /// Outcome of [`find_installed_commit`]'s history walk.
@@ -454,8 +537,8 @@ pub fn find_installed_commit(
 #[cfg(test)]
 mod tests {
     use super::{
-        FULL_DIFF_CONTEXT, HistorySearch, diff_command, fallback_note, header, menu_items,
-        upgrade_base_version,
+        Action, FULL_DIFF_CONTEXT, HistorySearch, diff_command, fallback_note, header,
+        menu_actions, parse_action, upgrade_base_version,
     };
     use crate::names::{PkgBase, PkgName};
     use crate::pacman::alpm_db::{InstalledCounterpart, MatchedVia};
@@ -517,34 +600,91 @@ mod tests {
     #[test]
     fn menu_omits_full_diff_when_no_base() {
         assert_eq!(
-            menu_items(false),
-            ["proceed", "view PKGBUILD", "edit", "skip", "abort"]
-        );
-    }
-
-    #[test]
-    fn menu_inserts_full_diff_next_to_view_pkgbuild() {
-        let items = menu_items(true);
-        assert_eq!(
-            items,
+            menu_actions(false),
             [
-                "proceed",
-                "view PKGBUILD",
-                "view full diff",
-                "edit",
-                "skip",
-                "abort"
+                Action::Approve,
+                Action::ViewPkgbuild,
+                Action::Edit,
+                Action::Skip,
+                Action::Abort
             ]
         );
     }
 
     #[test]
-    fn menu_default_index_is_proceed() {
-        // The Select prompt uses index 0 as the default; both menu shapes
-        // must keep "proceed" there so hitting enter never picks a destructive
-        // or surprising action.
-        assert_eq!(menu_items(false)[0], "proceed");
-        assert_eq!(menu_items(true)[0], "proceed");
+    fn menu_inserts_full_diff_after_view_pkgbuild() {
+        assert_eq!(
+            menu_actions(true),
+            [
+                Action::Approve,
+                Action::ViewPkgbuild,
+                Action::ViewDiff,
+                Action::Edit,
+                Action::Skip,
+                Action::Abort
+            ]
+        );
+    }
+
+    #[test]
+    fn menu_default_action_is_approve() {
+        // A bare enter / EOF falls back to the first action; it must stay
+        // "approve" so hitting enter matches the pre-refactor `Select` default
+        // and never picks a destructive or surprising action.
+        assert_eq!(menu_actions(false)[0], Action::Approve);
+        assert_eq!(menu_actions(true)[0], Action::Approve);
+    }
+
+    #[test]
+    fn action_hotkeys_are_unique() {
+        let actions = menu_actions(true);
+        let mut keys: Vec<char> = actions.iter().map(|a| a.key()).collect();
+        let total = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), total, "duplicate hotkey in {actions:?}");
+    }
+
+    #[test]
+    fn action_label_advertises_its_hotkey() {
+        for a in menu_actions(true) {
+            assert!(
+                a.label().contains(&format!("({})", a.key())),
+                "label {:?} should parenthesize its hotkey {:?}",
+                a.label(),
+                a.key()
+            );
+        }
+    }
+
+    #[test]
+    fn parse_action_empty_line_is_the_default() {
+        let actions = menu_actions(true);
+        assert_eq!(parse_action("", &actions), Some(Action::Approve));
+        assert_eq!(parse_action("   \n", &actions), Some(Action::Approve));
+    }
+
+    #[test]
+    fn parse_action_matches_hotkey_case_insensitively() {
+        let actions = menu_actions(true);
+        assert_eq!(parse_action("s", &actions), Some(Action::Skip));
+        assert_eq!(parse_action("S\n", &actions), Some(Action::Skip));
+        assert_eq!(parse_action("d", &actions), Some(Action::ViewDiff));
+        // A whole word still keys off its first letter.
+        assert_eq!(parse_action("quit", &actions), Some(Action::Abort));
+    }
+
+    #[test]
+    fn parse_action_unrecognized_key_is_none() {
+        let actions = menu_actions(true);
+        assert_eq!(parse_action("z", &actions), None);
+    }
+
+    #[test]
+    fn parse_action_diff_key_absent_without_base() {
+        // 'd' selects "view full diff" only when that action is on offer.
+        let actions = menu_actions(false);
+        assert_eq!(parse_action("d", &actions), None);
     }
 
     #[test]

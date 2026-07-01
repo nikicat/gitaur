@@ -33,7 +33,8 @@ pub enum Command {
     Remove(Vec<String>),
     /// `upgrade [pkg…]` — stage available upgrades (all, or the matching subset).
     Upgrade(Vec<String>),
-    /// `review <pkg…>` — view a PKGBUILD/diff and approve it.
+    /// `review [pkg…]` — view a PKGBUILD/diff and approve it. No args reviews
+    /// every AUR item in the cart still awaiting review.
     Review(Vec<String>),
     /// `approve <pkg…>` — approve staged AUR packages without opening a diff.
     Approve(Vec<String>),

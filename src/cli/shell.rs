@@ -477,20 +477,33 @@ impl State {
         }
     }
 
-    /// `review <sel…>`: open each selected AUR item's PKGBUILD (diff-against-
-    /// installed or full) and approve/skip per the user's call. Repo items have
-    /// no PKGBUILD; already-approved items are left alone; an abort stops the
-    /// pass.
+    /// `review [sel…]`: open each selected AUR item's PKGBUILD (diff-against-
+    /// installed or full) and approve/skip per the user's call. With no
+    /// selector, walk the whole cart — every AUR item still awaiting review —
+    /// so `review` alone starts the review loop. Repo items have no PKGBUILD;
+    /// already-approved items are left alone; an abort stops the pass.
     fn review<E: ShellEnv>(&mut self, args: &[String], env: &mut E) {
-        if args.is_empty() {
-            env.print("usage: review <pkg|number|range|glob>…");
-            return;
-        }
-        let targets = match self.resolve_against_cart(args) {
-            Ok(t) => t,
-            Err(e) => {
-                env.print(&format!("review: {e}"));
+        let targets = if args.is_empty() {
+            // Collect owned targets so the `self.cart` borrow from
+            // `pending_review` is released before the loop mutates it.
+            let pending: Vec<PkgTarget> = self
+                .cart
+                .pending_review()
+                .iter()
+                .map(|i| PkgTarget::new(i.spec()))
+                .collect();
+            if pending.is_empty() {
+                env.print("nothing to review — all staged packages are approved");
                 return;
+            }
+            pending
+        } else {
+            match self.resolve_against_cart(args) {
+                Ok(t) => t,
+                Err(e) => {
+                    env.print(&format!("review: {e}"));
+                    return;
+                }
             }
         };
         if targets.is_empty() {
@@ -727,7 +740,7 @@ commands:
   drop <sel…>         unstage packages from the cart (alias: discard)
   remove <sel…>       stage packages to uninstall
   upgrade [pkg…]      upgrade installed packages (repo + AUR)
-  review <sel…>       view a PKGBUILD/diff and approve it
+  review [sel…]       view a PKGBUILD/diff and approve it (no sel = review all)
   approve <sel…>      approve staged AUR packages without a diff (try `approve *`)
   show                preview the staged transaction
   apply               build + install the staged transaction
@@ -1834,6 +1847,32 @@ mod tests {
         state.dispatch(&command::parse("add yay-bin"), &mut env);
         state.dispatch(&command::parse("review yay-bin"), &mut env);
         assert!(!state.cart.all_approved(), "skip leaves it needing review");
+    }
+
+    #[test]
+    fn review_without_args_reviews_every_pending_item() {
+        let mut env = env_with(&[("a", Source::Aur), ("b", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add a b"), &mut env);
+        state.dispatch(&command::parse("review"), &mut env);
+        assert_eq!(
+            env.review_calls,
+            vec!["a", "b"],
+            "bare `review` opens every pending item"
+        );
+        assert!(state.cart.all_approved(), "approving all clears the gate");
+    }
+
+    #[test]
+    fn review_without_args_skips_already_approved_items() {
+        // A repo package auto-approves, so a bare `review` has nothing to do.
+        let mut env = env_with(&[("glibc", Source::Repo)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add glibc"), &mut env);
+        env.lines.clear();
+        state.dispatch(&command::parse("review"), &mut env);
+        assert!(env.review_calls.is_empty(), "nothing pending to open");
+        assert!(env.lines.contains("nothing to review"));
     }
 
     #[test]
