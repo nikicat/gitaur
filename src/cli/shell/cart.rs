@@ -227,6 +227,19 @@ pub enum UnstageResult {
     NotStaged,
 }
 
+/// What `keep` did to the cart — the set-complement of [`UnstageResult`], where
+/// `drop` names the rows to remove and `keep` names the rows to spare.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeepResult {
+    /// No staged install matched the keep-set — the cart is left untouched, so a
+    /// mistyped `keep` can't silently empty it.
+    NoMatch,
+    /// Kept the matched rows and dropped the rest; carries the dropped specs (in
+    /// cart order) as [`PkgTarget`]s for the caller to report. Empty when the
+    /// keep-set already covered every staged install (a no-op `keep`).
+    Kept { dropped: Vec<PkgTarget> },
+}
+
 /// What `approve <spec>` did to a staged item — so the caller can report it and
 /// know whether it newly cleared the gate (and should record the pkgbase as
 /// reviewed).
@@ -326,6 +339,30 @@ impl Cart {
         } else {
             UnstageResult::Unstaged
         }
+    }
+
+    /// Keep only the staged installs whose spec is in `keep`, dropping every
+    /// other install row — the inverse of [`Self::unstage`]: `drop` names the
+    /// rows to remove, `keep` names the rows to spare (handy for narrowing a
+    /// large `upgrade`-seeded cart down to a few packages).
+    ///
+    /// Removals are left untouched — `keep` mirrors `drop`, which only unstages
+    /// installs. Guards against emptying the cart on a typo: when no staged
+    /// install matches, returns [`KeepResult::NoMatch`] and changes nothing.
+    /// Relative order of the kept rows is preserved, so the sorted-cart
+    /// invariant holds without a re-sort.
+    pub fn keep(&mut self, keep: &HashSet<&str>) -> KeepResult {
+        if !self.items.iter().any(|i| keep.contains(i.spec())) {
+            return KeepResult::NoMatch;
+        }
+        let dropped = self
+            .items
+            .iter()
+            .filter(|i| !keep.contains(i.spec()))
+            .map(|i| PkgTarget::new(i.spec()))
+            .collect();
+        self.items.retain(|i| keep.contains(i.spec()));
+        KeepResult::Kept { dropped }
     }
 
     /// Stage a removal (uninstall). [`StageResult::AlreadyStaged`] when it was
@@ -460,6 +497,65 @@ mod tests {
         );
         assert_eq!(cart.items().len(), 1);
         assert_eq!(cart.items()[0].spec(), "bar");
+    }
+
+    fn keep_set<'a>(specs: &'a [&str]) -> HashSet<&'a str> {
+        specs.iter().copied().collect()
+    }
+
+    #[test]
+    fn keep_drops_everything_but_the_selected() {
+        let mut cart = Cart::default();
+        cart.add(item("foo", Source::Aur));
+        cart.add(item("bar", Source::Repo));
+        cart.add(item("baz", Source::Aur));
+        // Keep only `bar` — the two AUR rows drop, reported in cart order.
+        assert_eq!(
+            cart.keep(&keep_set(&["bar"])),
+            KeepResult::Kept {
+                dropped: vec![PkgTarget::new("baz"), PkgTarget::new("foo")]
+            }
+        );
+        let specs: Vec<&str> = cart.items().iter().map(CartItem::spec).collect();
+        assert_eq!(specs, vec!["bar"]);
+    }
+
+    #[test]
+    fn keep_matching_nothing_leaves_the_cart_intact() {
+        // A keep-set that hits no staged row must not empty the cart (typo guard).
+        let mut cart = Cart::default();
+        cart.add(item("foo", Source::Aur));
+        cart.add(item("bar", Source::Repo));
+        assert_eq!(cart.keep(&keep_set(&["absent"])), KeepResult::NoMatch);
+        assert_eq!(cart.items().len(), 2, "nothing dropped on no match");
+    }
+
+    #[test]
+    fn keep_covering_the_whole_cart_drops_nothing() {
+        let mut cart = Cart::default();
+        cart.add(item("foo", Source::Aur));
+        cart.add(item("bar", Source::Repo));
+        // Every staged row is kept → a no-op, with an empty dropped list.
+        assert_eq!(
+            cart.keep(&keep_set(&["foo", "bar"])),
+            KeepResult::Kept {
+                dropped: Vec::new()
+            }
+        );
+        assert_eq!(cart.items().len(), 2);
+    }
+
+    #[test]
+    fn keep_leaves_removals_untouched() {
+        // `keep` mirrors `drop` — it acts on installs only, not staged removals.
+        let mut cart = Cart::default();
+        cart.add(item("foo", Source::Aur));
+        cart.stage_remove(PkgName::from("old"));
+        assert!(matches!(
+            cart.keep(&keep_set(&["foo"])),
+            KeepResult::Kept { .. }
+        ));
+        assert_eq!(cart.removals(), &[PkgName::from("old")]);
     }
 
     #[test]

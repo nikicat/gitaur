@@ -38,8 +38,8 @@ use crate::resolver::Plan;
 use crate::ui::{self, UpgradeSelection};
 use crate::version::Version;
 use cart::{
-    ApplyOutcome, Approval, ApproveResult, AurApproval, Cart, CartItem, ReviewOutcome, Source,
-    StageClass, StageResult, UnstageResult,
+    ApplyOutcome, Approval, ApproveResult, AurApproval, Cart, CartItem, KeepResult, ReviewOutcome,
+    Source, StageClass, StageResult, UnstageResult,
 };
 use command::Command;
 use complete::ShellHelper;
@@ -177,6 +177,10 @@ impl State {
             }
             Command::Drop(args) => {
                 self.discard(args, env);
+                Flow::Continue
+            }
+            Command::Keep(args) => {
+                self.keep(args, env);
                 Flow::Continue
             }
             Command::Remove(args) => {
@@ -398,6 +402,41 @@ impl State {
         // goes) so the current cart is always on screen — post-5c UX.
         if changed {
             self.show(env);
+        }
+    }
+
+    /// `keep <sel…>`: keep only the selected install rows, dropping every other
+    /// staged install — the inverse of `drop`, for narrowing a large cart down to
+    /// a few packages (`upgrade`, then `keep glibc firefox`). Selectors resolve
+    /// against the cart, exactly like `drop`; staged removals are untouched. A
+    /// selector matching nothing leaves the cart intact rather than emptying it.
+    fn keep<E: ShellEnv>(&mut self, args: &[String], env: &mut E) {
+        if args.is_empty() {
+            env.print("usage: keep <pkg|number|range|glob>… (try `keep aur`)");
+            return;
+        }
+        let targets = match self.resolve_against_cart(args) {
+            Ok(t) => t,
+            Err(e) => {
+                env.print(&format!("keep: {e}"));
+                return;
+            }
+        };
+        let keep: HashSet<&str> = targets.iter().map(PkgTarget::as_str).collect();
+        match self.cart.keep(&keep) {
+            KeepResult::NoMatch => {
+                env.print("keep: nothing in the cart matched — cart unchanged");
+            }
+            KeepResult::Kept { dropped } if dropped.is_empty() => {
+                env.print("keep: every staged package is already kept — nothing dropped");
+            }
+            KeepResult::Kept { dropped } => {
+                for spec in &dropped {
+                    env.print(&format!("dropped {}", spec.as_str()));
+                }
+                // Reprint the narrowed cart, matching `drop`'s post-5c UX.
+                self.show(env);
+            }
         }
     }
 
@@ -738,6 +777,7 @@ commands:
   info <sel…>         show package details (sel = name | number | range | glob)
   add <sel…>          stage packages to install
   drop <sel…>         unstage packages from the cart (alias: discard)
+  keep <sel…>         keep only these staged packages, drop the rest
   remove <sel…>       stage packages to uninstall
   upgrade [pkg…]      upgrade installed packages (repo + AUR)
   review [sel…]       view a PKGBUILD/diff and approve it (no sel = review all)
@@ -1796,6 +1836,66 @@ mod tests {
         state.dispatch(&command::parse("drop foo"), &mut env);
         let specs: Vec<&str> = state.cart.items().iter().map(CartItem::spec).collect();
         assert_eq!(specs, vec!["bar"]);
+    }
+
+    #[test]
+    fn keep_drops_every_unselected_install() {
+        let mut env = env_with(&[
+            ("foo", Source::Aur),
+            ("bar", Source::Repo),
+            ("baz", Source::Aur),
+        ]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo bar baz"), &mut env);
+        env.lines.clear();
+        state.dispatch(&command::parse("keep bar"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["bar"], "only `bar` survives");
+        assert!(env.lines.contains("dropped foo"));
+        assert!(env.lines.contains("dropped baz"));
+        // Reprints the narrowed cart, like `drop`.
+        assert!(env.lines.contains("transaction — 1 to install"));
+    }
+
+    #[test]
+    fn keep_by_repo_filter_narrows_to_one_repo() {
+        // A repo-name selector keeps every row from that repo — the mirror image
+        // of `drop <repo>`.
+        let mut env = FakeEnv {
+            upgrade_candidates: vec![
+                up("core", "glibc"),
+                up("extra", "firefox"),
+                up("aur", "yay-bin"),
+            ],
+            ..FakeEnv::default()
+        };
+        let mut state = State::default();
+        state.dispatch(&command::parse("upgrade"), &mut env);
+        state.dispatch(&command::parse("keep aur"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["yay-bin"]);
+    }
+
+    #[test]
+    fn keep_matching_nothing_leaves_the_cart_intact() {
+        // A typo mustn't empty the cart: no staged row matches → no change.
+        let mut env = env_with(&[("foo", Source::Aur), ("bar", Source::Repo)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo bar"), &mut env);
+        env.lines.clear();
+        state.dispatch(&command::parse("keep absent"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["bar", "foo"], "cart unchanged");
+        assert!(env.lines.contains("nothing in the cart matched"));
+        assert!(
+            !env.lines.any(|l| l.contains("dropped")),
+            "no row should be dropped: {:?}",
+            env.lines
+        );
+    }
+
+    #[test]
+    fn keep_with_no_args_prints_usage() {
+        let (flow, env) = dispatch_one("keep");
+        assert_eq!(flow, Flow::Continue);
+        assert!(env.lines.contains("usage: keep"));
     }
 
     #[test]

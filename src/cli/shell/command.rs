@@ -14,8 +14,8 @@ use crate::names::SearchTerm;
 /// `discard`, `up`, …) intentionally stay out — completion teaches the
 /// canonical name.
 pub const VERBS: &[&str] = &[
-    "search", "info", "add", "drop", "remove", "upgrade", "review", "approve", "show", "apply",
-    "clear", "refresh", "help", "quit",
+    "search", "info", "add", "drop", "keep", "remove", "upgrade", "review", "approve", "show",
+    "apply", "clear", "refresh", "help", "quit",
 ];
 
 /// One parsed shell command.
@@ -29,6 +29,8 @@ pub enum Command {
     Add(Vec<String>),
     /// `drop <pkg…>` — unstage packages from the cart.
     Drop(Vec<String>),
+    /// `keep <pkg…>` — unstage everything *except* these — the inverse of `drop`.
+    Keep(Vec<String>),
     /// `remove <pkg…>` — stage packages to uninstall.
     Remove(Vec<String>),
     /// `upgrade [pkg…]` — stage available upgrades (all, or the matching subset).
@@ -67,6 +69,7 @@ impl Command {
             Self::Info(_) => "info",
             Self::Add(_) => "add",
             Self::Drop(_) => "drop",
+            Self::Keep(_) => "keep",
             Self::Remove(_) => "remove",
             Self::Upgrade(_) => "upgrade",
             Self::Review(_) => "review",
@@ -102,6 +105,7 @@ pub fn parse(line: &str) -> Command {
         "info" => Command::Info(args),
         "add" | "install" => Command::Add(args),
         "drop" | "discard" | "unstage" => Command::Drop(args),
+        "keep" | "only" => Command::Keep(args),
         "remove" | "uninstall" | "rm" => Command::Remove(args),
         "upgrade" | "up" => Command::Upgrade(args),
         "review" => Command::Review(args),
@@ -152,6 +156,7 @@ mod tests {
     fn aliases_map_to_canonical() {
         assert_eq!(parse("install x"), Command::Add(v(&["x"])));
         assert_eq!(parse("discard x"), Command::Drop(v(&["x"])));
+        assert_eq!(parse("only x"), Command::Keep(v(&["x"])));
         assert_eq!(parse("up"), Command::Upgrade(v(&[])));
         assert_eq!(parse("commit"), Command::Apply);
         assert_eq!(parse("status"), Command::Show);
