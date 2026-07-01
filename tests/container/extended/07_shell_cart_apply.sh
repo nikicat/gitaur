@@ -18,7 +18,7 @@ PKGBASE=test-trivial
 gaur -Sy
 assert_exit 0
 
-driver="/work/target/debug/examples/shell_cart_e2e"
+driver="$EXAMPLES_DIR/shell_cart_e2e"
 [[ -x "$driver" ]] || { echo "missing driver example: $driver (run.sh must build it)" >&2; exit 1; }
 
 out="$(mktemp)"

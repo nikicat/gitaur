@@ -85,19 +85,25 @@ in_image '
     mkdir -p "$DIR/profraw/rust" "$DIR/profraw/podman"
     LLVM_PROFILE_FILE="$DIR/profraw/rust/%p-%m.profraw" \
         cargo test --all-features --locked --no-fail-fast
-    cargo build --bin gaur --locked
+    # Build gaur plus the PTY/HTTP driver examples the extended tier shells out
+    # to (shell_cart_e2e, shell_upgrade_e2e, tarpit, …). They land in the same
+    # coverage-build dir, so tests/container/lib.sh finds them next to $GITAUR;
+    # examples/ is coverage-ignored (IGNORE_REGEX) so they do not skew the report.
+    cargo build --bin gaur --examples --locked
 '
 [[ $? -eq 0 ]] || { echo "scripts/coverage.sh: rust tests or instrumented build failed" >&2; overall_status=1; }
 set -e
 
-# Step 2 — run the podman test suite using the instrumented binary built in
-# step 1. The --coverage flag tells tests/container/run.sh to bind-mount
-# $PROFRAW_PODMAN into each test container and set LLVM_PROFILE_FILE; we set
-# GITAUR so the suite invokes the instrumented binary rather than the
-# default target/debug/gaur path.
+# Step 2 — run the full podman test suite (smoke + extended) using the
+# instrumented binary built in step 1. The --coverage flag tells
+# tests/container/run.sh to bind-mount $PROFRAW_PODMAN into each test container
+# and set LLVM_PROFILE_FILE; we set GITAUR so the suite invokes the instrumented
+# binary rather than the default target/debug/gaur path (and lib.sh resolves the
+# example drivers next to it). This is the CI Tier-2 gate — a failure here fails
+# the job (overall_status below), so both tiers gate merges.
 set +e
 GITAUR="/work/target/coverage-build/debug/gaur" \
-    bash tests/container/run.sh --coverage "$PROFRAW_PODMAN" smoke
+    bash tests/container/run.sh --coverage "$PROFRAW_PODMAN" all
 [[ $? -eq 0 ]] || { echo "scripts/coverage.sh: podman tests failed" >&2; overall_status=1; }
 set -e
 
