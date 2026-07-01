@@ -123,7 +123,9 @@ suite under `tests/container/` that runs every gitaur command against
 real `pacman` + `makepkg` inside an ephemeral Arch userspace (podman
 default, docker via `CONTAINER=docker`). It is the only place where the
 multi-process build pipeline — sudo gating, asdeps flips, build
-failure isolation, makepkg log capture — is exercised end-to-end.
+failure isolation, makepkg log capture — is exercised end-to-end. CI runs
+it (both the `smoke` and `extended` tiers) as its own gating job alongside
+the Rust tests.
 
 ```sh
 bash tests/container/run.sh                 # smoke tier (~30 s on 8 cores)

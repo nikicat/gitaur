@@ -28,7 +28,7 @@ pacman -Qi loop-repo | grep -q 'Version *: *1.0-1' || {
 }
 
 # Drive the shell upgrade flow under a PTY.
-driver="/work/target/debug/examples/shell_upgrade_e2e"
+driver="$EXAMPLES_DIR/shell_upgrade_e2e"
 [[ -x "$driver" ]] || { echo "missing driver example: $driver (run.sh must build it)" >&2; exit 1; }
 
 out="$(mktemp)"

@@ -18,7 +18,7 @@ mirror_idle_timeout_secs = $TIMEOUT_SECS
 EOF
 reset_state
 
-/work/target/debug/examples/tarpit "$PORT" >/tmp/tarpit.log 2>&1 &
+"$EXAMPLES_DIR/tarpit" "$PORT" >/tmp/tarpit.log 2>&1 &
 TARPIT_PID=$!
 trap 'kill $TARPIT_PID 2>/dev/null; wait $TARPIT_PID 2>/dev/null || true' EXIT
 

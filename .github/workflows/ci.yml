@@ -52,15 +52,20 @@ jobs:
       - name: test
         run: cargo test --all-features --locked
 
-  coverage:
-    name: coverage (rust + podman + combined)
+  container:
+    name: container tests (Tier 2) + coverage
     runs-on: ubuntu-latest
-    # Runs in parallel to the main `ci` job. Everything coverage-related
-    # happens inside the test image (tests/container/Dockerfile), so the
-    # runner only needs podman — which is preinstalled on ubuntu-latest.
-    # The orchestrator (scripts/coverage.sh) builds the image, runs cargo
-    # test inside it, runs the podman test suite, and emits three lcov
-    # files (rust / podman / combined) for separate Codecov flag uploads.
+    # The Tier-2 gate. Runs the black-box container suite (tests/container,
+    # smoke + extended) end-to-end against real pacman/makepkg, in parallel to
+    # the `ci` (Tier 1) job. A container-test failure fails this job — that is
+    # what puts Tier 2 in CI. Coverage is a byproduct: the suite runs against an
+    # instrumented binary, so the same run also yields line coverage.
+    #
+    # Everything happens inside the test image (tests/container/Dockerfile), so
+    # the runner only needs podman — preinstalled on ubuntu-latest. The
+    # orchestrator (scripts/coverage.sh) builds the image, runs cargo test +
+    # the podman suite inside it, and emits three lcov files (rust / podman /
+    # combined) for separate Codecov flag uploads.
     steps:
       - uses: actions/checkout@v6
 
@@ -76,10 +81,12 @@ jobs:
           key: ${{ runner.os }}-coverage-${{ hashFiles('**/Cargo.lock', 'tests/container/Dockerfile') }}
           restore-keys: ${{ runner.os }}-coverage-
 
-      - name: Run scripts/coverage.sh
-        # Produces coverage/lcov-{rust,podman,combined}.info + summaries.
-        # Continues to the upload steps even on test failure so partial
-        # coverage data still reaches Codecov for diagnosis.
+      - name: Run container suite (Tier 2) + coverage
+        # Runs Tier 1 (cargo test) + Tier 2 (podman smoke + extended) against an
+        # instrumented binary and produces coverage/lcov-{rust,podman,combined}.info.
+        # Exits non-zero — failing this job — if any container test fails. The
+        # upload steps below use `if: always()` so partial coverage still reaches
+        # Codecov for diagnosis even when a test fails.
         run: bash scripts/coverage.sh
 
       - name: Upload rust coverage to Codecov

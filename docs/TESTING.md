@@ -58,8 +58,8 @@ tests/container/
 ├── lib.sh                   bash helpers: gaur, assert_*, bootstrap, reset_state
 ├── run.sh                   the harness — parallel containers + xargs -P
 ├── fixtures/<pkgbase>/      one PKGBUILD per fixture, optional .install / repo
-├── smoke/NN_*.sh            ~20 everyday cases (always run in CI)
-└── extended/                long tail (rare combos, edge cases)
+├── smoke/NN_*.sh            everyday cases (run in CI)
+└── extended/                long tail (rare combos, edge cases; also run in CI)
     └── .scope               planned-test index — see file for the list
 ```
 
@@ -256,10 +256,23 @@ something gitaur can actually plan.
 
 ## CI
 
-Tier 1 runs in GitHub Actions on every push/PR via `.github/workflows/ci.yml`.
-Tier 2 has higher startup cost (image build) so we run it on a separate
-workflow (TODO when this lands in CI). Until then: run it locally before
-merging non-trivial changes to `resolver/`, `build/`, or `pacman/`.
+Both tiers run in GitHub Actions on every push/PR, in two parallel jobs of
+`.github/workflows/ci.yml`:
+
+- **`ci`** — Tier 1: `fmt` + `taplo` + `clippy` + `build` + `cargo test`, on an
+  `archlinux:latest` container.
+- **`container tests (Tier 2) + coverage`** — the Tier-2 gate. Runs the whole
+  container suite (`smoke` + `extended`) via `scripts/coverage.sh` →
+  `tests/container/run.sh --coverage … all` against an instrumented binary, so
+  the same run also produces the rust/podman/combined coverage uploaded to
+  Codecov. A container-test failure fails the job. (Coverage is the byproduct;
+  running the tests is the point.)
+
+Running the suite instrumented has a higher startup cost (it builds the test
+image and an instrumented binary), which is why it's a job of its own rather
+than folded into `ci`. You can still run it locally without any of the coverage
+plumbing — `bash tests/container/run.sh` — which is faster and the right thing
+to do before merging non-trivial changes to `resolver/`, `build/`, or `pacman/`.
 
 ## When tests fail
 

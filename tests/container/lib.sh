@@ -16,6 +16,11 @@
 set -euo pipefail
 
 GITAUR="${GITAUR:-/work/target/debug/gaur}"
+# PTY/HTTP driver examples live next to whichever gaur binary is in use, so
+# they resolve for both the default target dir and the coverage build's
+# (target/coverage-build/debug/examples) without a hardcoded path.
+# shellcheck disable=SC2034  # consumed by the sourcing test scripts, not here
+EXAMPLES_DIR="$(dirname "$GITAUR")/examples"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/gitaur"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gitaur"
 LOCAL_REPO="${LOCAL_REPO:-/srv/local-repo}"
