@@ -23,7 +23,7 @@ use super::command;
 use crate::names::PkgTarget;
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
-use rustyline::hint::{Hinter, HistoryHinter};
+use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 use std::borrow::Cow;
@@ -62,9 +62,10 @@ const fn arg_kind(verb: &str) -> ArgKind {
 
 /// The shell's rustyline helper.
 ///
-/// Carries the completion sources plus a history [`Hinter`] (the dimmed inline
-/// suggestion of the last matching command); highlighting is a no-op except for
-/// dimming that hint, and validation stays at the trait default (always-valid).
+/// Carries the completion sources, which also drive the dimmed inline **hint**
+/// (type-ahead) — see [`ShellHelper::hint_for`]. Highlighting is a no-op except
+/// for dimming that hint, and validation stays at the trait default
+/// (always-valid).
 pub struct ShellHelper {
     /// The sorted, de-duplicated name universe (AUR pkgnames + pkgbases + sync
     /// names), shared with the session by `Rc` and replaced wholesale on
@@ -75,20 +76,15 @@ pub struct ShellHelper {
     /// address a cart row (`drop yay-bin`), the same currency the
     /// [`selector`](super::selector) resolver accepts.
     cart: Vec<PkgTarget>,
-    /// Suggests the tail of the most recent history entry that starts with the
-    /// current line — rustyline's stock [`HistoryHinter`], reading the same
-    /// history ring the editor persists. Right-arrow / End accepts the hint.
-    hinter: HistoryHinter,
 }
 
 impl ShellHelper {
     /// A helper over `universe` with an empty cart (the session starts with
     /// nothing staged).
-    pub fn new(universe: Rc<[PkgTarget]>) -> Self {
+    pub const fn new(universe: Rc<[PkgTarget]>) -> Self {
         Self {
             universe,
             cart: Vec::new(),
-            hinter: HistoryHinter::new(),
         }
     }
 
@@ -138,6 +134,62 @@ impl ShellHelper {
             .take(MAX_CANDIDATES)
             .map(name_pair)
             .collect()
+    }
+
+    /// The dimmed inline type-ahead hint for `line` with the cursor at `pos`:
+    /// the tail of a completion candidate for the word under the cursor.
+    ///
+    /// Two policies, keyed on position (the [`arg_kind`] scoping the Tab
+    /// completer already uses):
+    /// - **command position** (word 1, or a `help <topic>` argument) — always
+    ///   type-ahead the *first* matching verb, even when several match (`re` →
+    ///   `move`, offering `remove`).
+    /// - **package position** (`add`/`drop`/… arguments) — hint *only when a
+    ///   single* candidate matches, so a guess over the ~100k-name universe is
+    ///   only ever shown when it's certain (`firefo` → `x`; `add a`, thousands
+    ///   deep, shows nothing).
+    ///
+    /// Only fires at end-of-line and on a non-empty word (there's no prefix to
+    /// extend otherwise). Shares [`candidates`](Self::candidates)' sources, so
+    /// the hint can never suggest something Tab wouldn't complete. Split out
+    /// from the [`Hinter`] impl so it's unit-testable without a live history
+    /// [`Context`].
+    fn hint_for(&self, line: &str, pos: usize) -> Option<String> {
+        // Type-ahead only extends the tail: skip unless the cursor is at the end
+        // of a non-empty word.
+        if pos != line.len() {
+            return None;
+        }
+        let start = word_start(line, pos);
+        let word = &line[start..pos];
+        if word.is_empty() {
+            return None;
+        }
+        let before = &line[..start];
+        // `confident` = package position: require a unique candidate. Command
+        // positions (word 1 / `help <topic>`) always take the first match.
+        let (cands, confident) = if before.trim().is_empty() {
+            (verb_candidates(word), false)
+        } else {
+            match arg_kind(command::parse(before).verb()) {
+                ArgKind::Verbs => (verb_candidates(word), false),
+                ArgKind::Universe => (self.name_candidates(word), true),
+                ArgKind::Cart => (
+                    prefix_pairs(self.cart.iter().map(PkgTarget::as_str), word),
+                    true,
+                ),
+                ArgKind::None => return None,
+            }
+        };
+        if confident && cands.len() != 1 {
+            return None;
+        }
+        // Every candidate's replacement starts with `word` (all sources filter by
+        // prefix); the hint is the remainder. A whitespace-only remainder (a
+        // fully-typed verb, whose replacement just adds the trailing space) isn't
+        // worth showing.
+        let suffix = cands.first()?.replacement.strip_prefix(word)?;
+        (!suffix.trim().is_empty()).then(|| suffix.to_owned())
     }
 }
 
@@ -205,16 +257,17 @@ impl Completer for ShellHelper {
     }
 }
 
-// Hints come from history (delegated to `HistoryHinter`); highlighting only
-// dims that hint so it reads as a suggestion, not typed text; validation stays
-// always-valid. `Helper` is the marker tying them together. rustyline only calls
-// `highlight_hint` when its own colour mode is on, so `--color never` (mapped to
-// `ColorMode::Disabled` in `shell::run`) renders the hint plain automatically.
+// The hint is completion-driven type-ahead (see `hint_for`), not history;
+// highlighting only dims it so it reads as a suggestion, not typed text;
+// validation stays always-valid. `Helper` is the marker tying them together.
+// rustyline only calls `highlight_hint` when its own colour mode is on, so
+// `--color never` (mapped to `ColorMode::Disabled` in `shell::run`) renders the
+// hint plain automatically.
 impl Hinter for ShellHelper {
     type Hint = String;
 
-    fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<String> {
-        self.hinter.hint(line, pos, ctx)
+    fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<String> {
+        self.hint_for(line, pos)
     }
 }
 impl Highlighter for ShellHelper {
@@ -352,5 +405,71 @@ mod tests {
         let refs: Vec<&str> = many.iter().map(String::as_str).collect();
         let h = helper(&refs, &[]);
         assert_eq!(complete(&h, "add pkg").len(), MAX_CANDIDATES);
+    }
+
+    /// The type-ahead hint for a line, cursor at end.
+    fn hint(h: &ShellHelper, line: &str) -> Option<String> {
+        h.hint_for(line, line.len())
+    }
+
+    #[test]
+    fn verb_hint_always_takes_the_first_match_even_when_ambiguous() {
+        let h = helper(&[], &[]);
+        // `re` matches remove/review/refresh; the command position always hints
+        // the first (VERBS order → `remove`). Trailing space rides along so
+        // accepting readies the cursor for an argument.
+        assert_eq!(hint(&h, "re").as_deref(), Some("move "));
+        // `app` matches both approve and apply; VERBS order puts approve first.
+        assert_eq!(hint(&h, "app").as_deref(), Some("rove "));
+        // A prefix unique to one verb hints the rest of it.
+        assert_eq!(hint(&h, "appl").as_deref(), Some("y "));
+    }
+
+    #[test]
+    fn a_fully_typed_verb_hints_nothing() {
+        let h = helper(&[], &[]);
+        // The only remaining "completion" is the trailing space — not worth a hint.
+        assert_eq!(hint(&h, "apply"), None);
+    }
+
+    #[test]
+    fn package_hint_only_when_a_single_candidate_matches() {
+        let h = helper(&["firefox", "firefox-bin", "zlib"], &[]);
+        // Ambiguous (firefox / firefox-bin) → no guess.
+        assert_eq!(hint(&h, "add fire"), None);
+        // Unique → hint the tail.
+        assert_eq!(hint(&h, "add zl").as_deref(), Some("ib"));
+        // Unique once the prefix disambiguates.
+        assert_eq!(hint(&h, "add firefox-").as_deref(), Some("bin"));
+    }
+
+    #[test]
+    fn cart_hint_is_confident_too() {
+        let h = helper(&["other"], &["yay-bin", "yakuake"]);
+        // Two cart items share `ya` → no guess.
+        assert_eq!(hint(&h, "drop ya"), None);
+        // Disambiguated → hint.
+        assert_eq!(hint(&h, "drop yay").as_deref(), Some("-bin"));
+    }
+
+    #[test]
+    fn help_topic_hint_always_takes_the_first_verb() {
+        // `help <topic>` is a command position, so it type-aheads like word 1.
+        let h = helper(&["remotething"], &[]);
+        assert_eq!(hint(&h, "help re").as_deref(), Some("move "));
+    }
+
+    #[test]
+    fn no_hint_mid_word_or_on_empty_or_no_arg_verb() {
+        let h = helper(&["zlib"], &[]);
+        // Cursor not at end of line → no type-ahead.
+        assert_eq!(h.hint_for("add zlib", 3), None);
+        // Empty word (trailing space) → nothing to extend.
+        assert_eq!(hint(&h, "add "), None);
+        assert_eq!(hint(&h, ""), None);
+        // A no-argument verb takes no package hint.
+        assert_eq!(hint(&h, "show z"), None);
+        // Numeric selectors are never hinted.
+        assert_eq!(hint(&h, "add 3"), None);
     }
 }

@@ -2,11 +2,11 @@
 
 Status: phases 1–4 implemented; phase 5a (one unified renderer) + 5b (sorted-cart
 invariant) **done**; phase 5c **done** — **tab-completion** (the rustyline
-`Completer`), the **`refresh`** command, the history **`Hinter`** (dimmed inline
-suggestion of the last matching command, colour-mode aware), **`help <topic>`**
-(per-command detail, aliases resolved through `command::parse`), and the
-**`aur_approval`** config knob are all in. Remaining: the native combined commit
-(phase 6), plus optional prompt/history-size config knobs.
+`Completer`), the **`refresh`** command, a completion-driven **`Hinter`** (dimmed
+inline type-ahead, colour-mode aware), **`help <topic>`** (per-command detail,
+aliases resolved through `command::parse`), and the **`aur_approval`** config knob
+are all in. Remaining: the native combined commit (phase 6), plus optional
+prompt/history-size config knobs.
 
 ## Goal
 
@@ -625,10 +625,13 @@ Each phase is independently shippable and leaves the flag CLI fully working.
      snapshot is re-synced after each command, so completion and the selector
      resolver can't drift. **`refresh` DONE** — re-fetches the mirror + reloads
      the session (fresh data for `search`/`info`/`upgrade`/completion) without
-     touching the cart. **history `Hinter` DONE** — `HistoryHinter` suggests the
-     tail of the last matching history entry, dimmed via `highlight_hint`; the
-     editor's `ColorMode` follows the session's `--color`, so `never` renders it
-     plain. **`help <topic>` DONE** — `help <command>` prints a per-verb detail
+     touching the cart. **`Hinter` DONE** — a completion-driven type-ahead
+     (`ShellHelper::hint_for`, sharing the `Completer`'s sources): command
+     positions (word 1 / `help <topic>`) always suggest the first matching verb;
+     package positions suggest only when a *single* candidate matches, so a guess
+     over the ~100k-name universe is shown only when it's certain. Dimmed via
+     `highlight_hint`; the editor's `ColorMode` follows the session's `--color`,
+     so `never` renders it plain. **`help <topic>` DONE** — `help <command>` prints a per-verb detail
      from the `TOPICS` table (aliases resolved through `command::parse`); a
      `every_verb_has_a_help_topic` test guards the table against verb drift.
      **`aur_approval` DONE** — a typed `Option<AurApproval>` config knob
