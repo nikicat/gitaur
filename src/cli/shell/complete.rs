@@ -23,9 +23,10 @@ use super::command;
 use crate::names::PkgTarget;
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
-use rustyline::hint::Hinter;
+use rustyline::hint::{Hinter, HistoryHinter};
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
+use std::borrow::Cow;
 use std::rc::Rc;
 
 /// Cap on candidates one Tab offers, so a bare `add <Tab>` over the ~100k-name
@@ -59,9 +60,11 @@ const fn arg_kind(verb: &str) -> ArgKind {
     }
 }
 
-/// The shell's rustyline helper. Carries only the completion sources; hints,
-/// highlighting, and validation stay at their trait defaults (no-op) for now —
-/// the history `Hinter` is a later phase-5c item.
+/// The shell's rustyline helper.
+///
+/// Carries the completion sources plus a history [`Hinter`] (the dimmed inline
+/// suggestion of the last matching command); highlighting is a no-op except for
+/// dimming that hint, and validation stays at the trait default (always-valid).
 pub struct ShellHelper {
     /// The sorted, de-duplicated name universe (AUR pkgnames + pkgbases + sync
     /// names), shared with the session by `Rc` and replaced wholesale on
@@ -72,15 +75,20 @@ pub struct ShellHelper {
     /// address a cart row (`drop yay-bin`), the same currency the
     /// [`selector`](super::selector) resolver accepts.
     cart: Vec<PkgTarget>,
+    /// Suggests the tail of the most recent history entry that starts with the
+    /// current line — rustyline's stock [`HistoryHinter`], reading the same
+    /// history ring the editor persists. Right-arrow / End accepts the hint.
+    hinter: HistoryHinter,
 }
 
 impl ShellHelper {
     /// A helper over `universe` with an empty cart (the session starts with
     /// nothing staged).
-    pub const fn new(universe: Rc<[PkgTarget]>) -> Self {
+    pub fn new(universe: Rc<[PkgTarget]>) -> Self {
         Self {
             universe,
             cart: Vec::new(),
+            hinter: HistoryHinter::new(),
         }
     }
 
@@ -197,12 +205,31 @@ impl Completer for ShellHelper {
     }
 }
 
-// Hints, highlighting, and validation stay at the trait defaults: no inline
-// hint, no recoloring, always-valid. `Helper` is the marker tying them together.
+// Hints come from history (delegated to `HistoryHinter`); highlighting only
+// dims that hint so it reads as a suggestion, not typed text; validation stays
+// always-valid. `Helper` is the marker tying them together. rustyline only calls
+// `highlight_hint` when its own colour mode is on, so `--color never` (mapped to
+// `ColorMode::Disabled` in `shell::run`) renders the hint plain automatically.
 impl Hinter for ShellHelper {
     type Hint = String;
+
+    fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<String> {
+        self.hinter.hint(line, pos, ctx)
+    }
 }
-impl Highlighter for ShellHelper {}
+impl Highlighter for ShellHelper {
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        // Force styling: rustyline has already decided colour is on by calling
+        // us, so emit the dim escape regardless of console's own tty sniffing.
+        Cow::Owned(
+            console::Style::new()
+                .dim()
+                .force_styling(true)
+                .apply_to(hint)
+                .to_string(),
+        )
+    }
+}
 impl Validator for ShellHelper {}
 impl Helper for ShellHelper {}
 

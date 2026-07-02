@@ -1,5 +1,6 @@
 //! Persistent user configuration loaded from `~/.config/gitaur/config.toml`.
 
+use crate::cli::shell::cart::AurApproval;
 use crate::error::Result;
 use crate::paths;
 use crate::ui::ColorMode;
@@ -43,6 +44,14 @@ pub struct Config {
     pub check_repo_updates: bool,
     /// `prompt` | `skip` | `always-show` — PKGBUILD review default.
     pub review_default: String,
+    /// `review` | `auto` — whether staged AUR packages need review before
+    /// `apply` will run them. `review` (default) puts every AUR item behind the
+    /// shell's approval gate; `auto` stages them pre-approved. When unset (the
+    /// `None` here), the legacy `review_default == "skip"` behaviour still
+    /// auto-approves, so existing configs keep working. Repo packages always
+    /// auto-approve regardless. Resolved by
+    /// [`AurApproval::from_config`](crate::cli::shell::cart::AurApproval::from_config).
+    pub aur_approval: Option<AurApproval>,
     /// Max commits `find_installed_commit` walks back through a pkgbase's
     /// history when looking for the commit that produced the installed
     /// version (so the review screen can diff against it). Fast-moving

@@ -22,6 +22,9 @@ pub fn default_config() -> Config {
         devel: false,
         check_repo_updates: true,
         review_default: "prompt".into(),
+        // Unset: `aur_policy` defers to `review_default` for back-compat. Set to
+        // `Some(AurApproval::{Review,Auto})` in config.toml to pin the gate.
+        aur_approval: None,
         // 256 covers ~2 years of dotnet-core-7.0-bin-shaped pkgs (~10
         // updates/month). Old default of 64 routinely missed the diff
         // base on long-untouched installs; bumping the headline cost

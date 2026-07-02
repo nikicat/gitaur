@@ -67,7 +67,12 @@ makepkg_args         = ["-s", "--noconfirm", "--needed"]
 privilege_escalator  = "sudo"      # or "doas" / "run0"
 devel                = false
 review_default       = "prompt"    # or "skip" / "always-show"
+aur_approval         = "review"    # or "auto" — auto stages AUR pkgs pre-approved
 ```
+
+The shell's approval gate: `review` (default) makes every staged AUR package
+need `review`/`approve` before `apply` runs it; `auto` stages them pre-approved.
+If unset, `review_default = "skip"` still auto-approves (legacy behavior).
 
 ## Layout on disk
 
