@@ -641,8 +641,25 @@ impl State {
                 self.cart.clear_applied();
                 env.print("done");
             }
-            Ok(ApplyOutcome::Failed) => {
-                env.print("some packages didn't apply — `drop` them and `apply` again");
+            Ok(ApplyOutcome::Failed { installed }) => {
+                // Drop the rows that actually landed so a retry doesn't reinstall
+                // them; keep the offenders (and any staged removals, which don't
+                // run once a build fails) staged for `drop`/fix + `apply` again.
+                let landed = installed.len();
+                for t in &installed {
+                    self.cart.unstage(t);
+                }
+                if landed == 0 {
+                    env.print("apply failed — nothing installed; cart kept for retry");
+                } else {
+                    env.print(&format!(
+                        "apply partly failed — {landed} installed (dropped), \
+                         {} still staged; fix and `apply` again",
+                        self.cart.items().len()
+                    ));
+                }
+                // Reprint what's left so the failures are on screen to act on.
+                self.show(env);
             }
             Err(e) => env.print(&format!("apply: {e}")),
         }
@@ -1178,7 +1195,9 @@ impl ShellEnv for RealEnv<'_> {
         self.view = None;
         let Some(session) = self.session.as_ref() else {
             ui::warn("no AUR index loaded; cannot apply");
-            return Ok(ApplyOutcome::Failed);
+            return Ok(ApplyOutcome::Failed {
+                installed: Vec::new(),
+            });
         };
         let pac = upgrade::system_pac()?;
 
@@ -1222,11 +1241,11 @@ impl ShellEnv for RealEnv<'_> {
             Some(plan) => {
                 let report =
                     build::apply_plan(self.cfg, session.index(), &pac, plan, opts, &mut reviewed)?;
-                outcome_of(&report)
+                cart_apply_outcome(&report, cart, session)
             }
             None => ApplyOutcome::Succeeded,
         };
-        if outcome != ApplyOutcome::Succeeded {
+        if !matches!(outcome, ApplyOutcome::Succeeded) {
             return Ok(outcome);
         }
 
@@ -1245,7 +1264,15 @@ impl ShellEnv for RealEnv<'_> {
             args.extend(installed_removals.iter().map(|n| n.as_str().to_owned()));
             if invoke::exec_pacman(self.cfg, &args)? != 0 {
                 ui::warn("removal step did not complete");
-                return Ok(ApplyOutcome::Failed);
+                // The whole install half already landed (we passed the
+                // success gate above); only the removal failed, so drop every
+                // install row and keep the removals staged for a retry.
+                let installed = cart
+                    .items()
+                    .iter()
+                    .map(|it| PkgTarget::new(it.spec()))
+                    .collect();
+                return Ok(ApplyOutcome::Failed { installed });
             }
         }
         Ok(ApplyOutcome::Succeeded)
@@ -1424,14 +1451,52 @@ impl RealEnv<'_> {
     }
 }
 
-/// Map a build [`RunReport`](build::RunReport) to the cart-apply outcome: any
-/// failure, dep-skip, or interrupt keeps the cart for a retry.
-fn outcome_of(report: &build::RunReport) -> ApplyOutcome {
+/// Fold a build [`RunReport`](build::RunReport) into the cart-apply outcome. A
+/// fully-clean report succeeds (the caller clears the whole cart); any failure,
+/// dep-skip, or interrupt is a partial [`ApplyOutcome::Failed`] carrying the
+/// staged install rows that *did* land — so the cart drops them and keeps only
+/// the offenders for a retry (fixing the bug where a partial build left every
+/// package staged even though some installed).
+///
+/// Which rows landed: every repo row (repo upgrades and fresh `-S` installs both
+/// run to completion *before* the AUR pipeline — a repo failure surfaces as
+/// `Err`, never this outcome), plus each AUR row whose pkgbase built + installed
+/// this run (`report.installed`).
+fn cart_apply_outcome(
+    report: &build::RunReport,
+    cart: &Cart,
+    session: &UpgradeSession,
+) -> ApplyOutcome {
     if report.failed.is_empty() && report.skipped_dep.is_empty() && report.interrupted.is_empty() {
-        ApplyOutcome::Succeeded
-    } else {
-        ApplyOutcome::Failed
+        return ApplyOutcome::Succeeded;
     }
+    let installed = landed_install_specs(cart, &report.installed, |it| {
+        session
+            .secondary()
+            .lookup(session.index(), it.spec())
+            .map(|e| e.pkgbase.clone())
+    });
+    ApplyOutcome::Failed { installed }
+}
+
+/// The staged install specs that landed this run, given the AUR pkgbases that
+/// installed and a resolver from a cart row to its pkgbase. Repo rows always
+/// count as landed on a partial failure (see [`cart_apply_outcome`]); an AUR row
+/// lands iff its pkgbase is in `installed`. Pure (the pkgbase lookup is injected)
+/// so the partition is unit-testable without a live session.
+fn landed_install_specs(
+    cart: &Cart,
+    installed: &[PkgBase],
+    pkgbase_of: impl Fn(&CartItem) -> Option<PkgBase>,
+) -> Vec<PkgTarget> {
+    cart.items()
+        .iter()
+        .filter(|it| match it.source {
+            Source::Repo => true,
+            Source::Aur => pkgbase_of(it).is_some_and(|pb| installed.contains(&pb)),
+        })
+        .map(|it| PkgTarget::new(it.spec()))
+        .collect()
 }
 
 /// Map the cart's [`Approval`] to the renderer's presentation enum — the seam
@@ -2011,14 +2076,43 @@ mod tests {
     }
 
     #[test]
-    fn apply_failure_keeps_the_cart_for_retry() {
+    fn apply_total_failure_keeps_the_whole_cart_for_retry() {
         let mut env = env_with(&[("glibc", Source::Repo)]);
-        env.apply_outcome = Some(ApplyOutcome::Failed);
+        // Nothing landed → empty `installed` → the whole cart stays staged.
+        env.apply_outcome = Some(ApplyOutcome::Failed {
+            installed: Vec::new(),
+        });
         let mut state = State::default();
         state.dispatch(&command::parse("add glibc"), &mut env);
         state.dispatch(&command::parse("apply"), &mut env);
         assert_eq!(state.cart.items().len(), 1, "failed apply keeps the cart");
-        assert!(env.lines.contains("didn't apply"));
+        assert!(env.lines.contains("cart kept for retry"));
+    }
+
+    #[test]
+    fn apply_partial_failure_drops_landed_rows_and_keeps_the_failures() {
+        // Regression: `upgrade` stages 4 AUR packages, 2 build + install and 2
+        // fail. The cart must keep only the 2 that failed — not show all 4.
+        let mut env = env_with(&[
+            ("a", Source::Aur),
+            ("b", Source::Aur),
+            ("c", Source::Aur),
+            ("d", Source::Aur),
+        ]);
+        // `a` and `b` landed; `c` and `d` didn't.
+        env.apply_outcome = Some(ApplyOutcome::Failed {
+            installed: vec![PkgTarget::new("a"), PkgTarget::new("b")],
+        });
+        let mut state = State::default();
+        state.dispatch(&command::parse("add a b c d"), &mut env);
+        state.dispatch(&command::parse("approve *"), &mut env); // clear the gate
+        state.dispatch(&command::parse("apply"), &mut env);
+        assert_eq!(
+            cart_specs(&state),
+            vec!["c", "d"],
+            "only the failed packages stay staged"
+        );
+        assert!(env.lines.contains("apply partly failed"));
     }
 
     #[test]
@@ -2027,6 +2121,36 @@ mod tests {
         let mut state = State::default();
         state.dispatch(&command::parse("remove oldpkg"), &mut env);
         assert_eq!(state.cart.removals(), &[PkgName::from("oldpkg")]);
+    }
+
+    #[test]
+    fn landed_install_specs_keeps_repo_and_installed_aur_only() {
+        // A mixed cart: one repo upgrade, two AUR. On a partial failure the repo
+        // row always counts as landed, and an AUR row lands iff its pkgbase is in
+        // the report's `installed` set.
+        let mut cart = Cart::default();
+        cart.add(CartItem::from_upgrade(
+            up("core", "glibc"),
+            AurApproval::Review,
+        ));
+        cart.add(CartItem::from_upgrade(
+            up("aur", "yay-bin"),
+            AurApproval::Review,
+        ));
+        cart.add(CartItem::from_upgrade(
+            up("aur", "cuda"),
+            AurApproval::Review,
+        ));
+        // `yay-bin` built + installed; `cuda` did not.
+        let installed = [PkgBase::from("yay-bin")];
+        // The fixtures use spec == pkgbase, so an identity resolver suffices.
+        let landed = landed_install_specs(&cart, &installed, |it| Some(PkgBase::from(it.spec())));
+        let specs: Vec<&str> = landed.iter().map(PkgTarget::as_str).collect();
+        assert_eq!(
+            specs,
+            vec!["glibc", "yay-bin"],
+            "repo row + installed AUR landed; the failed AUR (`cuda`) did not"
+        );
     }
 
     #[test]

@@ -202,9 +202,12 @@ pub enum ApplyOutcome {
     Declined,
     /// Everything installed/removed cleanly — the applied rows leave the cart.
     Succeeded,
-    /// The transaction ran but something failed or was interrupted — the cart
-    /// is kept intact so the user can `drop` the offender and `apply` the rest.
-    Failed,
+    /// The transaction ran but something failed or was interrupted. `installed`
+    /// carries the staged install rows that *did* land, so the cart drops them
+    /// and keeps only the offenders — the ones still to `drop`/fix and retry.
+    /// Staged removals stay put (they don't run once a build fails). Empty when
+    /// nothing landed at all.
+    Failed { installed: Vec<PkgTarget> },
 }
 
 /// What staging an item (`add` / `stage_remove`) did to the cart — a named
