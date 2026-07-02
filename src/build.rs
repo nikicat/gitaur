@@ -369,6 +369,10 @@ fn run_aur_pipeline(
     // makepkg runs in this phase, so the user can walk through every diff
     // before any build kicks off.
     let mut prep_strata: Vec<Vec<Prep<'_>>> = Vec::with_capacity(plan.aur_strata.len());
+    // Threaded across every `prepare_one`: seeded from the run's non-interactive
+    // flag, then flipped to `Auto` by a mid-pass "approve all" so the remaining
+    // pkgbases skip their diff prompt.
+    let mut prompting = review::Prompting::from_noconfirm(opts.noconfirm);
     for stratum in &plan.aur_strata {
         let mut row = Vec::with_capacity(stratum.len());
         for pkgbase in stratum {
@@ -383,8 +387,8 @@ fn run_aur_pipeline(
                 pac,
                 &plan.pkgbase_plan(pkgbase),
                 cfg.review_history_scan_max,
-                opts.noconfirm,
                 reviewed,
+                &mut prompting,
             )?);
         }
         prep_strata.push(row);
@@ -649,8 +653,8 @@ fn prepare_one<'a>(
     pac: &PacmanIndex,
     target: &PkgbasePlan<'a>,
     history_scan_max: usize,
-    noconfirm: bool,
     reviewed: &mut HashSet<PkgBase>,
+    prompting: &mut review::Prompting,
 ) -> Result<Prep<'a>> {
     let &PkgbasePlan {
         pkgbase,
@@ -723,6 +727,8 @@ fn prepare_one<'a>(
     // correctly; see `PacmanIndex::counterpart_with_hint` for the resolution
     // order and how `hint` overrides the "first-hit" default.
     let counterpart = pac.counterpart_with_hint(entry, hint);
+    // `prompting` is the pass-level state: `Auto` on a non-interactive run or
+    // once "approve all" was chosen, else `Prompt`.
     let disposition = match review::review(
         mirror,
         pkgbase,
@@ -730,11 +736,19 @@ fn prepare_one<'a>(
         counterpart.as_ref(),
         &wt,
         history_scan_max,
-        noconfirm,
+        *prompting,
     )? {
         review::Outcome::Approved => {
             // Remember the approval so a later batch in the same session
             // doesn't re-prompt the same diff.
+            reviewed.insert(pkgbase.clone());
+            Disposition::Build
+        }
+        review::Outcome::ApprovedAll => {
+            // Approve this one and auto-approve every remaining pkgbase in the
+            // pass — flip the shared state the caller threads across
+            // `prepare_one` calls.
+            *prompting = review::Prompting::Auto;
             reviewed.insert(pkgbase.clone());
             Disposition::Build
         }

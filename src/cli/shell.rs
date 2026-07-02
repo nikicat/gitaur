@@ -38,8 +38,8 @@ use crate::resolver::Plan;
 use crate::ui::{self, UpgradeSelection};
 use crate::version::Version;
 use cart::{
-    ApplyOutcome, Approval, ApproveResult, AurApproval, Cart, CartItem, ReviewOutcome, Source,
-    StageClass, StageResult, UnstageResult,
+    ApplyOutcome, Approval, ApproveResult, AurApproval, Cart, CartItem, KeepResult, ReviewOutcome,
+    Source, StageClass, StageResult, UnstageResult,
 };
 use command::Command;
 use complete::ShellHelper;
@@ -177,6 +177,10 @@ impl State {
             }
             Command::Drop(args) => {
                 self.discard(args, env);
+                Flow::Continue
+            }
+            Command::Keep(args) => {
+                self.keep(args, env);
                 Flow::Continue
             }
             Command::Remove(args) => {
@@ -401,6 +405,41 @@ impl State {
         }
     }
 
+    /// `keep <sel…>`: keep only the selected install rows, dropping every other
+    /// staged install — the inverse of `drop`, for narrowing a large cart down to
+    /// a few packages (`upgrade`, then `keep glibc firefox`). Selectors resolve
+    /// against the cart, exactly like `drop`; staged removals are untouched. A
+    /// selector matching nothing leaves the cart intact rather than emptying it.
+    fn keep<E: ShellEnv>(&mut self, args: &[String], env: &mut E) {
+        if args.is_empty() {
+            env.print("usage: keep <pkg|number|range|glob>… (try `keep aur`)");
+            return;
+        }
+        let targets = match self.resolve_against_cart(args) {
+            Ok(t) => t,
+            Err(e) => {
+                env.print(&format!("keep: {e}"));
+                return;
+            }
+        };
+        let keep: HashSet<&str> = targets.iter().map(PkgTarget::as_str).collect();
+        match self.cart.keep(&keep) {
+            KeepResult::NoMatch => {
+                env.print("keep: nothing in the cart matched — cart unchanged");
+            }
+            KeepResult::Kept { dropped } if dropped.is_empty() => {
+                env.print("keep: every staged package is already kept — nothing dropped");
+            }
+            KeepResult::Kept { dropped } => {
+                for spec in &dropped {
+                    env.print(&format!("dropped {}", spec.as_str()));
+                }
+                // Reprint the narrowed cart, matching `drop`'s post-5c UX.
+                self.show(env);
+            }
+        }
+    }
+
     /// `remove <sel…>`: stage an uninstall (`pacman -R` at apply). Selectors
     /// resolve against the last list + universe; pacman validates names at
     /// apply time.
@@ -510,6 +549,9 @@ impl State {
             env.print("review: nothing in the cart matched");
             return;
         }
+        // Flips to `Auto` once the user picks "approve all": the remaining AUR
+        // items clear without opening another diff.
+        let mut prompting = review::Prompting::default();
         for t in targets {
             // Copy out (source, approval) so the cart isn't borrowed across the
             // `env.review` call (which then mutates the cart on approval).
@@ -524,28 +566,45 @@ impl State {
                 Some((_, Approval::Approved)) => {
                     env.print(&format!("{} is already approved", t.as_str()));
                 }
-                Some((Source::Aur, Approval::NeedsReview)) => match env.review(&t) {
-                    Ok(ReviewOutcome::Approved) => {
-                        self.cart.approve(&t);
-                        if let Some(pb) = env.pkgbase_of(&t) {
-                            self.cart.mark_reviewed(pb);
+                Some((Source::Aur, Approval::NeedsReview)) => {
+                    if prompting == review::Prompting::Auto {
+                        // "approve all" was chosen earlier — no more diffs.
+                        self.approve_reviewed(&t, env);
+                        continue;
+                    }
+                    match env.review(&t) {
+                        Ok(ReviewOutcome::Approved) => self.approve_reviewed(&t, env),
+                        Ok(ReviewOutcome::ApprovedAll) => {
+                            self.approve_reviewed(&t, env);
+                            prompting = review::Prompting::Auto;
                         }
-                        env.print(&format!("approved {}", t.as_str()));
+                        Ok(ReviewOutcome::Skipped) => {
+                            env.print(&format!("{} left for review", t.as_str()));
+                        }
+                        Ok(ReviewOutcome::Aborted) => {
+                            env.print("review aborted");
+                            break;
+                        }
+                        Err(e) => {
+                            env.print(&format!("review {}: {e}", t.as_str()));
+                            break;
+                        }
                     }
-                    Ok(ReviewOutcome::Skipped) => {
-                        env.print(&format!("{} left for review", t.as_str()));
-                    }
-                    Ok(ReviewOutcome::Aborted) => {
-                        env.print("review aborted");
-                        break;
-                    }
-                    Err(e) => {
-                        env.print(&format!("review {}: {e}", t.as_str()));
-                        break;
-                    }
-                },
+                }
             }
         }
+    }
+
+    /// Clear a just-reviewed AUR target's approval gate: approve it, record its
+    /// pkgbase in the reviewed set (so the build pipeline won't re-prompt), and
+    /// acknowledge it. Shared by the per-item `review` approval and the
+    /// "approve all" fast path.
+    fn approve_reviewed<E: ShellEnv>(&mut self, t: &PkgTarget, env: &mut E) {
+        self.cart.approve(t);
+        if let Some(pb) = env.pkgbase_of(t) {
+            self.cart.mark_reviewed(pb);
+        }
+        env.print(&format!("approved {}", t.as_str()));
     }
 
     /// `show`: render the staged transaction — a header, the install/removal
@@ -602,8 +661,25 @@ impl State {
                 self.cart.clear_applied();
                 env.print("done");
             }
-            Ok(ApplyOutcome::Failed) => {
-                env.print("some packages didn't apply — `drop` them and `apply` again");
+            Ok(ApplyOutcome::Failed { installed }) => {
+                // Drop the rows that actually landed so a retry doesn't reinstall
+                // them; keep the offenders (and any staged removals, which don't
+                // run once a build fails) staged for `drop`/fix + `apply` again.
+                let landed = installed.len();
+                for t in &installed {
+                    self.cart.unstage(t);
+                }
+                if landed == 0 {
+                    env.print("apply failed — nothing installed; cart kept for retry");
+                } else {
+                    env.print(&format!(
+                        "apply partly failed — {landed} installed (dropped), \
+                         {} still staged; fix and `apply` again",
+                        self.cart.items().len()
+                    ));
+                }
+                // Reprint what's left so the failures are on screen to act on.
+                self.show(env);
             }
             Err(e) => env.print(&format!("apply: {e}")),
         }
@@ -738,6 +814,7 @@ commands:
   info <sel…>         show package details (sel = name | number | range | glob)
   add <sel…>          stage packages to install
   drop <sel…>         unstage packages from the cart (alias: discard)
+  keep <sel…>         keep only these staged packages, drop the rest
   remove <sel…>       stage packages to uninstall
   upgrade [pkg…]      upgrade installed packages (repo + AUR)
   review [sel…]       view a PKGBUILD/diff and approve it (no sel = review all)
@@ -1100,9 +1177,13 @@ impl ShellEnv for RealEnv<'_> {
             counterpart.as_ref(),
             &wt,
             self.cfg.review_history_scan_max,
-            false,
+            // The shell drives one interactive review per call; the
+            // "approve all" fast path is the dispatch loop's job (it decides
+            // whether to call this at all), so a single review always prompts.
+            review::Prompting::Prompt,
         ) {
             Ok(review::Outcome::Approved) => Ok(ReviewOutcome::Approved),
+            Ok(review::Outcome::ApprovedAll) => Ok(ReviewOutcome::ApprovedAll),
             Ok(review::Outcome::Skipped) => Ok(ReviewOutcome::Skipped),
             // An abort at the review prompt ends the pass but not the shell.
             Err(Error::UserAbort) => Ok(ReviewOutcome::Aborted),
@@ -1138,7 +1219,9 @@ impl ShellEnv for RealEnv<'_> {
         self.view = None;
         let Some(session) = self.session.as_ref() else {
             ui::warn("no AUR index loaded; cannot apply");
-            return Ok(ApplyOutcome::Failed);
+            return Ok(ApplyOutcome::Failed {
+                installed: Vec::new(),
+            });
         };
         let pac = upgrade::system_pac()?;
 
@@ -1182,11 +1265,11 @@ impl ShellEnv for RealEnv<'_> {
             Some(plan) => {
                 let report =
                     build::apply_plan(self.cfg, session.index(), &pac, plan, opts, &mut reviewed)?;
-                outcome_of(&report)
+                cart_apply_outcome(&report, cart, session)
             }
             None => ApplyOutcome::Succeeded,
         };
-        if outcome != ApplyOutcome::Succeeded {
+        if !matches!(outcome, ApplyOutcome::Succeeded) {
             return Ok(outcome);
         }
 
@@ -1205,7 +1288,15 @@ impl ShellEnv for RealEnv<'_> {
             args.extend(installed_removals.iter().map(|n| n.as_str().to_owned()));
             if invoke::exec_pacman(self.cfg, &args)? != 0 {
                 ui::warn("removal step did not complete");
-                return Ok(ApplyOutcome::Failed);
+                // The whole install half already landed (we passed the
+                // success gate above); only the removal failed, so drop every
+                // install row and keep the removals staged for a retry.
+                let installed = cart
+                    .items()
+                    .iter()
+                    .map(|it| PkgTarget::new(it.spec()))
+                    .collect();
+                return Ok(ApplyOutcome::Failed { installed });
             }
         }
         Ok(ApplyOutcome::Succeeded)
@@ -1384,14 +1475,52 @@ impl RealEnv<'_> {
     }
 }
 
-/// Map a build [`RunReport`](build::RunReport) to the cart-apply outcome: any
-/// failure, dep-skip, or interrupt keeps the cart for a retry.
-fn outcome_of(report: &build::RunReport) -> ApplyOutcome {
+/// Fold a build [`RunReport`](build::RunReport) into the cart-apply outcome. A
+/// fully-clean report succeeds (the caller clears the whole cart); any failure,
+/// dep-skip, or interrupt is a partial [`ApplyOutcome::Failed`] carrying the
+/// staged install rows that *did* land — so the cart drops them and keeps only
+/// the offenders for a retry (fixing the bug where a partial build left every
+/// package staged even though some installed).
+///
+/// Which rows landed: every repo row (repo upgrades and fresh `-S` installs both
+/// run to completion *before* the AUR pipeline — a repo failure surfaces as
+/// `Err`, never this outcome), plus each AUR row whose pkgbase built + installed
+/// this run (`report.installed`).
+fn cart_apply_outcome(
+    report: &build::RunReport,
+    cart: &Cart,
+    session: &UpgradeSession,
+) -> ApplyOutcome {
     if report.failed.is_empty() && report.skipped_dep.is_empty() && report.interrupted.is_empty() {
-        ApplyOutcome::Succeeded
-    } else {
-        ApplyOutcome::Failed
+        return ApplyOutcome::Succeeded;
     }
+    let installed = landed_install_specs(cart, &report.installed, |it| {
+        session
+            .secondary()
+            .lookup(session.index(), it.spec())
+            .map(|e| e.pkgbase.clone())
+    });
+    ApplyOutcome::Failed { installed }
+}
+
+/// The staged install specs that landed this run, given the AUR pkgbases that
+/// installed and a resolver from a cart row to its pkgbase. Repo rows always
+/// count as landed on a partial failure (see [`cart_apply_outcome`]); an AUR row
+/// lands iff its pkgbase is in `installed`. Pure (the pkgbase lookup is injected)
+/// so the partition is unit-testable without a live session.
+fn landed_install_specs(
+    cart: &Cart,
+    installed: &[PkgBase],
+    pkgbase_of: impl Fn(&CartItem) -> Option<PkgBase>,
+) -> Vec<PkgTarget> {
+    cart.items()
+        .iter()
+        .filter(|it| match it.source {
+            Source::Repo => true,
+            Source::Aur => pkgbase_of(it).is_some_and(|pb| installed.contains(&pb)),
+        })
+        .map(|it| PkgTarget::new(it.spec()))
+        .collect()
 }
 
 /// Map the cart's [`Approval`] to the renderer's presentation enum — the seam
@@ -1799,6 +1928,66 @@ mod tests {
     }
 
     #[test]
+    fn keep_drops_every_unselected_install() {
+        let mut env = env_with(&[
+            ("foo", Source::Aur),
+            ("bar", Source::Repo),
+            ("baz", Source::Aur),
+        ]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo bar baz"), &mut env);
+        env.lines.clear();
+        state.dispatch(&command::parse("keep bar"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["bar"], "only `bar` survives");
+        assert!(env.lines.contains("dropped foo"));
+        assert!(env.lines.contains("dropped baz"));
+        // Reprints the narrowed cart, like `drop`.
+        assert!(env.lines.contains("transaction — 1 to install"));
+    }
+
+    #[test]
+    fn keep_by_repo_filter_narrows_to_one_repo() {
+        // A repo-name selector keeps every row from that repo — the mirror image
+        // of `drop <repo>`.
+        let mut env = FakeEnv {
+            upgrade_candidates: vec![
+                up("core", "glibc"),
+                up("extra", "firefox"),
+                up("aur", "yay-bin"),
+            ],
+            ..FakeEnv::default()
+        };
+        let mut state = State::default();
+        state.dispatch(&command::parse("upgrade"), &mut env);
+        state.dispatch(&command::parse("keep aur"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["yay-bin"]);
+    }
+
+    #[test]
+    fn keep_matching_nothing_leaves_the_cart_intact() {
+        // A typo mustn't empty the cart: no staged row matches → no change.
+        let mut env = env_with(&[("foo", Source::Aur), ("bar", Source::Repo)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo bar"), &mut env);
+        env.lines.clear();
+        state.dispatch(&command::parse("keep absent"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["bar", "foo"], "cart unchanged");
+        assert!(env.lines.contains("nothing in the cart matched"));
+        assert!(
+            !env.lines.any(|l| l.contains("dropped")),
+            "no row should be dropped: {:?}",
+            env.lines
+        );
+    }
+
+    #[test]
+    fn keep_with_no_args_prints_usage() {
+        let (flow, env) = dispatch_one("keep");
+        assert_eq!(flow, Flow::Continue);
+        assert!(env.lines.contains("usage: keep"));
+    }
+
+    #[test]
     fn clear_empties_the_cart() {
         let mut env = env_with(&[("foo", Source::Aur)]);
         let mut state = State::default();
@@ -1847,6 +2036,24 @@ mod tests {
         state.dispatch(&command::parse("add yay-bin"), &mut env);
         state.dispatch(&command::parse("review yay-bin"), &mut env);
         assert!(!state.cart.all_approved(), "skip leaves it needing review");
+    }
+
+    #[test]
+    fn review_approve_all_clears_the_rest_without_more_diffs() {
+        // The `(a)pprove all` outcome on the first item auto-approves the rest
+        // without opening their diffs.
+        let mut env = env_with(&[("a", Source::Aur), ("b", Source::Aur), ("c", Source::Aur)]);
+        env.review_outcomes
+            .insert("a".into(), ReviewOutcome::ApprovedAll);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add a b c"), &mut env);
+        state.dispatch(&command::parse("review"), &mut env);
+        assert_eq!(
+            env.review_calls,
+            vec!["a"],
+            "approve-all opens only the first diff, then auto-approves the rest"
+        );
+        assert!(state.cart.all_approved(), "every staged item is cleared");
     }
 
     #[test]
@@ -1911,14 +2118,43 @@ mod tests {
     }
 
     #[test]
-    fn apply_failure_keeps_the_cart_for_retry() {
+    fn apply_total_failure_keeps_the_whole_cart_for_retry() {
         let mut env = env_with(&[("glibc", Source::Repo)]);
-        env.apply_outcome = Some(ApplyOutcome::Failed);
+        // Nothing landed → empty `installed` → the whole cart stays staged.
+        env.apply_outcome = Some(ApplyOutcome::Failed {
+            installed: Vec::new(),
+        });
         let mut state = State::default();
         state.dispatch(&command::parse("add glibc"), &mut env);
         state.dispatch(&command::parse("apply"), &mut env);
         assert_eq!(state.cart.items().len(), 1, "failed apply keeps the cart");
-        assert!(env.lines.contains("didn't apply"));
+        assert!(env.lines.contains("cart kept for retry"));
+    }
+
+    #[test]
+    fn apply_partial_failure_drops_landed_rows_and_keeps_the_failures() {
+        // Regression: `upgrade` stages 4 AUR packages, 2 build + install and 2
+        // fail. The cart must keep only the 2 that failed — not show all 4.
+        let mut env = env_with(&[
+            ("a", Source::Aur),
+            ("b", Source::Aur),
+            ("c", Source::Aur),
+            ("d", Source::Aur),
+        ]);
+        // `a` and `b` landed; `c` and `d` didn't.
+        env.apply_outcome = Some(ApplyOutcome::Failed {
+            installed: vec![PkgTarget::new("a"), PkgTarget::new("b")],
+        });
+        let mut state = State::default();
+        state.dispatch(&command::parse("add a b c d"), &mut env);
+        state.dispatch(&command::parse("approve *"), &mut env); // clear the gate
+        state.dispatch(&command::parse("apply"), &mut env);
+        assert_eq!(
+            cart_specs(&state),
+            vec!["c", "d"],
+            "only the failed packages stay staged"
+        );
+        assert!(env.lines.contains("apply partly failed"));
     }
 
     #[test]
@@ -1927,6 +2163,36 @@ mod tests {
         let mut state = State::default();
         state.dispatch(&command::parse("remove oldpkg"), &mut env);
         assert_eq!(state.cart.removals(), &[PkgName::from("oldpkg")]);
+    }
+
+    #[test]
+    fn landed_install_specs_keeps_repo_and_installed_aur_only() {
+        // A mixed cart: one repo upgrade, two AUR. On a partial failure the repo
+        // row always counts as landed, and an AUR row lands iff its pkgbase is in
+        // the report's `installed` set.
+        let mut cart = Cart::default();
+        cart.add(CartItem::from_upgrade(
+            up("core", "glibc"),
+            AurApproval::Review,
+        ));
+        cart.add(CartItem::from_upgrade(
+            up("aur", "yay-bin"),
+            AurApproval::Review,
+        ));
+        cart.add(CartItem::from_upgrade(
+            up("aur", "cuda"),
+            AurApproval::Review,
+        ));
+        // `yay-bin` built + installed; `cuda` did not.
+        let installed = [PkgBase::from("yay-bin")];
+        // The fixtures use spec == pkgbase, so an identity resolver suffices.
+        let landed = landed_install_specs(&cart, &installed, |it| Some(PkgBase::from(it.spec())));
+        let specs: Vec<&str> = landed.iter().map(PkgTarget::as_str).collect();
+        assert_eq!(
+            specs,
+            vec!["glibc", "yay-bin"],
+            "repo row + installed AUR landed; the failed AUR (`cuda`) did not"
+        );
     }
 
     #[test]

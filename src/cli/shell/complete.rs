@@ -7,7 +7,7 @@
 //! | --- | --- |
 //! | the first word | command verbs |
 //! | arg of `search` / `add` / `info` / `remove` | the full name universe |
-//! | arg of `drop` / `review` / `approve` / `upgrade` | names currently in the cart |
+//! | arg of `drop` / `keep` / `review` / `approve` / `upgrade` | names currently in the cart |
 //! | arg of `help` | command verbs |
 //! | a numeric token, or an arg of `show`/`apply`/… | nothing |
 //!
@@ -43,7 +43,7 @@ enum ArgKind {
     Verbs,
     /// `search`/`add`/`info`/`remove` — the full name universe.
     Universe,
-    /// `drop`/`review`/`approve`/`upgrade` — names currently in the cart.
+    /// `drop`/`keep`/`review`/`approve`/`upgrade` — names currently in the cart.
     Cart,
     /// `show`/`apply`/`clear`/`refresh`/`quit` — nothing to complete.
     None,
@@ -54,7 +54,7 @@ const fn arg_kind(verb: &str) -> ArgKind {
     match verb.as_bytes() {
         b"help" => ArgKind::Verbs,
         b"search" | b"add" | b"info" | b"remove" => ArgKind::Universe,
-        b"drop" | b"review" | b"approve" | b"upgrade" => ArgKind::Cart,
+        b"drop" | b"keep" | b"review" | b"approve" | b"upgrade" => ArgKind::Cart,
         _ => ArgKind::None,
     }
 }
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn approve_and_review_and_upgrade_use_the_cart() {
         let h = helper(&["other"], &["yay-bin"]);
-        for line in ["approve ya", "review ya", "upgrade ya", "up ya"] {
+        for line in ["approve ya", "review ya", "upgrade ya", "up ya", "keep ya"] {
             assert_eq!(complete(&h, line), vec!["yay-bin"], "line `{line}`");
         }
     }

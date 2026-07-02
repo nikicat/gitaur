@@ -39,9 +39,39 @@ const FULL_DIFF_CONTEXT: u32 = 99_999;
 pub enum Outcome {
     /// User approved: include in the upcoming build batch.
     Approved,
+    /// User chose "approve all": include this pkgbase *and* auto-approve every
+    /// remaining one in this pass without prompting. The caller drives the
+    /// "auto-approve the rest" part (it owns the loop over pkgbases).
+    ApprovedAll,
     /// User chose "skip": drop this pkgbase from the build batch but keep
     /// reviewing the rest.
     Skipped,
+}
+
+/// Whether [`review`] prompts the user or auto-approves without a diff — the
+/// review path's flag, replacing a bare `noconfirm` bool so the intent reads at
+/// every call site.
+///
+/// It doubles as the loop state threaded across a pass's per-pkgbase reviews:
+/// it starts [`Self::Auto`] on a non-interactive run (`--noconfirm` / piped)
+/// and otherwise [`Self::Prompt`], then flips to [`Self::Auto`] the moment the
+/// user answers "approve all" ([`Outcome::ApprovedAll`]) so the rest of the
+/// pass approves without opening another diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Prompting {
+    /// Show the diff and block for the user's decision (the default).
+    #[default]
+    Prompt,
+    /// Auto-approve and return [`Outcome::Approved`] without prompting.
+    Auto,
+}
+
+impl Prompting {
+    /// `Auto` for a non-interactive run, `Prompt` otherwise — the bridge from
+    /// the legacy run-wide `noconfirm` bool at the one call site that has it.
+    pub const fn from_noconfirm(noconfirm: bool) -> Self {
+        if noconfirm { Self::Auto } else { Self::Prompt }
+    }
 }
 
 /// Drive the review prompt loop for one pkgbase.
@@ -59,13 +89,13 @@ pub fn review(
     counterpart: Option<&InstalledCounterpart<'_>>,
     wt: &Worktree,
     history_scan_max: usize,
-    noconfirm: bool,
+    prompting: Prompting,
 ) -> Result<Outcome> {
-    if noconfirm {
+    if prompting == Prompting::Auto {
         // Carry counterpart provenance in the trace so non-interactive runs
         // (container smoke tests, CI, scripts) can still verify that the
         // installed pkg was correctly resolved across pkgname/replaces/provides.
-        // Without this the noconfirm path is opaque — show() never renders.
+        // Without this the auto path is opaque — show() never renders.
         // `?` (Debug) formats `Option<…>` as `Some(…)` / `None` so the absent
         // case is grep-distinguishable from a present-but-empty one.
         info!(
@@ -74,7 +104,7 @@ pub fn review(
             installed = ?counterpart.map(|c| c.pkgname),
             installed_version = ?counterpart.map(|c| c.version),
             via = ?counterpart.map(|c| c.via),
-            "auto-proceeding (noconfirm)"
+            "auto-proceeding (non-interactive)"
         );
         return Ok(Outcome::Approved);
     }
@@ -89,6 +119,7 @@ pub fn review(
     loop {
         match prompt_action(pkgbase, &actions)? {
             Action::Approve => return Ok(Outcome::Approved),
+            Action::ApproveAll => return Ok(Outcome::ApprovedAll),
             Action::ViewPkgbuild => show_pkgbuild(wt)?,
             Action::ViewDiff => show_diff(
                 mirror,
@@ -349,6 +380,8 @@ fn diff_command(
 enum Action {
     /// Include this pkgbase in the build batch.
     Approve,
+    /// Approve this pkgbase and every remaining one in the pass at once.
+    ApproveAll,
     /// Print the full PKGBUILD source.
     ViewPkgbuild,
     /// Show the full-context diff against the installed version's commit.
@@ -367,7 +400,8 @@ impl Action {
     /// the first non-space character the user types.
     const fn key(self) -> char {
         match self {
-            Self::Approve => 'a',
+            Self::Approve => 'y',
+            Self::ApproveAll => 'a',
             Self::ViewPkgbuild => 'p',
             Self::ViewDiff => 'd',
             Self::Edit => 'e',
@@ -376,10 +410,11 @@ impl Action {
         }
     }
 
-    /// The prompt label, with the hotkey parenthesized (`(a)pprove`).
+    /// The prompt label, with the hotkey parenthesized (`(y)es`).
     const fn label(self) -> &'static str {
         match self {
-            Self::Approve => "(a)pprove",
+            Self::Approve => "(y)es",
+            Self::ApproveAll => "(a)pprove all",
             Self::ViewPkgbuild => "view (p)kgbuild",
             Self::ViewDiff => "view full (d)iff",
             Self::Edit => "(e)dit",
@@ -394,7 +429,7 @@ impl Action {
 /// install/reinstall the initial view is already the whole PKGBUILD, so a
 /// full-context diff would be redundant.
 fn menu_actions(has_diff: bool) -> Vec<Action> {
-    let mut actions = vec![Action::Approve, Action::ViewPkgbuild];
+    let mut actions = vec![Action::Approve, Action::ApproveAll, Action::ViewPkgbuild];
     if has_diff {
         actions.push(Action::ViewDiff);
     }
@@ -603,6 +638,7 @@ mod tests {
             menu_actions(false),
             [
                 Action::Approve,
+                Action::ApproveAll,
                 Action::ViewPkgbuild,
                 Action::Edit,
                 Action::Skip,
@@ -617,6 +653,7 @@ mod tests {
             menu_actions(true),
             [
                 Action::Approve,
+                Action::ApproveAll,
                 Action::ViewPkgbuild,
                 Action::ViewDiff,
                 Action::Edit,
@@ -672,6 +709,17 @@ mod tests {
         assert_eq!(parse_action("d", &actions), Some(Action::ViewDiff));
         // A whole word still keys off its first letter.
         assert_eq!(parse_action("quit", &actions), Some(Action::Abort));
+    }
+
+    #[test]
+    fn parse_action_y_approves_and_a_approves_all() {
+        // `y` = approve this one; `a` = approve all remaining. (`a` used to be
+        // plain approve — the regression guard for the key remap.)
+        let actions = menu_actions(true);
+        assert_eq!(parse_action("y", &actions), Some(Action::Approve));
+        assert_eq!(parse_action("yes", &actions), Some(Action::Approve));
+        assert_eq!(parse_action("a", &actions), Some(Action::ApproveAll));
+        assert_eq!(parse_action("A\n", &actions), Some(Action::ApproveAll));
     }
 
     #[test]
