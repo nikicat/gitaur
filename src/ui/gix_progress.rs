@@ -11,6 +11,7 @@ use super::dim;
 use super::progress::{
     bar_bytes_streaming, bar_count, bar_sideband, promote_byte_bar, promote_count_bar, tick,
 };
+use crate::context;
 
 use gix::progress::prodash::progress::Step;
 use gix::progress::{Count as GixCount, Id, MessageLevel, Unit};
@@ -78,7 +79,7 @@ impl NetMeter {
         let bar = multi.add(bar_bytes_streaming("network"));
         tick(&bar);
         let stop = Arc::new(AtomicBool::new(false));
-        let handle = std::thread::spawn({
+        let handle = context::spawn({
             let counter = Arc::clone(&counter);
             let bar = bar.clone();
             let stop = Arc::clone(&stop);

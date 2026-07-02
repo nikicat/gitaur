@@ -1,6 +1,7 @@
 //! Spawn `pacman` (with sudo gating) for pass-through and `-U` installs.
 
 use crate::config::Config;
+use crate::context;
 use crate::error::{Error, Result};
 use crate::names::{PkgName, RepoName};
 use crate::pacman::alpm_db;
@@ -153,8 +154,8 @@ fn exec_pacman_teed(program: &str, spawn_args: &[String]) -> Result<u8> {
         .spawn()?;
     let out_pipe = child.stdout.take().expect("stdout piped above");
     let err_pipe = child.stderr.take().expect("stderr piped above");
-    let tee_out = std::thread::spawn(move || tee_pipe(out_pipe, std::io::stdout()));
-    let tee_err = std::thread::spawn(move || tee_pipe(err_pipe, std::io::stderr()));
+    let tee_out = context::spawn(move || tee_pipe(out_pipe, std::io::stdout()));
+    let tee_err = context::spawn(move || tee_pipe(err_pipe, std::io::stderr()));
     let status = child.wait()?;
     // A panicked tee thread shouldn't mask pacman's exit; treat it as a
     // lost-capture and keep going so the caller still gets the code.

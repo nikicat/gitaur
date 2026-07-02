@@ -17,6 +17,7 @@
 //! visibly rather than silently — surface for a future fix.
 
 use crate::config::Config;
+use crate::context;
 use crate::error::{Error, Result};
 use console::Term;
 use nix::sys::signal::{Signal, killpg};
@@ -30,7 +31,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
 use tracing::{debug, info, instrument, warn};
 
 /// Run `makepkg` in `worktree` with the configured args + env, plus any
@@ -103,7 +103,7 @@ pub fn run(cfg: &Config, worktree: &Path, extra_args: &[&str], fresh_log: bool) 
     let interrupted = AtomicBool::new(false);
 
     let log = Mutex::new(log_file);
-    let status = thread::scope(|s| -> Result<ExitStatus> {
+    let status = context::scope(|s| -> Result<ExitStatus> {
         s.spawn(|| tee(reader, std::io::stdout(), &log));
         // Watcher: blocks on the signal pipe (no polling). On Ctrl+C it notes
         // the interrupt and forwards SIGINT to makepkg's process group, then

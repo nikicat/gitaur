@@ -23,6 +23,8 @@ fn main() {
     let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind");
     eprintln!("tarpit listening on 127.0.0.1:{port}");
     for stream in listener.incoming().flatten() {
+        // Standalone test tarpit — no gitaur thread-locals to propagate.
+        #[allow(clippy::disallowed_methods)]
         thread::spawn(move || {
             // Drain headers so the server reaches the "respond" phase before
             // stalling — that's where curl's lowSpeedTime applies. Without

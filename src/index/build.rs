@@ -1,6 +1,7 @@
 //! Parallel construction of [`IndexFile`] from a freshly-cloned mirror.
 
 use crate::config::Config;
+use crate::context;
 use crate::error::{Error, Result};
 use crate::index::schema::{IndexEntry, IndexFile};
 use crate::index::srcinfo;
@@ -39,9 +40,10 @@ pub fn full_build(cfg: &Config, mirror: &MirrorRepo) -> Result<IndexFile> {
     let refs: Vec<(String, ObjectId)> = collect_branches(&mirror.repo)?;
     info!(branches = refs.len(), "starting parallel index build");
 
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(cfg.index_threads)
-        .build()
+    // `context::thread_pool` so each worker inherits the caller's context
+    // (state-dir override, run options); a bare rayon pool worker would start
+    // from the defaults.
+    let pool = context::thread_pool(cfg.index_threads)
         .map_err(|e| Error::other(format!("rayon pool: {e}")))?;
 
     let pb = ui::bar_count(refs.len() as u64, "pkgs");

@@ -4,3 +4,24 @@
 # absolute-path prefixes — everything else must be brought in via `use`.
 absolute-paths-allowed-crates = ["std", "core", "alloc"]
 absolute-paths-max-segments = 2
+
+# Worker-spawn discipline (see src/context.rs). A raw spawn/join/pool doesn't
+# carry the caller's thread-locals onto the worker — reopening the test-isolation
+# escape. Force the `context::{spawn,scope,join,thread_pool}` wrappers; context.rs
+# itself allows the raw primitives it wraps. (A bare `thread_local!` is the other
+# half of the escape — that's guarded by the `no_bare_thread_local` test in
+# context.rs, since clippy's disallowed_macros resolves its level at the macro
+# call site, which would force weakening allows onto the very files that declare
+# TLS.)
+disallowed-methods = [
+  { path = "std::thread::spawn", reason = "use context::spawn so the thread inherits the caller's context" },
+  { path = "std::thread::scope", reason = "use context::scope so scoped threads inherit the caller's context" },
+  { path = "std::thread::Scope::spawn", reason = "use context::scope's Scope::spawn so scoped threads inherit the caller's context" },
+  { path = "rayon::join", reason = "use context::join so stolen workers inherit the caller's context" },
+]
+# A raw `ThreadPoolBuilder` yields workers with default TLS; `context::thread_pool`
+# installs the caller's context on each. (par_iter run inside such a pool then
+# inherits it; keep par_iter within a context::thread_pool, not the global pool.)
+disallowed-types = [
+  { path = "rayon::ThreadPoolBuilder", reason = "use context::thread_pool so pool workers inherit the caller's context" },
+]

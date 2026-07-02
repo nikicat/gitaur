@@ -81,6 +81,12 @@ fn bootstrapped_with_corrupt_index() -> (TempDir, ScopedStateRoot, Config) {
     let upstream = build_upstream_bare(td.path(), FIXTURE_BRANCHES);
     let mut cfg = default_config();
     cfg.mirror_url = format!("file://{}", upstream.display());
+    // This test is about AUR-index recovery, not the official-repo sync. Leaving
+    // it on makes `cmd_refresh` spawn `refresh_sync_db`, which — now that the
+    // worker correctly inherits this test's tempdir (context propagation) rather
+    // than escaping to the real synced db — would do a real network `syncdbs`
+    // download into an empty dir on every run. Off keeps the test hermetic.
+    cfg.check_repo_updates = false;
 
     mirror::cmd_refresh(&cfg, false).expect("initial bootstrap must succeed");
     let idx_path = paths::index_path();
@@ -189,6 +195,9 @@ fn cmd_refresh_rebuilds_when_existing_index_is_unreadable() {
 
     let mut cfg = default_config();
     cfg.mirror_url = format!("file://{}", upstream.display());
+    // Hermetic: don't sync official repos over the network (see the note in
+    // `bootstrapped_with_corrupt_index`).
+    cfg.check_repo_updates = false;
 
     // First refresh: bootstraps the state_dir/aur clone and writes a fresh
     // index. This sets up `incremental_fetch`'s refspec config for the

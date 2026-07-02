@@ -176,6 +176,9 @@ fn pump_for(parser: &mut Parser, rx: &mpsc::Receiver<Vec<u8>>, dur: Duration) {
 
 fn spawn_reader(mut reader: Box<dyn Read + Send>) -> mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel();
+    // pty-harness is a standalone dev crate with no gitaur thread-locals to
+    // propagate, so the `context::spawn` rule (src/context.rs) doesn't apply.
+    #[allow(clippy::disallowed_methods)]
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         while let Ok(n) = reader.read(&mut buf) {

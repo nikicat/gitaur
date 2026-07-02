@@ -6,6 +6,7 @@
 //! directories, so a plain checkout is sufficient.
 
 use crate::config::Config;
+use crate::context;
 use crate::error::{Error, Result};
 use crate::git;
 use crate::index;
@@ -143,7 +144,7 @@ pub fn cmd_refresh(cfg: &Config, force_reclone: bool) -> Result<()> {
         // Scoped thread: the official-repo db sync (libalpm download) overlaps
         // the network-bound AUR fetch. It borrows `cfg`/`mp` for the scope and
         // draws its own rows into the shared display.
-        std::thread::scope(|s| {
+        context::scope(|s| {
             let repo = s.spawn(|| sync::refresh_sync_db(&mp));
             let aur = refresh_aur_mirror(cfg, force_reclone, &mp);
             report_repo_sync(repo.join());
@@ -251,7 +252,7 @@ fn refresh_aur_mirror(cfg: &Config, force_reclone: bool, mp: &MultiProgress) -> 
     // etc.) is **recovered from in-place** by falling back to a full rebuild
     // below — otherwise the user would be stuck in a loop where `-Sy` errors
     // out before it can rebuild.
-    let (updates, existing) = std::thread::scope(|s| {
+    let (updates, existing) = context::scope(|s| {
         let loader = s.spawn(|| {
             if !idx_path.exists() {
                 return None;
