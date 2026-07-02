@@ -108,6 +108,10 @@ anyhow = "1"
 thiserror = "2"
 dirs = "6"
 regex = "1"
+# Link-time distributed slice: every `context_local!` self-registers a
+# TLS propagator into `context::PROPAGATORS` so `context::Context` can carry
+# thread-locals into spawned/rayon workers without a central list to forget.
+linkme = "0.3"
 smallvec = { version = "1", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

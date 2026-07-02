@@ -5,7 +5,7 @@
 //! built without `--test`), so the module is unconditional `pub` with
 //! `#[doc(hidden)]` to keep it out of generated docs.
 
-use crate::paths::STATE_ROOT_OVERRIDE;
+use crate::paths::state_root;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -15,10 +15,11 @@ use std::process::Command;
 /// `pkg_worktree`, … — for the lifetime of the guard. Restores the
 /// previous value on drop, including the panic path.
 ///
-/// Backed by thread-local storage, so two tests on different runner threads
-/// can install independent overrides without colliding. Concurrent code
-/// spawned *within* a guarded scope (rayon workers, std threads) does NOT
-/// inherit the override — keep `paths::*` calls on the test thread.
+/// Backed by [`crate::paths::state_root`], a `context_local!`, so two tests on
+/// different runner threads install independent overrides without colliding,
+/// **and** concurrent work spawned through the `crate::context` wrappers
+/// (`context::scope`/`join`/`thread_pool`) inherits the override — the whole
+/// point of `context_local!`.
 pub struct ScopedStateRoot {
     previous: Option<PathBuf>,
 }
@@ -26,16 +27,14 @@ pub struct ScopedStateRoot {
 impl ScopedStateRoot {
     /// Install `root` as the active state root on the current thread.
     pub fn new(root: PathBuf) -> Self {
-        let previous = STATE_ROOT_OVERRIDE.with(|c| c.borrow_mut().replace(root));
+        let previous = state_root::replace(Some(root));
         Self { previous }
     }
 }
 
 impl Drop for ScopedStateRoot {
     fn drop(&mut self) {
-        STATE_ROOT_OVERRIDE.with(|c| {
-            *c.borrow_mut() = self.previous.take();
-        });
+        state_root::set(self.previous.take());
     }
 }
 

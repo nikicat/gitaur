@@ -10,13 +10,13 @@
 //! both render matches identically.
 
 use crate::config::Config;
+use crate::context;
 use crate::error::Result;
 use crate::index::{self, IndexEntry, secondary::Secondary};
 use crate::names::{NameMatch, PkgName, PkgTarget, RepoName, SearchTerm};
 use crate::pacman::alpm_db::{self, PacmanIndex, RepoHit};
 use crate::pacman::invoke::REPO_AUR;
 use crate::paths;
-use crate::runopts;
 use crate::ui;
 use crate::version::Version;
 
@@ -79,18 +79,18 @@ pub fn cmd_search_install(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
 
     // Repo + AUR searches are independent I/O — an alpm DB scan vs an index
     // mmap. Run them concurrently and merge below.
-    let (repo_res, aur_res) = rayon::join(
+    let (repo_res, aur_res) = context::join(
         || alpm_db::search_sync(terms),
-        // `propagate` so `load_or_resync` sees `--noresync` even when rayon
-        // runs this closure on a worker thread (its RunOpts TLS is otherwise
-        // the default).
-        runopts::propagate(|| -> Result<Option<index::IndexFile>> {
+        // `context::join` propagates the caller's context so `load_or_resync`
+        // sees `--noresync` and the right `state_dir()` even on the stolen
+        // worker thread.
+        || -> Result<Option<index::IndexFile>> {
             let path = paths::index_path();
             if !path.exists() {
                 return Ok(None);
             }
             Ok(Some(index::load_or_resync(cfg, &path)?))
-        }),
+        },
     );
     let repo_hits = repo_res?;
     let idx = aur_res?;

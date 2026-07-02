@@ -9,6 +9,7 @@
 //! `pkgver()`), which is the right thing — they're rebuilt on demand.
 
 use crate::config::Config;
+use crate::context;
 use crate::error::{Error, Result};
 use crate::index::secondary::Secondary;
 use crate::index::{self, IndexFile};
@@ -18,7 +19,6 @@ use crate::pacman::alpm_db::{self, PacmanIndex};
 use crate::pacman::invoke;
 use crate::paths;
 use crate::resolver::{self, PkgbasePlan, Plan};
-use crate::runopts;
 use crate::ui;
 use crate::version::Version;
 use std::collections::{HashMap, HashSet};
@@ -153,24 +153,22 @@ pub fn cmd_install(
 
     // Pacman snapshot + AUR index loaded concurrently. PacmanIndex iterates
     // every sync DB and the localdb (tens of ms on a typical system); the
-    // AUR mmap + rkyv deserialize is similar. rayon::join hides one behind
-    // the other.
-    let (pac_res, idx_res) = rayon::join(
+    // AUR mmap + rkyv deserialize is similar. `context::join` hides one behind
+    // the other and propagates the caller's context so `load_or_resync` sees
+    // `--noresync` and the right `state_dir()` even on the stolen worker.
+    let (pac_res, idx_res) = context::join(
         || -> Result<PacmanIndex> {
             let alpm = alpm_db::open()?;
             Ok(PacmanIndex::build(&alpm))
         },
-        // `propagate` so `load_or_resync` sees `--noresync` even when rayon
-        // runs this closure on a worker thread (its RunOpts TLS is otherwise
-        // the default).
-        runopts::propagate(|| -> Result<Option<(IndexFile, Secondary)>> {
+        || -> Result<Option<(IndexFile, Secondary)>> {
             if !idx_path.exists() {
                 return Ok(None);
             }
             let idx = index::load_or_resync(cfg, &idx_path)?;
             let by = Secondary::build(&idx);
             Ok(Some((idx, by)))
-        }),
+        },
     );
     let pac = pac_res?;
     let aur_loaded = idx_res?;

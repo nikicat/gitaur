@@ -9,12 +9,12 @@
 //! [`crate::cli::run`] / [`crate::cli::dispatch::dispatch`] lets the leaves
 //! read it directly.
 //!
-//! Backed by `thread_local!` — every `exec_pacman` call in this crate runs
-//! on the main thread (the only `rayon::join` site is index loading, which
-//! never spawns pacman), so a TLS is the right granularity. The pattern
-//! mirrors [`crate::paths::STATE_ROOT_OVERRIDE`] / [`crate::testing::ScopedStateRoot`].
+//! Backed by a [`context_local!`] so the flags reach code running on spawned /
+//! rayon workers too (e.g. the AUR-index load in `build::cmd_install`'s
+//! `context::join`, where `load_or_resync` must still see `--noresync`). The
+//! pattern mirrors [`crate::paths::state_root`].
 
-use std::cell::Cell;
+use crate::context_local;
 
 /// Snapshot of clap-derived flags that need to be visible deep in the call tree.
 #[derive(Debug, Clone, Copy, Default)]
@@ -31,38 +31,18 @@ pub struct RunOpts {
     pub noresync: bool,
 }
 
-thread_local! {
-    static RUN_OPTS: Cell<RunOpts> =
-        const { Cell::new(RunOpts { noconfirm: false, noresync: false }) };
+context_local! {
+    static opts: RunOpts = RunOpts { noconfirm: false, noresync: false };
 }
 
 /// Install `opts` for the current thread. Last writer wins; there's no stack.
-pub fn set(opts: RunOpts) {
-    RUN_OPTS.with(|c| c.set(opts));
+pub fn set(o: RunOpts) {
+    opts::set(o);
 }
 
 /// Snapshot of the active options for the current thread.
 pub fn get() -> RunOpts {
-    RUN_OPTS.with(Cell::get)
-}
-
-/// Wrap `f` so it runs with the *calling* thread's options installed.
-///
-/// `rayon::join` may hand a closure to another worker thread, whose [`RunOpts`]
-/// TLS is still the default — so [`noresync`] / [`noconfirm`] read inside the
-/// join would miss flags that [`set`] installed on the main thread. Wrapping
-/// the worker-bound closure copies the snapshot across first. Options are
-/// process-constant (installed once from argv in [`crate::cli::run`]), so
-/// leaving the value on a pooled worker after `f` returns is harmless.
-pub fn propagate<F, R>(f: F) -> impl FnOnce() -> R
-where
-    F: FnOnce() -> R,
-{
-    let opts = get();
-    move || {
-        set(opts);
-        f()
-    }
+    opts::get()
 }
 
 /// `--noconfirm` shorthand — the only field most callers care about.
@@ -122,25 +102,6 @@ mod tests {
         assert!(!argv_has_noconfirm(&["-S".into(), "foo".into()]));
         // Substring matches don't count — must be the exact token.
         assert!(!argv_has_noconfirm(&["--noconfirm=true".into()]));
-    }
-
-    #[test]
-    fn propagate_carries_opts_into_spawned_thread() {
-        // A freshly spawned thread starts from the default TLS; `propagate`
-        // must copy the caller's snapshot across the thread boundary (the
-        // rayon-worker case that `--noresync` depends on).
-        set(RunOpts {
-            noconfirm: false,
-            noresync: true,
-        });
-
-        let bare = std::thread::spawn(noresync).join().unwrap();
-        assert!(!bare, "a bare spawned thread should see default opts");
-
-        let carried = std::thread::spawn(propagate(noresync)).join().unwrap();
-        assert!(carried, "propagate must carry noresync into the new thread");
-
-        set(RunOpts::default());
     }
 
     #[test]
