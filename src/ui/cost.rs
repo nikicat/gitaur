@@ -9,7 +9,7 @@
 //!   build duration (the only persisted cost — sizes come straight from the
 //!   pacman DBs) and which rows already have artifacts on disk.
 //! - [`SizeEst`]/[`size_of`] — the download/footprint size cell (exact for repo
-//!   rows, `~`-estimated for AUR).
+//!   rows, estimated from the installed footprint for AUR).
 //! - [`TimeEst`] — the build-time cell, plus [`built_tag`], the trailing
 //!   `built` marker.
 
@@ -48,7 +48,7 @@ pub struct PreviewMetrics {
 impl PreviewMetrics {
     /// Empty overlay — used by tests, the single-shot `-Syu` picker (which has
     /// no loop session), and the upgrade loop when the metrics store fails to
-    /// open (every AUR row then renders `~?` for time and no `built` tag).
+    /// open (every AUR row then renders `?` for time and no `built` tag).
     pub fn empty() -> Self {
         Self::default()
     }
@@ -57,47 +57,47 @@ impl PreviewMetrics {
 /// A change-set / picker row's build-time figure.
 ///
 /// AUR roots and AUR build deps with a recorded prior duration become
-/// [`Self::Estimate`] (`~Xm Ys`). AUR rows the store has never seen are
-/// [`Self::Unknown`] (`~?`). Repo rows are [`Self::None`] — they don't build at
-/// all, so the cell renders empty rather than `~?` (which would imply a missing
+/// [`Self::Estimate`] (`Xm Ys`). AUR rows the store has never seen are
+/// [`Self::Unknown`] (`?`). Repo rows are [`Self::None`] — they don't build at
+/// all, so the cell renders empty rather than `?` (which would imply a missing
 /// measurement).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TimeEst {
-    Estimate(u64),
+    Estimate(Duration),
     Unknown,
     None,
 }
 
 impl TimeEst {
-    /// Seconds this row contributes to the batch total (0 when unknown or not
-    /// applicable).
-    pub(super) const fn secs(self) -> u64 {
+    /// The duration this row contributes to a batch total (zero when unknown or
+    /// not applicable).
+    pub(super) const fn contribution(self) -> Duration {
         match self {
-            Self::Estimate(n) => n,
-            Self::Unknown | Self::None => 0,
+            Self::Estimate(d) => d,
+            Self::Unknown | Self::None => Duration::ZERO,
         }
     }
 
-    /// Whether the figure makes the build-time total an approximate lower
-    /// bound. Both `Estimate` (a prediction) and `Unknown` (it under-counts)
-    /// flag the total approximate; `None` is "not applicable" and doesn't
-    /// affect the total's accuracy.
-    pub(super) const fn approximate(self) -> bool {
-        matches!(self, Self::Estimate(_) | Self::Unknown)
-    }
-
     /// Whether this row participates in the build-time total at all. Used to
-    /// suppress the trailing `~Xm Ys build` term on pure-repo batches.
+    /// suppress the trailing `Xm Ys build` term on pure-repo batches.
     pub(super) const fn applicable(self) -> bool {
         !matches!(self, Self::None)
+    }
+
+    /// Whether this row contributes a real measurement to the total (vs. an
+    /// `Unknown` that only under-counts, or a `None` that doesn't build). A
+    /// total with no measured row at all collapses to [`Self::Unknown`] and
+    /// renders `?` rather than a bogus `0s` — see `batch_time_total`.
+    pub(super) const fn measured(self) -> bool {
+        matches!(self, Self::Estimate(_))
     }
 
     /// Plain canonical cell text — what column widths are measured from.
     /// [`Self::None`] returns empty so a padded column collapses neatly.
     pub(super) fn render(self) -> String {
         match self {
-            Self::Estimate(n) => format!("~{}", human_duration(Duration::from_secs(n))),
-            Self::Unknown => "~?".to_owned(),
+            Self::Estimate(d) => human_duration(d),
+            Self::Unknown => "?".to_owned(),
             Self::None => String::new(),
         }
     }
@@ -105,7 +105,7 @@ impl TimeEst {
     /// Whether the rendered cell should be passed through [`super::dim`]: only
     /// when the user can see styling (`paint` is colored), only when the figure
     /// is [`Fade::Faded`] (stale or already built), and only on a real
-    /// `Estimate` — dimming a `~?` Unknown would look like a render glitch, and
+    /// `Estimate` — dimming a `?` Unknown would look like a render glitch, and
     /// there's nothing to dim on `None`. Pulled out so the decision is testable
     /// without depending on `console`'s global TTY gate.
     pub(super) const fn should_dim(self, paint: Paint, fade: Fade) -> bool {
@@ -116,10 +116,11 @@ impl TimeEst {
 /// A package row's size figure — the size half of a cost cell.
 ///
 /// Repo rows are [`Self::Exact`] (the bytes pacman will download); AUR rows are
-/// an [`Self::Estimate`] from the installed version's on-disk size, rendered
-/// with a leading `~`; a row that was never installed is [`Self::Unknown`]
-/// (`~?`). Shared by the change-set preview and the search list so the size cell
-/// (and the stale-db / zero-size bugs it's had) is fixed in one place.
+/// an [`Self::Estimate`] from the installed version's on-disk size (rendered as
+/// the bare figure — the number is the information, no marker); a row that was
+/// never installed is [`Self::Unknown`] (`?`). Shared by the change-set preview
+/// and the search list so the size cell (and the stale-db / zero-size bugs it's
+/// had) is fixed in one place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SizeEst {
     Exact(u64),
@@ -136,19 +137,12 @@ impl SizeEst {
         }
     }
 
-    /// Whether the figure is approximate — any non-exact row makes a batch
-    /// total a `~` lower bound.
-    pub(super) const fn approximate(self) -> bool {
-        !matches!(self, Self::Exact(_))
-    }
-
-    /// The cell text: bare for exact, `~`-prefixed for an estimate, `~?` when
-    /// unknown.
+    /// The cell text: the byte figure for exact or estimate alike (an estimate
+    /// carries no marker — the number is the information), `?` when unknown.
     pub(super) fn render(self) -> String {
         match self {
-            Self::Exact(n) => human_bytes(n),
-            Self::Estimate(n) => format!("~{}", human_bytes(n)),
-            Self::Unknown => "~?".to_owned(),
+            Self::Exact(n) | Self::Estimate(n) => human_bytes(n),
+            Self::Unknown => "?".to_owned(),
         }
     }
 }
@@ -196,7 +190,7 @@ impl From<bool> for Fade {
 /// `stale` dims the cell (the measurement is old enough to distrust); `built`
 /// means the artifact is already on disk, so the rebuild cost is moot — the
 /// cell is dimmed and an `Unknown` collapses to empty (the [`built_suffix`] tag
-/// carries the signal instead of a misleading `~?`).
+/// carries the signal instead of a misleading `?`).
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RowCost {
     pub(super) time: TimeEst,
@@ -258,7 +252,9 @@ pub(super) fn cost_of(repo: &RepoName, name: &PkgName, metrics: &PreviewMetrics)
         .root_build_secs
         .get(name)
         .copied()
-        .map_or(TimeEst::Unknown, TimeEst::Estimate);
+        .map_or(TimeEst::Unknown, |s| {
+            TimeEst::Estimate(Duration::from_secs(s))
+        });
     RowCost::aur(
         time,
         metrics.stale.contains(name),
@@ -300,14 +296,20 @@ pub(super) fn built_suffix(cost: RowCost, paint: Paint) -> String {
 mod tests {
     use super::*;
 
+    /// A build duration from a plain seconds count — the store's native unit.
+    fn dur(secs: u64) -> Duration {
+        Duration::from_secs(secs)
+    }
+
     /// `TimeEst` renders the three meaningful cells; `None` collapses to empty
     /// so the column padding does the right thing for repo rows.
     #[test]
     fn time_est_renders_each_variant() {
-        assert_eq!(TimeEst::Estimate(45).render(), "~45s");
-        assert_eq!(TimeEst::Estimate(125).render(), "~2m 5s");
-        assert_eq!(TimeEst::Estimate(3_725).render(), "~1h 2m");
-        assert_eq!(TimeEst::Unknown.render(), "~?");
+        let est = |secs| TimeEst::Estimate(dur(secs));
+        assert_eq!(est(45).render(), "45s");
+        assert_eq!(est(125).render(), "2m 5s");
+        assert_eq!(est(3_725).render(), "1h 2m");
+        assert_eq!(TimeEst::Unknown.render(), "?");
         assert_eq!(TimeEst::None.render(), "");
     }
 
@@ -316,7 +318,7 @@ mod tests {
     /// suppress it.
     #[test]
     fn time_est_should_dim_truth_table() {
-        let est = TimeEst::Estimate(60);
+        let est = TimeEst::Estimate(dur(60));
         assert!(est.should_dim(Paint::Colored, Fade::Faded));
         assert!(
             !est.should_dim(Paint::Plain, Fade::Faded),
@@ -328,7 +330,7 @@ mod tests {
         );
         assert!(
             !TimeEst::Unknown.should_dim(Paint::Colored, Fade::Faded),
-            "Unknown must never dim — `~?` dimmed looks like a render glitch",
+            "Unknown must never dim — `?` dimmed looks like a render glitch",
         );
         assert!(
             !TimeEst::None.should_dim(Paint::Colored, Fade::Faded),
@@ -344,15 +346,15 @@ mod tests {
         let built_unknown = RowCost::aur(TimeEst::Unknown, false, true);
         assert_eq!(built_unknown.cell(Paint::Plain), "");
         assert_eq!(built_unknown.visible_width().cells(), 0);
-        // Not built: the Unknown row still shows `~?`.
+        // Not built: the Unknown row still shows `?`.
         let unknown = RowCost::aur(TimeEst::Unknown, false, false);
-        assert_eq!(unknown.cell(Paint::Plain), "~?");
-        assert_eq!(unknown.visible_width().cells(), 2);
+        assert_eq!(unknown.cell(Paint::Plain), "?");
+        assert_eq!(unknown.visible_width().cells(), 1);
         // A built estimate keeps its plain text (dimming only adds ANSI, which
         // the plain-paint path skips).
         assert_eq!(
-            RowCost::aur(TimeEst::Estimate(60), false, true).cell(Paint::Plain),
-            "~1m 0s"
+            RowCost::aur(TimeEst::Estimate(dur(60)), false, true).cell(Paint::Plain),
+            "1m 0s"
         );
     }
 
@@ -375,8 +377,8 @@ mod tests {
     #[test]
     fn size_est_renders_each_variant() {
         assert_eq!(SizeEst::Exact(1024).render(), "1.00 KiB");
-        assert_eq!(SizeEst::Estimate(1024).render(), "~1.00 KiB");
-        assert_eq!(SizeEst::Unknown.render(), "~?");
+        assert_eq!(SizeEst::Estimate(1024).render(), "1.00 KiB");
+        assert_eq!(SizeEst::Unknown.render(), "?");
     }
 
     /// A root's size source is chosen by repo: AUR rows estimate from localdb
@@ -408,7 +410,7 @@ mod tests {
     /// Regression guard for the stale-db size bug: a repo row whose pkgname is
     /// present with a `download_size` of 0 (libalpm's answer for an already-cached
     /// archive) is `Exact(0)` → renders `0 B`, distinct from a *missing* pkgname,
-    /// which is `Unknown` → `~?`.
+    /// which is `Unknown` → `?`.
     #[test]
     fn repo_zero_size_is_exact_not_missing() {
         let mut pac = PacmanIndex::default();
@@ -418,6 +420,6 @@ mod tests {
         assert_eq!(cached.render(), "0 B");
         let missing = size_of(&"core".into(), &"absent".into(), &pac);
         assert_eq!(missing, SizeEst::Unknown);
-        assert_eq!(missing.render(), "~?");
+        assert_eq!(missing.render(), "?");
     }
 }

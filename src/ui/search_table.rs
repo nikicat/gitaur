@@ -290,10 +290,11 @@ mod tests {
             lines[2]
         );
 
-        // Size cell: exact for the repo row, ~estimate for the installed AUR row.
+        // Size cell: exact for the repo row, estimated (unmarked) for the
+        // installed AUR row.
         assert!(lines[2].contains("1.00 KiB"), "repo size: {:?}", lines[2]);
         assert!(
-            lines[0].contains("~2.00 KiB"),
+            lines[0].contains("2.00 KiB"),
             "aur est size: {:?}",
             lines[0]
         );
@@ -317,7 +318,7 @@ mod tests {
         )];
         let table = search_table(&rows, &PacmanIndex::default(), &metrics);
         assert!(
-            !table.lines()[0].contains("~3m"),
+            !table.lines()[0].contains("3m"),
             "not-installed row must not show a build estimate: {:?}",
             table.lines()[0]
         );
@@ -338,7 +339,7 @@ mod tests {
         )];
         let table = search_table(&rows, &PacmanIndex::default(), &metrics);
         assert!(
-            table.lines()[0].contains("~3m 20s"),
+            table.lines()[0].contains("3m 20s"),
             "installed AUR row shows its build estimate: {:?}",
             table.lines()[0]
         );

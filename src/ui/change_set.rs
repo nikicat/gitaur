@@ -10,13 +10,14 @@
 //! stream and the layout is unit-testable.
 //!
 //! Two cost figures live here:
-//! - **Size** — exact `download_size` from the syncdb for repo rows;
-//!   `~`-estimated `isize` from localdb for AUR rows; `~?` for never-installed
-//!   pull-ins.
-//! - **Build time** — `~Xm Ys` from the cross-session `MetricsStore` for AUR
-//!   rows that have ever been built before; `~?` for first-time builds the
+//! - **Size** — exact `download_size` from the syncdb for repo rows; the `isize`
+//!   from localdb (rendered as the bare figure) for AUR rows; `?` for
+//!   never-installed pull-ins.
+//! - **Build time** — `Xm Ys` from the cross-session `MetricsStore` for AUR
+//!   rows that have ever been built before; `?` for first-time builds the
 //!   store can't predict; dimmed when the recorded duration is old enough that
-//!   it's a shaky predictor.
+//!   it's a shaky predictor. A *summed* total that under-counts (an unknown row
+//!   contributed 0) is a lower bound, prefixed `>`.
 
 use super::cost::{
     PreviewMetrics, RowCost, SizeEst, TimeEst, built_suffix, cost_of, size_of, size_of_repo_dep,
@@ -242,8 +243,9 @@ fn removal_lines(removals: &[PkgName], paint: Paint) -> Table {
 /// The one-line cost summary `apply` gates on.
 ///
 /// `show` is where the user looks; `apply` no longer redraws the table. E.g.
-/// `3 install, +2 deps, 1 remove · ~3.07 GiB · ~22m build`. The deps / remove /
-/// build terms are omitted when their count is zero.
+/// `3 install, +2 deps, 1 remove · 3.07 GiB · 22m build`. The deps / remove /
+/// build terms are omitted when their count is zero. A total that under-counts
+/// because some row's figure is unknown is a lower bound, prefixed `>`.
 pub fn cost_summary(
     roots: &[TxnRoot],
     repo_deps: &[PkgName],
@@ -265,17 +267,51 @@ pub fn cost_summary(
         parts.push(format!("{} remove", removals.len()));
     }
     let mut line = parts.join(", ");
-    write!(line, " · {}{}", size.precision.prefix(), size.size.render()).ok();
-    if matches!(time.term, BuildTerm::Present) {
-        write!(
-            line,
-            " · {}{} build",
-            time.precision.prefix(),
-            human_duration(time.time),
-        )
-        .ok();
+    write!(line, " · {}", size.render()).ok();
+    if let Some(build) = build_term(time) {
+        write!(line, " · {build}").ok();
     }
     line
+}
+
+/// The trailing ` build` figure for a batch total, or `None` for a pure-repo
+/// batch that carries no build-time term. An all-unknown total renders
+/// `? build` — never a bogus `0s build`, the never-built case; a total that
+/// under-counts because an unknown row is in the mix is a lower bound
+/// (`>22m build`).
+fn build_term(time: TimeTotal) -> Option<String> {
+    match time {
+        TimeTotal::None => None,
+        TimeTotal::Unknown => Some("? build".to_owned()),
+        TimeTotal::Measured { total, bound } => {
+            Some(format!("{}{} build", bound.marker(), human_duration(total)))
+        }
+    }
+}
+
+/// Whether a summed figure is exact, or a lower bound because a row with an
+/// unknown figure contributed 0 to the sum — so the true total is *greater
+/// than* what's shown. Renders the leading `>` a lower-bound total carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bound {
+    Exact,
+    Lower,
+}
+
+impl Bound {
+    /// The `>` prefix a lower-bound total carries, empty for an exact one.
+    const fn marker(self) -> &'static str {
+        match self {
+            Self::Exact => "",
+            Self::Lower => ">",
+        }
+    }
+}
+
+impl From<bool> for Bound {
+    fn from(lower: bool) -> Self {
+        if lower { Self::Lower } else { Self::Exact }
+    }
 }
 
 /// The per-row size + build-time figures for a change set, computed once and
@@ -330,7 +366,7 @@ fn figures(
             .collect(),
         repo_dep_sizes: repo_deps.iter().map(|n| size_of_repo_dep(n, pac)).collect(),
         // Pulled-in AUR deps are unsatisfied builds — not yet installed — so
-        // their footprint is unknown (`~?`).
+        // their footprint is unknown (`?`).
         aur_dep_sizes: vec![SizeEst::Unknown; aur_deps.len()],
         aur_dep_costs: aur_deps
             .iter()
@@ -343,21 +379,11 @@ fn figures(
 fn total_line(fig: &Figures) -> String {
     let size = fig.size_total();
     let time = fig.time_total();
-    let mut line = format!(
-        "-> total  {}{}",
-        size.precision.prefix(),
-        size.size.render()
-    );
+    let mut line = format!("-> total  {}", size.render());
     // The build-time term joins only when the batch has at least one AUR row —
-    // a pure-repo batch doesn't need a `0s build` tail.
-    if matches!(time.term, BuildTerm::Present) {
-        write!(
-            line,
-            "   {}{} build",
-            time.precision.prefix(),
-            human_duration(time.time),
-        )
-        .ok();
+    // a pure-repo batch doesn't need a build tail.
+    if let Some(build) = build_term(time) {
+        write!(line, "   {build}").ok();
     }
     line
 }
@@ -402,76 +428,47 @@ impl Bytes {
     }
 }
 
-/// Whether a summed figure is exact, or an approximate lower bound because some
-/// row was an estimate / unknown. Replaces a bare `approx: bool`; supplies the
-/// leading `~` on the rendered total.
+/// The summed download/footprint size of a change set. A sum can under-count —
+/// an `Unknown` row (a never-installed AUR pkg) contributes 0 but really adds
+/// more — so a total with any unknown in the mix is a [`Bound::Lower`] bound,
+/// rendered `>`. An all-unknown total has no figure at all and renders `?`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Precision {
-    Exact,
-    Approximate,
+enum SizeTotal {
+    /// Every contributing row was `Unknown` — no figure, renders `?`.
+    Unknown,
+    /// At least one row carried a size; `bound` is `Lower` if an unknown row is
+    /// also in the mix.
+    Known { total: Bytes, bound: Bound },
 }
 
-impl Precision {
-    /// The `~` (or empty) prefix the rendered total carries.
-    const fn prefix(self) -> &'static str {
+impl SizeTotal {
+    fn render(self) -> String {
         match self {
-            Self::Exact => "",
-            Self::Approximate => "~",
+            Self::Unknown => "?".to_owned(),
+            Self::Known { total, bound } => format!("{}{}", bound.marker(), total.render()),
         }
     }
 }
 
-impl From<bool> for Precision {
-    fn from(approximate: bool) -> Self {
-        if approximate {
-            Self::Approximate
-        } else {
-            Self::Exact
-        }
-    }
-}
-
-/// Whether a batch contains any buildable (AUR) row — gates the trailing
-/// build-time term, so a pure-repo batch shows just the size total.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BuildTerm {
-    Absent,
-    Present,
-}
-
-impl From<bool> for BuildTerm {
-    fn from(any: bool) -> Self {
-        if any { Self::Present } else { Self::Absent }
-    }
-}
-
-/// The summed download/footprint size of a change set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SizeTotal {
-    size: Bytes,
-    precision: Precision,
-}
-
-/// The summed build time of a change set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TimeTotal {
-    time: Duration,
-    precision: Precision,
-    /// Whether the build-time term applies at all (any AUR row present).
-    term: BuildTerm,
-}
-
-/// Sum a change set's size figures.
+/// Sum a change set's size figures. `Unknown` when every row is unknown;
+/// otherwise `Known` with the summed bytes, flagged a lower bound the moment an
+/// unknown row (contributing 0) is in the mix.
 fn batch_size_total(sizes: impl IntoIterator<Item = SizeEst>) -> SizeTotal {
-    let mut size = Bytes::default();
-    let mut approx = false;
+    let mut total = Bytes::default();
+    let mut known = false;
+    let mut any_unknown = false;
     for s in sizes {
-        size = size.saturating_add(Bytes(s.bytes()));
-        approx |= s.approximate();
+        total = total.saturating_add(Bytes(s.bytes()));
+        known |= !matches!(s, SizeEst::Unknown);
+        any_unknown |= matches!(s, SizeEst::Unknown);
     }
-    SizeTotal {
-        size,
-        precision: approx.into(),
+    if known {
+        SizeTotal::Known {
+            total,
+            bound: any_unknown.into(),
+        }
+    } else {
+        SizeTotal::Unknown
     }
 }
 
@@ -483,24 +480,47 @@ fn cost_of_aur_dep(pb: &PkgBase, metrics: &PreviewMetrics) -> RowCost {
         .dep_build_secs
         .get(pb)
         .copied()
-        .map_or(TimeEst::Unknown, TimeEst::Estimate);
+        .map_or(TimeEst::Unknown, |s| {
+            TimeEst::Estimate(Duration::from_secs(s))
+        });
     RowCost::aur(time, false, metrics.built_deps.contains(pb))
 }
 
-/// Sum a change set's build-time figures.
+/// The summed build time of a change set. Unlike a per-row [`TimeEst`], a *sum*
+/// can be a lower bound: some rows measured, others `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimeTotal {
+    /// Pure-repo batch — no build-time term at all.
+    None,
+    /// Builds, but nothing was ever measured — renders `?`.
+    Unknown,
+    /// At least one measured row; `bound` is `Lower` when an `Unknown` row is
+    /// also in the mix, so the sum under-counts (`>22m` vs `22m`).
+    Measured { total: Duration, bound: Bound },
+}
+
+/// Sum a change set's build-time figures. `Measured` once any row carries a real
+/// duration (a lower bound if an unknown row is mixed in); `Unknown` when the
+/// batch builds but nothing was measured (renders `?`, never a bogus `0s`);
+/// `None` for a pure-repo batch (no build-time term).
 fn batch_time_total(times: impl IntoIterator<Item = TimeEst>) -> TimeTotal {
-    let mut secs = 0u64;
-    let mut approx = false;
-    let mut any = false;
+    let mut total = Duration::ZERO;
+    let mut measured = false;
+    let mut applicable = false;
+    let mut any_unknown = false;
     for t in times {
-        secs = secs.saturating_add(t.secs());
-        approx |= t.approximate();
-        any |= t.applicable();
+        total = total.saturating_add(t.contribution());
+        measured |= t.measured();
+        applicable |= t.applicable();
+        any_unknown |= matches!(t, TimeEst::Unknown);
     }
-    TimeTotal {
-        time: Duration::from_secs(secs),
-        precision: approx.into(),
-        term: any.into(),
+    match (measured, applicable) {
+        (true, _) => TimeTotal::Measured {
+            total,
+            bound: any_unknown.into(),
+        },
+        (false, true) => TimeTotal::Unknown,
+        (false, false) => TimeTotal::None,
     }
 }
 
@@ -519,12 +539,18 @@ mod tests {
         }
     }
 
-    /// Each `SizeEst` variant renders its expected cell.
+    /// A build duration from a plain seconds count — the store's native unit.
+    fn dur(secs: u64) -> Duration {
+        Duration::from_secs(secs)
+    }
+
+    /// Each `SizeEst` variant renders its expected cell (no `~` prefix — an
+    /// estimate reads the same as an exact figure; unknown is a bare `?`).
     #[test]
     fn size_est_renders_each_variant() {
         assert_eq!(SizeEst::Exact(1024).render(), "1.00 KiB");
-        assert_eq!(SizeEst::Estimate(1024).render(), "~1.00 KiB");
-        assert_eq!(SizeEst::Unknown.render(), "~?");
+        assert_eq!(SizeEst::Estimate(1024).render(), "1.00 KiB");
+        assert_eq!(SizeEst::Unknown.render(), "?");
     }
 
     /// A root's size source is chosen by repo: AUR rows estimate from localdb
@@ -556,7 +582,7 @@ mod tests {
     /// Regression guard for the stale-db size bug: a repo row whose pkgname is
     /// present with a `download_size` of 0 (libalpm's answer for an already-cached
     /// archive) is `Exact(0)` → renders `0 B`, distinct from a *missing* pkgname,
-    /// which is `Unknown` → `~?`.
+    /// which is `Unknown` → `?`.
     #[test]
     fn repo_zero_size_is_exact_not_missing() {
         let mut pac = PacmanIndex::default();
@@ -566,28 +592,42 @@ mod tests {
         assert_eq!(cached.render(), "0 B");
         let missing = size_of(&"core".into(), &"absent".into(), &pac);
         assert_eq!(missing, SizeEst::Unknown);
-        assert_eq!(missing.render(), "~?");
+        assert_eq!(missing.render(), "?");
     }
 
-    /// The size total sums every row's bytes and flags itself approximate the
-    /// moment a non-exact row (estimate or unknown) is in the mix.
+    /// The size total sums bytes; an estimate reads as an exact total (no `~`),
+    /// but an `Unknown` row makes the total a lower bound (`>`), and an
+    /// all-unknown total has no figure (`?`).
     #[test]
-    fn batch_size_total_sums_and_flags_approximate() {
-        let exact = batch_size_total([SizeEst::Exact(100), SizeEst::Exact(200)]);
-        assert_eq!(exact.size, Bytes(300));
+    fn batch_size_total_sums_and_marks_lower_bound() {
         assert_eq!(
-            exact.precision,
-            Precision::Exact,
-            "all-exact total must not be marked approximate"
+            batch_size_total([SizeEst::Exact(100), SizeEst::Exact(200)]),
+            SizeTotal::Known {
+                total: Bytes(300),
+                bound: Bound::Exact,
+            },
+            "all-exact total is an exact figure"
         );
-
-        let mixed =
-            batch_size_total([SizeEst::Exact(100), SizeEst::Estimate(50), SizeEst::Unknown]);
-        assert_eq!(mixed.size, Bytes(150), "unknown contributes 0 to the total");
         assert_eq!(
-            mixed.precision,
-            Precision::Approximate,
-            "an estimate makes the total approximate"
+            batch_size_total([SizeEst::Exact(100), SizeEst::Estimate(50)]),
+            SizeTotal::Known {
+                total: Bytes(150),
+                bound: Bound::Exact,
+            },
+            "an estimate still reads as an exact total — no ~, no >"
+        );
+        assert_eq!(
+            batch_size_total([SizeEst::Exact(100), SizeEst::Unknown]),
+            SizeTotal::Known {
+                total: Bytes(100),
+                bound: Bound::Lower,
+            },
+            "an unknown row (0 bytes) makes the total a lower bound"
+        );
+        assert_eq!(
+            batch_size_total([SizeEst::Unknown, SizeEst::Unknown]),
+            SizeTotal::Unknown,
+            "every row unknown → no figure at all"
         );
     }
 
@@ -609,7 +649,7 @@ mod tests {
         assert!(!repo.built);
 
         let recorded = cost_of(&"aur".into(), &"paru-bin".into(), &metrics);
-        assert_eq!(recorded.time, TimeEst::Estimate(90));
+        assert_eq!(recorded.time, TimeEst::Estimate(dur(90)));
         assert!(recorded.built);
         assert!(!recorded.stale);
 
@@ -630,7 +670,7 @@ mod tests {
         metrics.built_deps.insert(PkgBase::from("nvidia-utils"));
 
         let recorded = cost_of_aur_dep(&PkgBase::from("nvidia-utils"), &metrics);
-        assert_eq!(recorded.time, TimeEst::Estimate(600));
+        assert_eq!(recorded.time, TimeEst::Estimate(dur(600)));
         assert!(recorded.built);
 
         let unknown = cost_of_aur_dep(&PkgBase::from("never-built"), &metrics);
@@ -638,33 +678,56 @@ mod tests {
         assert!(!unknown.built);
     }
 
-    /// The build-time total reports (sum, precision, build-term presence). `None`
-    /// doesn't make the term apply; either `Estimate` or `Unknown` marks the total
-    /// approximate.
+    /// The build-time total: `None` for a pure-repo batch (no term), `Unknown`
+    /// when the batch builds but nothing was measured (renders `?`, never `0s`),
+    /// `Measured` once any row carries a real duration — and a lower bound the
+    /// moment a measured row and an `Unknown` row share the batch.
     #[test]
-    fn batch_time_total_tallies_approx_and_applicability() {
-        let none = batch_time_total([TimeEst::None, TimeEst::None]);
-        assert_eq!(none.time, Duration::ZERO);
-        assert_eq!(none.precision, Precision::Exact);
+    fn batch_time_total_collapses_and_marks_lower_bound() {
+        let est = |secs| TimeEst::Estimate(dur(secs));
         assert_eq!(
-            none.term,
-            BuildTerm::Absent,
-            "pure-repo batch should suppress the build-time term"
+            batch_time_total([TimeEst::None, TimeEst::None]),
+            TimeTotal::None,
+            "pure-repo batch carries no build-time term"
         );
+        assert_eq!(
+            batch_time_total([TimeEst::Unknown, TimeEst::None]),
+            TimeTotal::Unknown,
+            "builds but nothing measured → Unknown (renders ?, not 0s)"
+        );
+        assert_eq!(
+            batch_time_total([est(60), est(120)]),
+            TimeTotal::Measured {
+                total: dur(180),
+                bound: Bound::Exact,
+            },
+            "all measured → an exact total"
+        );
+        assert_eq!(
+            batch_time_total([est(60), est(120), TimeEst::Unknown, TimeEst::None]),
+            TimeTotal::Measured {
+                total: dur(180),
+                bound: Bound::Lower,
+            },
+            "an unmeasured build makes the measured sum a lower bound"
+        );
+    }
 
-        let mixed = batch_time_total([
-            TimeEst::Estimate(60),
-            TimeEst::Estimate(120),
-            TimeEst::Unknown,
-            TimeEst::None,
-        ]);
-        assert_eq!(
-            mixed.time.as_secs(),
-            180,
-            "unknown contributes 0 but estimates sum"
+    /// Regression (docs/TODO.md): a single never-built AUR package has an
+    /// `Unknown` build time, so the summary must read `? build`, not the
+    /// misleading `0s build` that summed an unmeasured 0.
+    #[test]
+    fn cost_summary_never_built_shows_unknown_not_zero() {
+        let mut pac = PacmanIndex::default();
+        pac.installed_size
+            .insert("newthing".into(), 85 * 1024 * 1024);
+        let roots = vec![root("aur", "newthing", None, Some("1.0-1"))];
+        let s = cost_summary(&roots, &[], &[], &[], &pac, &PreviewMetrics::empty());
+        assert!(s.contains("? build"), "never-built shows `? build`: {s}");
+        assert!(
+            !s.contains("0s build"),
+            "must not fake a `0s build` figure: {s}"
         );
-        assert_eq!(mixed.precision, Precision::Approximate);
-        assert_eq!(mixed.term, BuildTerm::Present);
     }
 
     /// One numbered row per root, in the given order; a fresh install (no `old`)
@@ -730,8 +793,8 @@ mod tests {
     }
 
     /// The one-line summary lists counts + size, omits the deps/remove/build
-    /// terms when those are absent, and marks the size approximate when an AUR
-    /// estimate is in the mix.
+    /// terms when those are absent, and marks the size a lower bound (`>`) when
+    /// an unknown-size row is in the mix.
     #[test]
     fn cost_summary_counts_and_terms() {
         let mut pac = PacmanIndex::default();
@@ -747,6 +810,9 @@ mod tests {
         ];
         let mut metrics = PreviewMetrics::empty();
         metrics.root_build_secs.insert(PkgName::from("cuda"), 120);
+        // `gcc13` has no syncdb size → an Unknown row → the size total is a
+        // lower bound. `cuda` is measured (120s) with no unknown build in the
+        // mix → an exact `2m 0s build`.
         let s = cost_summary(
             &roots,
             &[PkgName::from("gcc13")],
@@ -755,7 +821,10 @@ mod tests {
             &pac,
             &metrics,
         );
-        assert!(s.starts_with("2 install, +1 dep, 1 remove · ~"), "{s}");
-        assert!(s.contains("build"), "AUR row adds a build term: {s}");
+        assert!(
+            s.starts_with("2 install, +1 dep, 1 remove · >"),
+            "unknown-size dep makes the size a lower bound: {s}"
+        );
+        assert!(s.ends_with("· 2m 0s build"), "measured build term: {s}");
     }
 }
