@@ -628,10 +628,13 @@ Each phase is independently shippable and leaves the flag CLI fully working.
      touching the cart. **`Hinter` DONE** — a completion-driven type-ahead
      (`ShellHelper::hint_for`, sharing the `Completer`'s sources): command
      positions (word 1 / `help <topic>`) always suggest the first matching verb;
-     package positions suggest only when a *single* candidate matches, so a guess
-     over the ~100k-name universe is shown only when it's certain. Dimmed via
-     `highlight_hint`; the editor's `ColorMode` follows the session's `--color`,
-     so `never` renders it plain. **`help <topic>` DONE** — `help <command>` prints a per-verb detail
+     package positions suggest the **longest common prefix** of all matching
+     names (the part every candidate agrees on, so it's certain even when the
+     full name is still ambiguous — `gtk-vnc*` from `gtk-vn` → `c`; a divergent
+     next char shows nothing). Over the sorted universe the common prefix is just
+     the first/last match's, found with two binary searches — no scan of the
+     matching range. Dimmed via `highlight_hint`; the editor's `ColorMode`
+     follows the session's `--color`, so `never` renders it plain. **`help <topic>` DONE** — `help <command>` prints a per-verb detail
      from the `TOPICS` table (aliases resolved through `command::parse`); a
      `every_verb_has_a_help_topic` test guards the table against verb drift.
      **`aur_approval` DONE** — a typed `Option<AurApproval>` config knob

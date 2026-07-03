@@ -137,23 +137,25 @@ impl ShellHelper {
     }
 
     /// The dimmed inline type-ahead hint for `line` with the cursor at `pos`:
-    /// the tail of a completion candidate for the word under the cursor.
+    /// the certain tail of what the user is typing under the cursor.
     ///
     /// Two policies, keyed on position (the [`arg_kind`] scoping the Tab
     /// completer already uses):
     /// - **command position** (word 1, or a `help <topic>` argument) — always
     ///   type-ahead the *first* matching verb, even when several match (`re` →
     ///   `move`, offering `remove`).
-    /// - **package position** (`add`/`drop`/… arguments) — hint *only when a
-    ///   single* candidate matches, so a guess over the ~100k-name universe is
-    ///   only ever shown when it's certain (`firefo` → `x`; `add a`, thousands
-    ///   deep, shows nothing).
+    /// - **package position** (`add`/`drop`/… arguments) — hint the **longest
+    ///   common prefix** of all matching names beyond what's typed: the part
+    ///   every candidate agrees on, so it's always correct even when the full
+    ///   name is still ambiguous. A single match extends to the whole name
+    ///   (`firefo` → `x`); two names sharing a stem extend to it (`asdzxc` +
+    ///   `asdqwe`, `a` → `sd`); and once the next character diverges (`asd`,
+    ///   `add a` thousands deep) there's nothing certain to add, so no hint.
     ///
     /// Only fires at end-of-line and on a non-empty word (there's no prefix to
-    /// extend otherwise). Shares [`candidates`](Self::candidates)' sources, so
-    /// the hint can never suggest something Tab wouldn't complete. Split out
-    /// from the [`Hinter`] impl so it's unit-testable without a live history
-    /// [`Context`].
+    /// extend otherwise). Shares the Tab completer's sources, so the hint can
+    /// never suggest something Tab wouldn't complete. Split out from the
+    /// [`Hinter`] impl so it's unit-testable without a live history [`Context`].
     fn hint_for(&self, line: &str, pos: usize) -> Option<String> {
         // Type-ahead only extends the tail: skip unless the cursor is at the end
         // of a non-empty word.
@@ -166,31 +168,84 @@ impl ShellHelper {
             return None;
         }
         let before = &line[..start];
-        // `confident` = package position: require a unique candidate. Command
-        // positions (word 1 / `help <topic>`) always take the first match.
-        let (cands, confident) = if before.trim().is_empty() {
-            (verb_candidates(word), false)
-        } else {
-            match arg_kind(command::parse(before).verb()) {
-                ArgKind::Verbs => (verb_candidates(word), false),
-                ArgKind::Universe => (self.name_candidates(word), true),
-                ArgKind::Cart => (
-                    prefix_pairs(self.cart.iter().map(PkgTarget::as_str), word),
-                    true,
-                ),
-                ArgKind::None => return None,
-            }
-        };
-        if confident && cands.len() != 1 {
+        if before.trim().is_empty() {
+            return verb_hint(word);
+        }
+        match arg_kind(command::parse(before).verb()) {
+            ArgKind::Verbs => verb_hint(word),
+            ArgKind::Universe => self.universe_hint(word),
+            ArgKind::Cart => cart_hint(&self.cart, word),
+            ArgKind::None => None,
+        }
+    }
+
+    /// Package hint over the sorted name universe: the longest-common-prefix
+    /// extension of every name starting with `word`. The matching names are a
+    /// contiguous, sorted run, so their common prefix is just the common prefix
+    /// of the run's first and last entries — found with two binary searches, no
+    /// scan of the (possibly huge) matching range.
+    fn universe_hint(&self, word: &str) -> Option<String> {
+        if is_numeric_token(word) {
             return None;
         }
-        // Every candidate's replacement starts with `word` (all sources filter by
-        // prefix); the hint is the remainder. A whitespace-only remainder (a
-        // fully-typed verb, whose replacement just adds the trailing space) isn't
-        // worth showing.
-        let suffix = cands.first()?.replacement.strip_prefix(word)?;
-        (!suffix.trim().is_empty()).then(|| suffix.to_owned())
+        let from = self.universe.partition_point(|t| t.as_str() < word);
+        let tail = &self.universe[from..];
+        let n = tail.partition_point(|t| t.as_str().starts_with(word));
+        let matches = tail.get(..n)?;
+        let (first, last) = (matches.first()?.as_str(), matches.last()?.as_str());
+        common_prefix_suffix(first, last, word)
     }
+}
+
+/// Command-position hint: the tail of the *first* verb starting with `word`,
+/// plus a trailing space (readying the cursor for an argument, like Tab). `None`
+/// when nothing matches or `word` is already a whole verb (only the space would
+/// be left — not worth a hint).
+fn verb_hint(word: &str) -> Option<String> {
+    let verb = command::VERBS.iter().find(|v| v.starts_with(word))?;
+    let suffix = &verb[word.len()..];
+    (!suffix.is_empty()).then(|| format!("{suffix} "))
+}
+
+/// Package hint over the (small, unsorted) cart: the longest-common-prefix
+/// extension of every staged name starting with `word`. Folded against the
+/// first match, since the cart isn't sorted for a first/last shortcut. `None`
+/// when the common prefix is just `word` (nothing certain to add).
+fn cart_hint(cart: &[PkgTarget], word: &str) -> Option<String> {
+    if is_numeric_token(word) {
+        return None;
+    }
+    let mut matches = cart
+        .iter()
+        .map(PkgTarget::as_str)
+        .filter(|n| n.starts_with(word));
+    let first = matches.next()?;
+    // Every match starts with `word`, so the common-prefix length is ≥ word.len().
+    let lcp = matches.fold(first.len(), |acc, n| acc.min(common_prefix_len(first, n)));
+    let suffix = &first[word.len()..lcp];
+    (!suffix.is_empty()).then(|| suffix.to_owned())
+}
+
+/// The part of the longest common prefix of `first`..`last` that extends beyond
+/// `word` — the certain type-ahead tail. `first`/`last` are the lexicographic
+/// bounds of a set all starting with `word`, so their common prefix is the whole
+/// set's. `None` when the common prefix is just `word` (the next char diverges,
+/// nothing certain to add).
+fn common_prefix_suffix(first: &str, last: &str, word: &str) -> Option<String> {
+    let lcp = &first[..common_prefix_len(first, last)];
+    let suffix = lcp.strip_prefix(word)?;
+    (!suffix.is_empty()).then(|| suffix.to_owned())
+}
+
+/// Byte length of the longest common prefix of `a` and `b`, always on a char
+/// boundary.
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    a.char_indices()
+        .zip(b.chars())
+        .take_while(|((_, ca), cb)| ca == cb)
+        .map(|((i, ca), _)| i + ca.len_utf8())
+        .last()
+        .unwrap_or(0)
 }
 
 /// Canonical verbs with the given prefix. The replacement carries a trailing
@@ -433,23 +488,37 @@ mod tests {
     }
 
     #[test]
-    fn package_hint_only_when_a_single_candidate_matches() {
+    fn package_hint_extends_to_the_longest_common_prefix() {
         let h = helper(&["firefox", "firefox-bin", "zlib"], &[]);
-        // Ambiguous (firefox / firefox-bin) → no guess.
-        assert_eq!(hint(&h, "add fire"), None);
-        // Unique → hint the tail.
+        // firefox / firefox-bin agree up to `firefox` → hint the shared stem,
+        // even though the full name is still ambiguous.
+        assert_eq!(hint(&h, "add fire").as_deref(), Some("fox"));
+        // At the divergence point (`firefox` then end vs `-`) nothing is certain.
+        assert_eq!(hint(&h, "add firefox"), None);
+        // A single match extends to the whole name.
         assert_eq!(hint(&h, "add zl").as_deref(), Some("ib"));
-        // Unique once the prefix disambiguates.
         assert_eq!(hint(&h, "add firefox-").as_deref(), Some("bin"));
     }
 
     #[test]
-    fn cart_hint_is_confident_too() {
-        let h = helper(&["other"], &["yay-bin", "yakuake"]);
-        // Two cart items share `ya` → no guess.
-        assert_eq!(hint(&h, "drop ya"), None);
-        // Disambiguated → hint.
-        assert_eq!(hint(&h, "drop yay").as_deref(), Some("-bin"));
+    fn package_hint_stops_where_candidates_diverge() {
+        // The motivating case: only `asdzxc` and `asdqwe` exist. `a` is certain
+        // up to `asd` (their common stem), then diverges.
+        let h = helper(&["asdzxc", "asdqwe", "unrelated"], &[]);
+        assert_eq!(hint(&h, "add a").as_deref(), Some("sd"));
+        assert_eq!(hint(&h, "add asd"), None); // z vs q — ambiguous next char
+        assert_eq!(hint(&h, "add asdz").as_deref(), Some("xc")); // now unique
+    }
+
+    #[test]
+    fn cart_hint_extends_to_the_common_prefix_too() {
+        let h = helper(&["other"], &["yay-git", "yay-bin", "zsh"]);
+        // Both cart items share `yay-` → hint the stem.
+        assert_eq!(hint(&h, "drop ya").as_deref(), Some("y-"));
+        // Divergence (`git` vs `bin`) → nothing certain.
+        assert_eq!(hint(&h, "drop yay-"), None);
+        // Single match → whole tail.
+        assert_eq!(hint(&h, "drop zs").as_deref(), Some("h"));
     }
 
     #[test]
