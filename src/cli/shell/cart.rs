@@ -13,6 +13,7 @@
 use crate::build::Target;
 use crate::names::{PkgBase, PkgName, PkgTarget, RepoName};
 use crate::pacman::invoke::{PkgUpgrade, REPO_AUR};
+use serde::Deserialize;
 use std::collections::HashSet;
 
 /// Where a staged install came from.
@@ -53,16 +54,32 @@ pub struct StageClass {
 
 /// How AUR packages enter the cart: needing review, or pre-approved.
 ///
-/// Derived from config `review_default` (`"skip"` ⇒ [`Self::Auto`]). A named
-/// type rather than a bare bool so a call site reads `AurApproval::Auto`, not
-/// `true`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// The typed config value behind the `aur_approval` knob (a named type rather
+/// than a bare bool, so a call site reads `AurApproval::Auto`, not `true`).
+/// [`from_config`](Self::from_config) resolves the effective policy, including
+/// the legacy `review_default == "skip"` fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AurApproval {
     /// AUR items stage as [`Approval::NeedsReview`] (the default).
     #[default]
     Review,
-    /// AUR items stage pre-approved (`review_default == "skip"`).
+    /// AUR items stage pre-approved.
     Auto,
+}
+
+impl AurApproval {
+    /// The effective AUR approval policy. The explicit `aur_approval` config
+    /// value wins when set; when unset (`None`) it defers to the legacy
+    /// `review_default == "skip"` ⇒ [`Self::Auto`] behaviour so pre-`aur_approval`
+    /// configs keep working. Everything else means review.
+    pub fn from_config(configured: Option<Self>, review_default: &str) -> Self {
+        match configured {
+            Some(policy) => policy,
+            None if review_default == "skip" => Self::Auto,
+            None => Self::Review,
+        }
+    }
 }
 
 /// Whether a staged item still needs the user's eyes on its PKGBUILD before
@@ -476,6 +493,52 @@ mod tests {
     fn aur_auto_approve_policy_skips_review() {
         let it = CartItem::new(target("yay-bin"), Source::Aur, None, AurApproval::Auto);
         assert_eq!(it.approval, Approval::Approved);
+    }
+
+    #[test]
+    fn aur_approval_from_config_prefers_the_explicit_knob() {
+        // Explicit `aur_approval` wins, regardless of `review_default`.
+        assert_eq!(
+            AurApproval::from_config(Some(AurApproval::Auto), "prompt"),
+            AurApproval::Auto
+        );
+        assert_eq!(
+            AurApproval::from_config(Some(AurApproval::Review), "skip"),
+            AurApproval::Review
+        );
+    }
+
+    #[test]
+    fn aur_approval_from_config_falls_back_to_review_default() {
+        // Unset → legacy behaviour: `review_default == "skip"` auto-approves,
+        // anything else needs review.
+        assert_eq!(AurApproval::from_config(None, "skip"), AurApproval::Auto);
+        assert_eq!(
+            AurApproval::from_config(None, "prompt"),
+            AurApproval::Review
+        );
+        assert_eq!(
+            AurApproval::from_config(None, "always-show"),
+            AurApproval::Review
+        );
+    }
+
+    #[test]
+    fn aur_approval_deserializes_from_lowercase_toml() {
+        // The config knob accepts the lowercase variant names, parsed the same
+        // way `Config` reads the field (a table key, not a bare value).
+        #[derive(Deserialize)]
+        struct Knob {
+            #[serde(default)]
+            aur_approval: Option<AurApproval>,
+        }
+        let auto: Knob = toml::from_str("aur_approval = \"auto\"").unwrap();
+        assert_eq!(auto.aur_approval, Some(AurApproval::Auto));
+        let review: Knob = toml::from_str("aur_approval = \"review\"").unwrap();
+        assert_eq!(review.aur_approval, Some(AurApproval::Review));
+        // A missing key is the unset (`None`) tri-state, not an error.
+        let empty: Knob = toml::from_str("").unwrap();
+        assert_eq!(empty.aur_approval, None);
     }
 
     #[test]

@@ -43,9 +43,9 @@ use cart::{
 };
 use command::Command;
 use complete::ShellHelper;
-use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
+use rustyline::{ColorMode as RlColorMode, Config as RlConfig, Editor};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -116,7 +116,8 @@ pub trait ShellEnv {
     /// unknown name). Only decides the approval policy and the `show` label —
     /// the real install routing is the resolver's call at `apply`.
     fn classify(&self, target: &PkgTarget) -> Option<StageClass>;
-    /// Whether AUR items stage pre-approved (config `review_default == "skip"`).
+    /// Whether AUR items stage pre-approved — the effective `aur_approval`
+    /// policy (see [`AurApproval::from_config`](cart::AurApproval::from_config)).
     fn aur_policy(&self) -> AurApproval;
     /// The pkgbase a staged AUR target resolves to, for the reviewed set fed
     /// into the build pipeline. `None` when it isn't a known AUR package.
@@ -155,8 +156,11 @@ impl State {
                 ));
                 Flow::Continue
             }
-            Command::Help(_topic) => {
-                env.print(HELP_TEXT);
+            Command::Help(topic) => {
+                match topic {
+                    None => env.print(HELP_TEXT),
+                    Some(t) => env.print(&help_topic(t)),
+                }
                 Flow::Continue
             }
             Command::Search(terms) => {
@@ -823,10 +827,113 @@ commands:
   apply               build + install the staged transaction
   clear               empty the cart
   refresh             re-fetch the AUR mirror + index
-  help                this list
+  help [topic]        this list, or `help <command>` for detail on one
   quit                leave the shell (also: Ctrl-D)
 selectors: `3` (row), `5-8` (range), `glibc` (name), `python-*` (glob),
            `aur`/`core`/… (whole repo — e.g. `drop aur`, `add extra`)";
+
+/// Per-command help shown by `help <topic>`, keyed by canonical verb (the same
+/// order as [`command::VERBS`]). Each body opens with a usage line (and any
+/// aliases) then a short paragraph — enough to answer "what does this verb do
+/// and what does it act on" without leaving the shell.
+const TOPICS: &[(&str, &str)] = &[
+    (
+        "search",
+        "search <terms…>\n  \
+         Query repos + AUR by name, description, and provides. Prints a numbered,\n  \
+         ranked list (best matches nearest the prompt) and remembers it, so a later\n  \
+         `add 3` / `info 1-4` can index it by number.",
+    ),
+    (
+        "info",
+        "info <sel…>\n  \
+         Show package details. sel = name, number (a row in the last list), range\n  \
+         (`5-8`), or glob (`python-*`).",
+    ),
+    (
+        "add",
+        "add <sel…>   (alias: install)\n  \
+         Stage packages to install in the pending transaction. Resolves against the\n  \
+         last list, the AUR index, and the sync DBs — you can add anything.",
+    ),
+    (
+        "drop",
+        "drop <sel…>   (aliases: discard, unstage)\n  \
+         Un-stage packages from the cart — resolves against what's staged. `drop aur`\n  \
+         un-stages every AUR row. Distinct from `remove`, which stages an uninstall.",
+    ),
+    (
+        "keep",
+        "keep <sel…>   (alias: only)\n  \
+         Keep only the selected staged packages and drop the rest — the inverse of\n  \
+         `drop`.",
+    ),
+    (
+        "remove",
+        "remove <sel…>   (aliases: uninstall, rm)\n  \
+         Stage an uninstall (`pacman -R`) in the transaction. Note the difference from\n  \
+         `drop`: `drop` un-stages a pending install, `remove` stages a removal.",
+    ),
+    (
+        "upgrade",
+        "upgrade [sel…]   (alias: up)\n  \
+         Refresh, recompute the available upgrades, and stage them (repo → approved,\n  \
+         AUR → needs review). With sel…, stage only the matching subset.",
+    ),
+    (
+        "review",
+        "review [sel…]\n  \
+         Open a PKGBUILD/diff for staged AUR packages and approve / skip / discard\n  \
+         each. No sel reviews every AUR item still awaiting review.",
+    ),
+    (
+        "approve",
+        "approve <sel…>\n  \
+         Approve staged AUR packages without opening a diff. `approve *` approves\n  \
+         every staged AUR package at once.",
+    ),
+    (
+        "show",
+        "show   (aliases: status, ls)\n  \
+         Preview the staged transaction: the change-set table with download sizes,\n  \
+         build time, and totals.",
+    ),
+    (
+        "apply",
+        "apply   (aliases: commit, do)\n  \
+         Build + install the staged transaction in one sudo batch. Runs only when\n  \
+         every staged package is approved; an interrupted or failed apply drops back\n  \
+         to the shell with the cart intact so you can `drop` the offender and retry.",
+    ),
+    ("clear", "clear\n  Empty the cart."),
+    (
+        "refresh",
+        "refresh\n  \
+         Re-fetch the AUR mirror and reload the index — fresh data for\n  \
+         search / info / upgrade / completion. Leaves the cart untouched.",
+    ),
+    (
+        "help",
+        "help [topic]\n  \
+         List the commands, or `help <command>` for detail on one.",
+    ),
+    (
+        "quit",
+        "quit   (aliases: exit, q; also Ctrl-D)\n  Leave the shell.",
+    ),
+];
+
+/// Detailed help for one `help <topic>` argument. Canonicalizes `topic` through
+/// [`command::parse`] so aliases (`discard`, `up`, `ls`, …) resolve to their verb
+/// for free, then looks it up in [`TOPICS`]. An unrecognized topic points back at
+/// the bare `help` list rather than erroring.
+fn help_topic(topic: &str) -> String {
+    let verb = command::parse(topic).verb();
+    TOPICS.iter().find(|(v, _)| *v == verb).map_or_else(
+        || format!("no help for `{topic}` — type `help` for the command list"),
+        |(_, body)| (*body).to_owned(),
+    )
+}
 
 /// Run the interactive shell. Returns the desired process exit code.
 ///
@@ -869,8 +976,17 @@ pub fn run(cfg: &Config, devel: DevelPolicy, initial_search: &[SearchTerm]) -> R
     }
 
     let helper = ShellHelper::new(Rc::clone(&env.caches.universe));
-    let mut rl: Editor<ShellHelper, DefaultHistory> =
-        Editor::new().map_err(|e| Error::other(format!("shell: init line editor: {e}")))?;
+    // Follow the session's colour mode so `--color never` also stops rustyline
+    // from dimming the history hint (it skips `highlight_hint` when Disabled).
+    let rl_config = RlConfig::builder()
+        .color_mode(match cfg.color_mode() {
+            ui::ColorMode::Always => RlColorMode::Forced,
+            ui::ColorMode::Never => RlColorMode::Disabled,
+            ui::ColorMode::Auto => RlColorMode::Enabled,
+        })
+        .build();
+    let mut rl: Editor<ShellHelper, DefaultHistory> = Editor::with_config(rl_config)
+        .map_err(|e| Error::other(format!("shell: init line editor: {e}")))?;
     rl.set_helper(Some(helper));
     let history = paths::shell_history_path();
     // A missing history file on first run is expected, not an error.
@@ -1132,13 +1248,10 @@ impl ShellEnv for RealEnv<'_> {
     }
 
     fn aur_policy(&self) -> AurApproval {
-        // The one place config `review_default` finally drives behaviour:
-        // `skip` ⇒ AUR stages pre-approved, everything else ⇒ needs review.
-        if self.cfg.review_default == "skip" {
-            AurApproval::Auto
-        } else {
-            AurApproval::Review
-        }
+        // The `aur_approval` knob wins when set; unset defers to the legacy
+        // `review_default == "skip"` behaviour. Resolution + fallback live on
+        // the type so they're unit-tested next to it.
+        AurApproval::from_config(self.cfg.aur_approval, &self.cfg.review_default)
     }
 
     fn pkgbase_of(&self, target: &PkgTarget) -> Option<PkgBase> {
@@ -1819,6 +1932,49 @@ mod tests {
         let joined = env.lines.joined();
         for verb in ["search", "info", "add", "upgrade", "apply", "quit"] {
             assert!(joined.contains(verb), "help text missing `{verb}`");
+        }
+    }
+
+    #[test]
+    fn help_topic_prints_the_single_command_detail() {
+        let (flow, env) = dispatch_one("help add");
+        assert_eq!(flow, Flow::Continue);
+        let joined = env.lines.joined();
+        assert!(joined.contains("add <sel…>"), "got: {joined}");
+        // The detail names `add`'s alias and its resolution scope, which the
+        // one-line overview doesn't.
+        assert!(joined.contains("install"), "add topic omits its alias");
+        // It's the topic, not the whole list — an unrelated verb's body is absent.
+        assert!(!joined.contains("Leave the shell"), "printed the full list");
+    }
+
+    #[test]
+    fn help_topic_resolves_aliases() {
+        // `discard` is an alias for `drop`; `help discard` shows drop's topic.
+        let (_, env) = dispatch_one("help discard");
+        assert!(env.lines.contains("drop <sel…>"), "got: {:?}", env.lines);
+    }
+
+    #[test]
+    fn help_unknown_topic_points_back_at_help() {
+        let (_, env) = dispatch_one("help frobnicate");
+        assert!(
+            env.lines
+                .any(|l| l.contains("no help") && l.contains("frobnicate")),
+            "got: {:?}",
+            env.lines
+        );
+    }
+
+    #[test]
+    fn every_verb_has_a_help_topic() {
+        // Guards TOPICS against drifting from the verb set: a new verb without a
+        // topic (or a renamed one) fails here rather than printing "no help".
+        for verb in command::VERBS {
+            assert!(
+                TOPICS.iter().any(|(v, _)| v == verb),
+                "no `help {verb}` topic",
+            );
         }
     }
 

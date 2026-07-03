@@ -1,10 +1,12 @@
 # Plan: shell-like (REPL) UI for interactive `gaur`
 
 Status: phases 1–4 implemented; phase 5a (one unified renderer) + 5b (sorted-cart
-invariant) **done**; phase 5c partially done — **tab-completion** (the rustyline
-`Completer`) and the **`refresh`** command are in; history `Hinter`, `help
-<topic>`, and config knobs (`aur_approval`) remain, alongside the native combined
-commit (phase 6).
+invariant) **done**; phase 5c **done** — **tab-completion** (the rustyline
+`Completer`), the **`refresh`** command, a completion-driven **`Hinter`** (dimmed
+inline type-ahead, colour-mode aware), **`help <topic>`** (per-command detail,
+aliases resolved through `command::parse`), and the **`aur_approval`** config knob
+are all in. Remaining: the native combined commit (phase 6), plus optional
+prompt/history-size config knobs.
 
 ## Goal
 
@@ -623,8 +625,22 @@ Each phase is independently shippable and leaves the flag CLI fully working.
      snapshot is re-synced after each command, so completion and the selector
      resolver can't drift. **`refresh` DONE** — re-fetches the mirror + reloads
      the session (fresh data for `search`/`info`/`upgrade`/completion) without
-     touching the cart. *Remaining:* history `Hinter`, `help <topic>`, config
-     knobs (`aur_approval`, prompt/history).
+     touching the cart. **`Hinter` DONE** — a completion-driven type-ahead
+     (`ShellHelper::hint_for`, sharing the `Completer`'s sources): command
+     positions (word 1 / `help <topic>`) always suggest the first matching verb;
+     package positions suggest the **longest common prefix** of all matching
+     names (the part every candidate agrees on, so it's certain even when the
+     full name is still ambiguous — `gtk-vnc*` from `gtk-vn` → `c`; a divergent
+     next char shows nothing). Over the sorted universe the common prefix is just
+     the first/last match's, found with two binary searches — no scan of the
+     matching range. Dimmed via `highlight_hint`; the editor's `ColorMode`
+     follows the session's `--color`, so `never` renders it plain. **`help <topic>` DONE** — `help <command>` prints a per-verb detail
+     from the `TOPICS` table (aliases resolved through `command::parse`); a
+     `every_verb_has_a_help_topic` test guards the table against verb drift.
+     **`aur_approval` DONE** — a typed `Option<AurApproval>` config knob
+     (`review`/`auto`) resolved by `AurApproval::from_config`; unset defers to
+     the legacy `review_default == "skip"` behaviour. *Remaining:* optional
+     prompt-string / history-size knobs.
    ("will remove" rows read back via `trans_prepare` ride with phase 6.)
 6. **Native combined commit (atomic add+remove).** Internal `__commit-txn`
    privileged subcommand: one libalpm transaction over repo adds + AUR file adds +
