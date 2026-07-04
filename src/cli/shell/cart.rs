@@ -288,7 +288,10 @@ pub enum ReviewOutcome {
 }
 
 /// The pending transaction. Built across many commands, run by `apply`.
-#[derive(Default)]
+///
+/// `Clone` backs the shell's `undo` stack: each cart-changing command snapshots
+/// the pre-change cart, and `undo` restores the top snapshot.
+#[derive(Default, Clone)]
 pub struct Cart {
     /// Staged installs/upgrades (repo + AUR), each with its approval state.
     items: Vec<CartItem>,

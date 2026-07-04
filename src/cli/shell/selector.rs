@@ -3,12 +3,13 @@
 //! Turns the arguments of `add` / `info` / `drop` / `review` into concrete
 //! package targets. Each argument is one of:
 //!
-//! - a **number** (`3`) — the 1-based row of the most recent result list;
-//! - a **range** (`5-8`) — inclusive, over the current list;
+//! - a **number** (`3`) — the 1-based row of the active list (the caller passes
+//!   whichever list is currently on screen — search results or the cart);
+//! - a **range** (`5-8`) — inclusive, over that list;
 //! - a **name** (`glibc`) — a literal package name, passed through verbatim;
 //! - a **glob** (`python-*`, `firefox?`) — matched against the name universe.
 //!
-//! Numbers/ranges index the current list; names/globs resolve against the
+//! Numbers/ranges index the passed-in list; names/globs resolve against the
 //! universe (AUR + sync-repo names). The result is order-preserving and
 //! de-duplicated. This is the reusable core every cart-staging verb shares; it
 //! is pure (no I/O), so it's exhaustively unit-tested here.
@@ -132,7 +133,9 @@ fn glob_to_regex(glob: &str) -> Result<Regex, String> {
 /// One row by 1-based index, or a descriptive error.
 fn row(list: &[ListItem], n: usize) -> Result<PkgTarget, String> {
     if list.is_empty() {
-        return Err("no current list — run `search` first".into());
+        // Numbers index whichever list was last brought up; when none is, point
+        // at both ways to raise one rather than assuming a `search` context.
+        return Err("no numbered list is up — run `search` or `show` first".into());
     }
     list.get(n - 1)
         .map(|it| it.target.clone())
