@@ -203,6 +203,9 @@ fn report_repo_sync(joined: std::thread::Result<Result<SyncOutcome>>) {
     match joined {
         Ok(Ok(SyncOutcome::Refreshed)) => ui::note("official package databases refreshed"),
         Ok(Ok(SyncOutcome::AlreadyCurrent)) => ui::note("official package databases up to date"),
+        // Ctrl+C while waiting out a concurrent refresh's advisory lock — a
+        // deliberate skip, not a failure.
+        Ok(Err(Error::Interrupted)) => ui::note("official-repo refresh skipped"),
         Ok(Err(e)) => ui::warn(&format!("official-repo refresh failed: {e}")),
         Err(_) => ui::warn("official-repo refresh thread panicked"),
     }
