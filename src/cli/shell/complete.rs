@@ -373,7 +373,7 @@ mod tests {
     fn first_word_prefix_narrows_verbs() {
         let h = helper(&[], &[]);
         let got = complete(&h, "re");
-        assert_eq!(got, vec!["remove ", "review ", "refresh "]);
+        assert_eq!(got, vec!["remove ", "review ", "redo ", "refresh "]);
     }
 
     #[test]

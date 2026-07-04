@@ -15,7 +15,7 @@ use crate::names::SearchTerm;
 /// canonical name.
 pub const VERBS: &[&str] = &[
     "search", "info", "add", "drop", "keep", "remove", "upgrade", "review", "approve", "show",
-    "apply", "clear", "refresh", "help", "quit",
+    "apply", "undo", "redo", "clear", "refresh", "help", "quit",
 ];
 
 /// One parsed shell command.
@@ -44,6 +44,10 @@ pub enum Command {
     Show,
     /// `apply` — build + install the staged transaction.
     Apply,
+    /// `undo` — revert the last cart-changing command.
+    Undo,
+    /// `redo` — reapply the last undone change.
+    Redo,
     /// `clear` — empty the cart.
     Clear,
     /// `refresh` — re-fetch the AUR mirror + index.
@@ -76,6 +80,8 @@ impl Command {
             Self::Approve(_) => "approve",
             Self::Show => "show",
             Self::Apply => "apply",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
             Self::Clear => "clear",
             Self::Refresh => "refresh",
             Self::Help(_) => "help",
@@ -112,6 +118,8 @@ pub fn parse(line: &str) -> Command {
         "approve" => Command::Approve(args),
         "show" | "status" | "ls" => Command::Show,
         "apply" | "commit" | "do" => Command::Apply,
+        "undo" => Command::Undo,
+        "redo" => Command::Redo,
         "clear" => Command::Clear,
         "refresh" => Command::Refresh,
         "help" | "?" => Command::Help(args.into_iter().next()),

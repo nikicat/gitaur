@@ -57,7 +57,8 @@ pub mod complete;
 pub mod selector;
 pub mod upgrade;
 
-/// One row of the most recent result list, addressable by its 1-based number.
+/// One row of a numbered list (search results or the cart), addressable by its
+/// 1-based number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListItem {
     /// The thing `add` / `info` / … act on when this row is picked by number.
@@ -70,13 +71,46 @@ pub struct ListItem {
     pub repo: Option<RepoName>,
 }
 
+/// Which numbered list a bare number (`3`, `2-4`) currently indexes.
+///
+/// The shell prints two kinds of numbered table — search results and the staged
+/// transaction — and a number always means the row you last brought up. `search`
+/// switches to [`View::Search`]; the verbs that bring the transaction to the
+/// foreground (`show`, `upgrade`, `drop`, `keep`, `undo`) switch to
+/// [`View::Cart`]. The list verbs (`add`, `remove`, `info`) read the active list
+/// but leave the view alone, so working through a search list with a run of
+/// `add`s keeps the numbers pointing at that list even though each `add`
+/// reprints the cart.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum View {
+    /// Numbers index the most recent `search` result list.
+    #[default]
+    Search,
+    /// Numbers index the staged cart rows (as `show` prints them).
+    Cart,
+}
+
+/// How deep the `undo` stack goes — plenty for an interactive session, bounded
+/// so a long-running shell can't grow it without limit.
+const UNDO_DEPTH: usize = 64;
+
 /// Mutable per-session shell state the dispatch core threads between commands.
 #[derive(Default)]
 pub struct State {
-    /// The last printed result list (`search`), addressable by number.
-    last_list: Vec<ListItem>,
+    /// The most recent `search` result list, indexed by number while the search
+    /// view is active (see [`View`]).
+    search_list: Vec<ListItem>,
+    /// Which list bare numbers currently address — search results or the cart.
+    view: View,
     /// The staged transaction `apply` runs.
     cart: Cart,
+    /// Pre-change cart snapshots for `undo`, most-recent last. Each cart-changing
+    /// command pushes the cart as it was before the change; `undo` pops the top.
+    history: Vec<Cart>,
+    /// Carts popped by `undo`, for `redo` to replay. Cleared by any fresh
+    /// cart-changing command — a new edit forks a new branch, so the undone
+    /// future is discarded (standard undo/redo semantics).
+    redo: Vec<Cart>,
 }
 
 /// Control-flow result of dispatching one command.
@@ -200,6 +234,9 @@ impl State {
                 Flow::Continue
             }
             Command::Show => {
+                // `show` brings the transaction to the foreground, so numbers now
+                // address its rows.
+                self.view = View::Cart;
                 self.show(env);
                 Flow::Continue
             }
@@ -207,12 +244,21 @@ impl State {
                 self.apply(env);
                 Flow::Continue
             }
+            Command::Undo => {
+                self.undo(env);
+                Flow::Continue
+            }
+            Command::Redo => {
+                self.redo(env);
+                Flow::Continue
+            }
             Command::Clear => {
                 if self.cart.is_empty() {
                     env.print("cart is already empty");
                 } else {
+                    self.push_undo(self.cart.clone());
                     self.cart.clear();
-                    env.print("cart cleared");
+                    env.print("cart cleared — `undo` to restore");
                 }
                 Flow::Continue
             }
@@ -248,15 +294,17 @@ impl State {
                     // so the strongest matches land at the bottom, next to the
                     // prompt the shell scrolls to — and the low, easy-to-type
                     // numbers are the good ones. The numbers still key the
-                    // best-first `last_list`, so `add 1` is always the top match
+                    // best-first `search_list`, so `add 1` is always the top match
                     // regardless of print direction.
                     for (i, item) in items.iter().enumerate().rev() {
                         env.print(&format!("{:>3}  {}", i + 1, item.label));
                     }
                 }
                 // Replace the current list even when empty, so a stale list
-                // can't be addressed by number after a fruitless search.
-                self.last_list = items;
+                // can't be addressed by number after a fruitless search, and
+                // make the search results the active numbered view.
+                self.search_list = items;
+                self.view = View::Search;
             }
             Err(e) => env.print(&format!("search: {e}")),
         }
@@ -313,19 +361,27 @@ impl State {
             }
         };
         let policy = env.aur_policy();
+        let before = self.cart.clone();
         let mut staged = 0;
         for u in to_seed {
             if self.cart.add(CartItem::from_upgrade(u, policy)) == StageResult::Staged {
                 staged += 1;
             }
         }
+        if staged > 0 {
+            self.push_undo(before);
+        }
+        // The seeded transaction is now the foreground list.
+        self.view = View::Cart;
         env.print(&format!("{staged} upgrade(s) staged"));
         self.show(env);
     }
 
     /// `add <sel…>`: classify each selected target and stage it. Selectors
-    /// resolve against the last search list (numbers) + the full name universe
-    /// (names/globs), so you can `add` anything installable.
+    /// resolve against the active list (numbers) + the full name universe
+    /// (names/globs), so you can `add` anything installable. `add` reads the
+    /// active list but doesn't switch it, so a run of `add`s keeps working
+    /// through a search list even though each reprints the cart.
     fn add<E: ShellEnv>(&mut self, args: &[String], env: &mut E) {
         if args.is_empty() {
             env.print("usage: add <pkg|number|range|glob>…");
@@ -343,6 +399,7 @@ impl State {
             return;
         }
         let policy = env.aur_policy();
+        let before = self.cart.clone();
         let mut changed = false;
         for t in targets {
             match env.classify(&t) {
@@ -370,12 +427,14 @@ impl State {
         // after every stage (post-5c UX). Skipped when nothing actually changed
         // (all already-staged / unknown), so a no-op `add` stays quiet.
         if changed {
+            self.push_undo(before);
             self.show(env);
         }
     }
 
-    /// `drop <sel…>`: unstage installs from the cart. Selectors resolve against
-    /// the cart (numbers index the staged rows; names/globs match staged specs).
+    /// `drop <sel…>`: unstage installs from the cart. Names/globs match staged
+    /// specs; numbers index the active list (see [`View`]). A `drop` narrows the
+    /// cart, so afterwards the cart is the foreground list.
     fn discard<E: ShellEnv>(&mut self, args: &[String], env: &mut E) {
         if args.is_empty() {
             env.print("usage: drop <pkg|number|range|glob>…");
@@ -392,6 +451,7 @@ impl State {
             env.print("drop: nothing in the cart matched");
             return;
         }
+        let before = self.cart.clone();
         let mut changed = false;
         for t in targets {
             match self.cart.unstage(&t) {
@@ -405,6 +465,8 @@ impl State {
         // Reprint the remaining transaction (or "cart is empty" once the last row
         // goes) so the current cart is always on screen — post-5c UX.
         if changed {
+            self.push_undo(before);
+            self.view = View::Cart;
             self.show(env);
         }
     }
@@ -427,6 +489,7 @@ impl State {
             }
         };
         let keep: HashSet<&str> = targets.iter().map(PkgTarget::as_str).collect();
+        let before = self.cart.clone();
         match self.cart.keep(&keep) {
             KeepResult::NoMatch => {
                 env.print("keep: nothing in the cart matched — cart unchanged");
@@ -438,15 +501,22 @@ impl State {
                 for spec in &dropped {
                     env.print(&format!("dropped {}", spec.as_str()));
                 }
+                self.push_undo(before);
                 // Reprint the narrowed cart, matching `drop`'s post-5c UX.
+                self.view = View::Cart;
                 self.show(env);
             }
         }
     }
 
     /// `remove <sel…>`: stage an uninstall (`pacman -R` at apply). Selectors
-    /// resolve against the last list + universe; pacman validates names at
+    /// resolve against the active list + universe; pacman validates names at
     /// apply time.
+    ///
+    /// A selector that lands on a *staged install* is rejected with a pointer to
+    /// `drop`: `remove` uninstalls an already-installed package, so staging a
+    /// `-R` for something the transaction is about to install is a contradiction
+    /// — the user almost certainly means "take it out of the cart" (`drop`).
     fn remove<E: ShellEnv>(&mut self, args: &[String], env: &mut E) {
         if args.is_empty() {
             env.print("usage: remove <pkg|number|range|glob>…");
@@ -463,8 +533,19 @@ impl State {
             env.print("remove: nothing matched");
             return;
         }
+        let before = self.cart.clone();
         let mut changed = false;
         for t in targets {
+            // A row already staged for *install* isn't installed — you can't
+            // uninstall it. Point at `drop`, which is what "get rid of this cart
+            // row" means, and stage nothing.
+            if self.cart.item(&t).is_some() {
+                env.print(&format!(
+                    "{name} is staged for install, not installed — `drop {name}` to unstage it",
+                    name = t.as_str()
+                ));
+                continue;
+            }
             let name = PkgName::from(t.into_inner());
             match self.cart.stage_remove(name.clone()) {
                 StageResult::Staged => {
@@ -479,6 +560,7 @@ impl State {
         // Show the resulting transaction (the new "will remove" row included) so
         // the cart is always on screen — post-5c UX.
         if changed {
+            self.push_undo(before);
             self.show(env);
         }
     }
@@ -502,6 +584,8 @@ impl State {
             env.print("approve: nothing in the cart matched");
             return;
         }
+        let before = self.cart.clone();
+        let mut changed = false;
         for t in targets {
             match self.cart.approve(&t) {
                 ApproveResult::Approved => {
@@ -509,6 +593,7 @@ impl State {
                         self.cart.mark_reviewed(pb);
                     }
                     env.print(&format!("approved {}", t.as_str()));
+                    changed = true;
                 }
                 ApproveResult::AlreadyApproved => {
                     env.print(&format!("{} is already approved", t.as_str()));
@@ -517,6 +602,9 @@ impl State {
                     env.print(&format!("{} isn't staged", t.as_str()));
                 }
             }
+        }
+        if changed {
+            self.push_undo(before);
         }
     }
 
@@ -553,6 +641,8 @@ impl State {
             env.print("review: nothing in the cart matched");
             return;
         }
+        let before = self.cart.clone();
+        let mut approved_any = false;
         // Flips to `Auto` once the user picks "approve all": the remaining AUR
         // items clear without opening another diff.
         let mut prompting = review::Prompting::default();
@@ -574,12 +664,17 @@ impl State {
                     if prompting == review::Prompting::Auto {
                         // "approve all" was chosen earlier — no more diffs.
                         self.approve_reviewed(&t, env);
+                        approved_any = true;
                         continue;
                     }
                     match env.review(&t) {
-                        Ok(ReviewOutcome::Approved) => self.approve_reviewed(&t, env),
+                        Ok(ReviewOutcome::Approved) => {
+                            self.approve_reviewed(&t, env);
+                            approved_any = true;
+                        }
                         Ok(ReviewOutcome::ApprovedAll) => {
                             self.approve_reviewed(&t, env);
+                            approved_any = true;
                             prompting = review::Prompting::Auto;
                         }
                         Ok(ReviewOutcome::Skipped) => {
@@ -596,6 +691,9 @@ impl State {
                     }
                 }
             }
+        }
+        if approved_any {
+            self.push_undo(before);
         }
     }
 
@@ -663,6 +761,10 @@ impl State {
             Ok(ApplyOutcome::Declined) => env.print("apply cancelled — cart kept"),
             Ok(ApplyOutcome::Succeeded) => {
                 self.cart.clear_applied();
+                // The transaction ran: the cart is a new epoch, so pre-apply
+                // undo snapshots (which would re-stage now-installed packages)
+                // no longer make sense.
+                self.clear_undo_history();
                 env.print("done");
             }
             Ok(ApplyOutcome::Failed { installed }) => {
@@ -673,6 +775,8 @@ impl State {
                 for t in &installed {
                     self.cart.unstage(t);
                 }
+                // A run happened — old undo snapshots reference a pre-apply world.
+                self.clear_undo_history();
                 if landed == 0 {
                     env.print("apply failed — nothing installed; cart kept for retry");
                 } else {
@@ -683,16 +787,26 @@ impl State {
                     ));
                 }
                 // Reprint what's left so the failures are on screen to act on.
+                self.view = View::Cart;
                 self.show(env);
             }
             Err(e) => env.print(&format!("apply: {e}")),
         }
     }
 
-    /// Resolve selector `args` against the cart: a repo name (`aur`, `core`, …)
-    /// selects every staged row from that repo; numbers index the staged rows;
-    /// names/globs match staged specs. Mirrors the verb-scoping rule in the
-    /// design (cart verbs act on what's staged, not the search list).
+    /// Forget the `undo`/`redo` stacks — after a transaction runs, the snapshots
+    /// describe a world that no longer exists.
+    fn clear_undo_history(&mut self) {
+        self.history.clear();
+        self.redo.clear();
+    }
+
+    /// Resolve selector `args` for a cart verb (`drop`, `keep`, `approve`,
+    /// `review`): a repo name (`aur`, `core`, …) selects every staged row from
+    /// that repo, and names/globs match staged specs — both scoped to what's
+    /// staged, since a cart verb acts on the cart regardless of which list is up.
+    /// Numbers, though, index the *active* list (see [`View`]), so a bare `3`
+    /// means the same row it would for any other verb — the one you last saw.
     fn resolve_against_cart(&self, args: &[String]) -> std::result::Result<Vec<PkgTarget>, String> {
         let rows: Vec<RepoRow> = self
             .cart
@@ -704,29 +818,21 @@ impl State {
             })
             .collect();
         let args = expand_repo_tokens(args, &rows);
-        let list: Vec<ListItem> = rows
-            .iter()
-            .map(|r| ListItem {
-                target: r.target.clone(),
-                label: String::new(),
-                repo: r.repo.clone(),
-            })
-            .collect();
         let universe: Vec<PkgTarget> = rows.iter().map(|r| r.target.clone()).collect();
-        selector::resolve(&args, &list, &universe)
+        selector::resolve(&args, &self.active_list(), &universe)
     }
 
-    /// Resolve selector `args` against the last result list: a repo name selects
-    /// every list row from that repo; numbers/ranges index the list; names/globs
-    /// resolve against the full name universe. The list verbs (`add`, `info`,
-    /// `remove`) share this so `add extra` and `add 3` behave the same way.
+    /// Resolve selector `args` for a list verb (`add`, `info`, `remove`): a repo
+    /// name selects every row from that repo in the active list, numbers/ranges
+    /// index the active list, and names/globs resolve against the full name
+    /// universe (so you can `add` anything installable, not just what's shown).
     fn resolve_against_list<E: ShellEnv>(
         &self,
         args: &[String],
         env: &E,
     ) -> std::result::Result<Vec<PkgTarget>, String> {
-        let rows: Vec<RepoRow> = self
-            .last_list
+        let active = self.active_list();
+        let rows: Vec<RepoRow> = active
             .iter()
             .map(|it| RepoRow {
                 target: it.target.clone(),
@@ -734,7 +840,76 @@ impl State {
             })
             .collect();
         let args = expand_repo_tokens(args, &rows);
-        selector::resolve(&args, &self.last_list, env.names())
+        selector::resolve(&args, &active, env.names())
+    }
+
+    /// The staged cart as a numbered list — the same rows, in the same order,
+    /// that `show` prints — so a number resolves to the row the user sees. Built
+    /// live from the cart, so it can never lag a staging change.
+    fn cart_as_list(&self) -> Vec<ListItem> {
+        self.cart
+            .items()
+            .iter()
+            .map(|it| ListItem {
+                target: PkgTarget::new(it.spec()),
+                label: String::new(),
+                repo: Some(it.repo_label()),
+            })
+            .collect()
+    }
+
+    /// The list bare numbers currently index: the search results while the search
+    /// view is up, else the staged cart (see [`View`]).
+    ///
+    /// The search view falls back to the cart when there's no search list to
+    /// address — a fresh session (never searched) or a fruitless search — so a
+    /// number always resolves against whatever numbered table is actually on
+    /// screen, which after an `add`/`drop`/… is the cart.
+    fn active_list(&self) -> Vec<ListItem> {
+        match self.view {
+            View::Search if !self.search_list.is_empty() => self.search_list.clone(),
+            _ => self.cart_as_list(),
+        }
+    }
+
+    /// Snapshot the pre-change cart onto the `undo` stack (bounded) and discard
+    /// any redo branch. Call with the cart as it was *before* a cart-changing
+    /// command mutates it — only when the command actually changed something, so
+    /// a no-op never consumes an undo step.
+    fn push_undo(&mut self, before: Cart) {
+        self.history.push(before);
+        if self.history.len() > UNDO_DEPTH {
+            self.history.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    /// `undo`: revert the last cart-changing command, restoring the cart to how
+    /// it was before it ran. The reverted-from cart moves onto the redo stack.
+    fn undo<E: ShellEnv>(&mut self, env: &mut E) {
+        match self.history.pop() {
+            Some(prev) => {
+                self.redo.push(std::mem::replace(&mut self.cart, prev));
+                self.view = View::Cart;
+                env.print("undone — `redo` to reapply");
+                self.show(env);
+            }
+            None => env.print("nothing to undo"),
+        }
+    }
+
+    /// `redo`: reapply the most recently undone change. The inverse of `undo`;
+    /// available only until a fresh cart-changing command clears the redo branch.
+    fn redo<E: ShellEnv>(&mut self, env: &mut E) {
+        match self.redo.pop() {
+            Some(next) => {
+                self.history.push(std::mem::replace(&mut self.cart, next));
+                self.view = View::Cart;
+                env.print("redone");
+                self.show(env);
+            }
+            None => env.print("nothing to redo"),
+        }
     }
 }
 
@@ -825,12 +1000,16 @@ commands:
   approve <sel…>      approve staged AUR packages without a diff (try `approve *`)
   show                preview the staged transaction
   apply               build + install the staged transaction
+  undo                revert the last cart change
+  redo                reapply the last undone change
   clear               empty the cart
   refresh             re-fetch the AUR mirror + index
   help [topic]        this list, or `help <command>` for detail on one
   quit                leave the shell (also: Ctrl-D)
 selectors: `3` (row), `5-8` (range), `glibc` (name), `python-*` (glob),
-           `aur`/`core`/… (whole repo — e.g. `drop aur`, `add extra`)";
+           `aur`/`core`/… (whole repo — e.g. `drop aur`, `add extra`)
+numbers index the list you last brought up — search results (`search`) or the
+transaction (`show`/`upgrade`/`drop`/`keep`)";
 
 /// Per-command help shown by `help <topic>`, keyed by canonical verb (the same
 /// order as [`command::VERBS`]). Each body opens with a usage line (and any
@@ -847,7 +1026,7 @@ const TOPICS: &[(&str, &str)] = &[
     (
         "info",
         "info <sel…>\n  \
-         Show package details. sel = name, number (a row in the last list), range\n  \
+         Show package details. sel = name, number (a row in the shown list), range\n  \
          (`5-8`), or glob (`python-*`).",
     ),
     (
@@ -904,6 +1083,20 @@ const TOPICS: &[(&str, &str)] = &[
          Build + install the staged transaction in one sudo batch. Runs only when\n  \
          every staged package is approved; an interrupted or failed apply drops back\n  \
          to the shell with the cart intact so you can `drop` the offender and retry.",
+    ),
+    (
+        "undo",
+        "undo\n  \
+         Revert the last cart-changing command (add / drop / keep / remove /\n  \
+         upgrade / approve / clear) — e.g. undo a `keep` that dropped too much.\n  \
+         Steps back through the session's edits; `redo` reapplies. A run\n  \
+         (`apply`) forgets the history.",
+    ),
+    (
+        "redo",
+        "redo\n  \
+         Reapply the change `undo` just reverted. Available until the next\n  \
+         cart-changing command, which forks a new edit branch.",
     ),
     ("clear", "clear\n  Empty the cart."),
     (
@@ -2445,7 +2638,7 @@ mod tests {
             env.lines
                 .any(|l| l.contains("  2") && l.contains("extra/bar"))
         );
-        assert_eq!(state.last_list.len(), 2, "the list should be remembered");
+        assert_eq!(state.search_list.len(), 2, "the list should be remembered");
     }
 
     #[test]
@@ -2456,10 +2649,10 @@ mod tests {
     }
 
     #[test]
-    fn info_by_number_resolves_against_the_last_list() {
+    fn info_by_number_resolves_against_the_search_list() {
         let mut env = FakeEnv::default();
         let mut state = State {
-            last_list: vec![li("aur/foo 1-1", "foo"), li("extra/bar 2-1", "bar")],
+            search_list: vec![li("aur/foo 1-1", "foo"), li("extra/bar 2-1", "bar")],
             ..State::default()
         };
         state.dispatch(&command::parse("info 2"), &mut env);
@@ -2495,7 +2688,7 @@ mod tests {
     fn info_out_of_range_number_reports_error_without_calling_show() {
         let mut env = FakeEnv::default();
         let mut state = State {
-            last_list: vec![li("only 1-1", "only")],
+            search_list: vec![li("only 1-1", "only")],
             ..State::default()
         };
         state.dispatch(&command::parse("info 9"), &mut env);
@@ -2585,6 +2778,246 @@ mod tests {
         assert!(
             state.cart.all_approved(),
             "`approve aur` clears the AUR gate"
+        );
+    }
+
+    // --- unified numbering: a bare number follows the last-shown list ---
+
+    #[test]
+    fn remove_by_number_rejects_a_staged_install_and_points_at_drop() {
+        // The reported bug: after `upgrade` puts the cart on screen, `remove 1`
+        // used to consult the (empty) search list and error "run search first".
+        // Now numbers follow the shown cart — and `remove` on a staged install
+        // refuses (you can't uninstall what isn't installed yet) and points at
+        // `drop`, which is what "take this cart row out" means.
+        let mut env = FakeEnv {
+            upgrade_candidates: vec![up("aur", "bar"), up("aur", "foo")],
+            ..FakeEnv::default()
+        };
+        let mut state = State::default();
+        state.dispatch(&command::parse("upgrade"), &mut env); // view = cart: [bar, foo]
+        env.lines.clear();
+        state.dispatch(&command::parse("remove 1"), &mut env);
+        assert!(
+            state.cart.removals().is_empty(),
+            "a staged install must not be staged for removal"
+        );
+        assert!(
+            env.lines.any(|l| l.contains("drop bar")),
+            "should point at `drop`: {:?}",
+            env.lines
+        );
+    }
+
+    #[test]
+    fn remove_by_number_after_search_stages_a_real_uninstall() {
+        // `remove` still stages a genuine uninstall when the number lands on a
+        // package that isn't a staged install — here a search row.
+        let mut env = FakeEnv {
+            search_result: vec![li_repo("extra", "oldpkg")],
+            ..FakeEnv::default()
+        };
+        let mut state = State::default();
+        state.dispatch(&command::parse("search x"), &mut env); // view = search
+        state.dispatch(&command::parse("remove 1"), &mut env);
+        assert_eq!(state.cart.removals(), &[PkgName::from("oldpkg")]);
+    }
+
+    #[test]
+    fn add_by_number_keeps_pointing_at_the_search_list_across_adds() {
+        // Working through a search list: each `add` reprints the cart but must
+        // not yank the numbering onto it, so `add 1` then `add 3` both index the
+        // search rows (the classic "search, then add a few" flow).
+        let mut env = env_with(&[("a", Source::Aur), ("b", Source::Aur), ("c", Source::Aur)]);
+        env.search_result = vec![
+            li_repo("aur", "a"),
+            li_repo("aur", "b"),
+            li_repo("aur", "c"),
+        ];
+        let mut state = State::default();
+        state.dispatch(&command::parse("search x"), &mut env);
+        state.dispatch(&command::parse("add 1"), &mut env);
+        state.dispatch(&command::parse("add 3"), &mut env);
+        assert_eq!(
+            cart_specs(&state),
+            vec!["a", "c"],
+            "1 and 3 index the search list, not the reprinted cart"
+        );
+    }
+
+    #[test]
+    fn number_indexes_the_cart_when_no_search_was_run() {
+        // Fresh session, staged straight into the cart (no `search`): a bare
+        // number must still resolve against the cart on screen, not error with
+        // "no numbered list is up".
+        let mut env = env_with(&[("foo", Source::Aur), ("bar", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo bar"), &mut env); // cart: [bar, foo]
+        state.dispatch(&command::parse("drop 1"), &mut env);
+        assert_eq!(
+            cart_specs(&state),
+            vec!["foo"],
+            "`drop 1` hits the shown cart"
+        );
+    }
+
+    #[test]
+    fn drop_by_number_indexes_the_shown_cart() {
+        let mut env = FakeEnv {
+            upgrade_candidates: vec![up("aur", "bar"), up("aur", "foo")],
+            ..FakeEnv::default()
+        };
+        let mut state = State::default();
+        state.dispatch(&command::parse("upgrade"), &mut env); // cart: [bar, foo]
+        state.dispatch(&command::parse("drop 1"), &mut env);
+        assert_eq!(
+            cart_specs(&state),
+            vec!["foo"],
+            "`drop 1` drops shown row 1"
+        );
+    }
+
+    #[test]
+    fn show_switches_numbering_from_the_search_list_to_the_cart() {
+        let mut env = env_with(&[("staged", Source::Aur)]);
+        env.search_result = vec![li_repo("aur", "searched")];
+        let mut state = State::default();
+        state.dispatch(&command::parse("add staged"), &mut env); // cart = [staged]
+        state.dispatch(&command::parse("search x"), &mut env); // view = search
+        state.dispatch(&command::parse("info 1"), &mut env);
+        assert_eq!(
+            env.info_calls.last(),
+            Some(&vec![PkgTarget::new("searched")]),
+            "in the search view, `1` is the search row"
+        );
+        state.dispatch(&command::parse("show"), &mut env); // view = cart
+        state.dispatch(&command::parse("info 1"), &mut env);
+        assert_eq!(
+            env.info_calls.last(),
+            Some(&vec![PkgTarget::new("staged")]),
+            "after `show`, `1` is the cart row"
+        );
+    }
+
+    // --- undo / redo ---
+
+    #[test]
+    fn undo_restores_a_cart_over_narrowed_by_keep() {
+        // The reported bug: `keep` dropped more than intended and the rows were
+        // gone for good. `undo` brings the whole pre-`keep` cart back.
+        let mut env = env_with(&[
+            ("foo", Source::Aur),
+            ("bar", Source::Aur),
+            ("baz", Source::Aur),
+        ]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo bar baz"), &mut env);
+        state.dispatch(&command::parse("keep bar"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["bar"]);
+        state.dispatch(&command::parse("undo"), &mut env);
+        assert_eq!(
+            cart_specs(&state),
+            vec!["bar", "baz", "foo"],
+            "undo restores every row `keep` dropped"
+        );
+    }
+
+    #[test]
+    fn redo_reapplies_an_undone_change() {
+        let mut env = env_with(&[
+            ("foo", Source::Aur),
+            ("bar", Source::Aur),
+            ("baz", Source::Aur),
+        ]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo bar baz"), &mut env);
+        state.dispatch(&command::parse("keep bar"), &mut env);
+        state.dispatch(&command::parse("undo"), &mut env);
+        state.dispatch(&command::parse("redo"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["bar"], "redo reapplies the keep");
+    }
+
+    #[test]
+    fn undo_steps_back_one_change_at_a_time() {
+        let mut env = env_with(&[("foo", Source::Aur), ("bar", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo"), &mut env);
+        state.dispatch(&command::parse("add bar"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["bar", "foo"]);
+        state.dispatch(&command::parse("undo"), &mut env);
+        assert_eq!(
+            cart_specs(&state),
+            vec!["foo"],
+            "one undo reverts `add bar`"
+        );
+        state.dispatch(&command::parse("undo"), &mut env);
+        assert!(state.cart.is_empty(), "the next undo reverts `add foo`");
+    }
+
+    #[test]
+    fn a_fresh_change_forgets_the_redo_branch() {
+        let mut env = env_with(&[
+            ("foo", Source::Aur),
+            ("bar", Source::Aur),
+            ("qux", Source::Aur),
+        ]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo bar"), &mut env);
+        state.dispatch(&command::parse("drop foo"), &mut env);
+        state.dispatch(&command::parse("undo"), &mut env); // redo branch now holds the post-drop cart
+        state.dispatch(&command::parse("add qux"), &mut env); // a new edit forks the branch
+        env.lines.clear();
+        state.dispatch(&command::parse("redo"), &mut env);
+        assert!(
+            env.lines.contains("nothing to redo"),
+            "the redo branch was discarded by the new edit: {:?}",
+            env.lines
+        );
+    }
+
+    #[test]
+    fn undo_with_no_history_is_a_friendly_no_op() {
+        let (_flow, env) = dispatch_one("undo");
+        assert!(env.lines.contains("nothing to undo"));
+    }
+
+    #[test]
+    fn redo_with_no_undone_change_is_a_friendly_no_op() {
+        let (_flow, env) = dispatch_one("redo");
+        assert!(env.lines.contains("nothing to redo"));
+    }
+
+    #[test]
+    fn clear_is_undoable() {
+        let mut env = env_with(&[("foo", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo"), &mut env);
+        state.dispatch(&command::parse("clear"), &mut env);
+        assert!(state.cart.is_empty());
+        state.dispatch(&command::parse("undo"), &mut env);
+        assert_eq!(
+            cart_specs(&state),
+            vec!["foo"],
+            "undo brings back a cleared cart"
+        );
+    }
+
+    #[test]
+    fn a_clean_apply_forgets_the_undo_history() {
+        // After a transaction runs, the snapshots describe an old world (they'd
+        // re-stage now-installed packages), so `apply` drops them.
+        let mut env = env_with(&[("foo", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo"), &mut env);
+        state.dispatch(&command::parse("approve foo"), &mut env);
+        state.dispatch(&command::parse("apply"), &mut env); // FakeEnv default: Succeeded
+        assert!(state.cart.is_empty(), "a clean apply empties the cart");
+        env.lines.clear();
+        state.dispatch(&command::parse("undo"), &mut env);
+        assert!(
+            env.lines.contains("nothing to undo"),
+            "apply cleared the undo history: {:?}",
+            env.lines
         );
     }
 
