@@ -28,16 +28,21 @@ jobs:
       - name: Install build dependencies
         run: pacman -Syu --noconfirm --needed base-devel rust git
 
+      # No `ref:` — use the triggering commit: the tagged commit for release
+      # events, the branch head for workflow_dispatch. Both contain the
+      # PKGBUILD template; the *tag* determines what the package builds, so a
+      # dispatch from a newer branch can republish an old release with a fixed
+      # template.
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
 
-      - name: Check tag matches Cargo.toml version
+      - name: Check tag matches Cargo.toml version at the tag
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git fetch --depth=1 origin "refs/tags/$TAG:refs/tags/$TAG"
           ver="${TAG#v}"
-          cargo_ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          cargo_ver=$(git show "refs/tags/$TAG:Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
           if [ "$ver" != "$cargo_ver" ]; then
-            echo "tag $TAG (=$ver) does not match Cargo.toml version $cargo_ver" >&2
+            echo "tag $TAG (=$ver) does not match Cargo.toml version $cargo_ver at the tag" >&2
             exit 1
           fi
 
