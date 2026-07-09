@@ -31,20 +31,21 @@ name = "aurox-trace"
 path = "src/bin/trace.rs"
 
 [dependencies]
-# Pinned to nikicat/gitoxide#b-plus-c-integration for changes not yet in a
-# published gix release:
-#  - upstream PRs #2604 (gix-ref: skip name validation in packed-refs binary
-#    search) and #2605 (gix: cache packed-refs in a HashMap during fetch
-#    update_refs), which together bring `aurox -Sy` against the AUR mirror from
-#    ~11s to ~5s (≈ git fetch parity), plus a follow-up lazy packed-refs name
-#    index;
+# Pinned to nikicat/gitoxide#gitaur-integration for changes not yet in a
+# published gix release. The branch is upstream main (post-#2604, gix-ref:
+# skip name validation in packed-refs binary search) plus merges of the open
+# upstream PRs #2608/#2704/#2705/#2706 and two not-yet-submitted branches
+# (mark_all_refs commit-graph, update_refs fast paths), carrying:
+#  - a lazy packed-refs name index for fast bulk lookups (PR #2608; replaces
+#    the closed #2605 hashmap cache) — with #2604 this brings `aurox -Sy`
+#    against the AUR mirror from ~11s to ~5s (≈ git fetch parity);
 #  - a gix-transport patch that wraps the curl worker's `perform()` in a
 #    `gix_http` "http request" span carrying curl's CURLINFO timing — the only
 #    place that timing is reachable (see src/logging/chrome.rs);
 #  - a gix-transport `http::Options::download_progress` byte counter the curl
 #    backend feeds per response-body chunk — the only live signal during the
 #    otherwise-silent v2 `ls-refs` advertisement (many MiB on the AUR mirror);
-#    drives the `network` throughput row (see src/ui/gix_progress.rs);
+#    drives the `network` throughput row (see src/ui/gix_progress.rs) (PR #2706);
 #  - a `mark mappings` detail span in gix-protocol that splits
 #    `mark_complete_and_common_ref`'s per-mapping loop into `find_ms`
 #    (packed-ref lookup) vs `commit_ms` (ODB/commit-graph load) — the
@@ -53,7 +54,8 @@ path = "src/bin/trace.rs"
 #  - a `gix-ref` `try_find_packed_only` fast path that lets the fetch have-set
 #    build skip the per-ref loose-ref `open()` syscall for packed refs, cutting
 #    `find_ms` on the AUR mirror from ~2.1s to ~0.6s (loose precedence is still
-#    honored via a one-time loose-name scan);
+#    honored via a one-time loose-name scan, which only engages at ≥256
+#    mappings — a no-op for small fetches) (PR #2704, with the span above);
 #  - a `mark_all_refs` fast path that resolves each local ref through the
 #    commit-graph (via `get_or_insert_commit`) instead of inflating the object
 #    just to check it isn't a tag — only annotated tags / symrefs still peel.
@@ -73,8 +75,9 @@ path = "src/bin/trace.rs"
 #    from packed-refs when verifying each edit's precondition, skipping the
 #    per-ref loose `open()` — the dominant cost of applying the ref transaction
 #    (the `apply` span). Cuts that resolution on the AUR mirror from ~640ms to
-#    ~240ms (`apply` ~770ms to ~400ms); adds a `ref tx resolve` detail span.
-gix = { git = "https://github.com/nikicat/gitoxide", rev = "2a625da5a", features = [
+#    ~240ms (`apply` ~770ms to ~400ms); adds a `ref tx resolve` detail span
+#    (PR #2705).
+gix = { git = "https://github.com/nikicat/gitoxide", rev = "39ee770b4", features = [
   # curl-rustls (over reqwest-rust-tls) so gix's low_speed_* / lowSpeedLimit
   # config actually fires — only the curl transport implements it, the
   # reqwest blocking transport silently ignores those fields. Adds libcurl
