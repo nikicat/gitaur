@@ -7,20 +7,20 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-# gitaur's own confirm prints "Proceed…" at the start of a line on stdout;
+# aurox's own confirm prints "Proceed…" at the start of a line on stdout;
 # pacman uses the same text prefixed with ":: ". Anchor to "^Proceed" so we
-# test gitaur's prompt, not pacman's.
-gitaur_prompted() { grep -qE '^Proceed with installation\?' "$LAST_STDOUT"; }
+# test aurox's prompt, not pacman's.
+aurox_prompted() { grep -qE '^Proceed with installation\?' "$LAST_STDOUT"; }
 
 # --- decline: plan prompt fires, dep disclosed, nothing installed ---------
 # repo-with-dep depends on repo-helper-lib (in the sync repo, not installed).
 # repo-helper-lib is an unrequested dep → NOT only_requested() → prompt. The
 # plan table (stderr) must name the dep under "Repo dependencies". Answer "n":
 # the run aborts before installing anything.
-gaur_input $'n\n' -S repo-with-dep
+aurox_input $'n\n' -S repo-with-dep
 assert_exit 1
-gitaur_prompted || {
-    echo "repo pkg with an uninstalled dep should show gitaur's plan prompt" >&2
+aurox_prompted || {
+    echo "repo pkg with an uninstalled dep should show aurox's plan prompt" >&2
     _dump >&2
     exit 1
 }
@@ -31,7 +31,7 @@ assert_pkg_not_installed repo-helper-lib
 
 # --- accept (--noconfirm): target explicit, dep installed as --asdeps ------
 reset_state
-gaur -S --noconfirm repo-with-dep
+aurox -S --noconfirm repo-with-dep
 assert_exit 0
 assert_pkg_installed repo-with-dep
 assert_pkg_explicit  repo-with-dep
@@ -44,9 +44,9 @@ assert_pkg_asdep     repo-helper-lib
 # clears the sudo gate so the install still completes.
 reset_state
 sudo pacman -S --noconfirm repo-helper-lib >/dev/null
-gaur_input "" -S repo-with-dep
+aurox_input "" -S repo-with-dep
 assert_exit 0
-if gitaur_prompted; then
+if aurox_prompted; then
     echo "no new deps (dep already installed) should not show the plan prompt" >&2
     _dump >&2
     exit 1

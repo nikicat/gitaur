@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# After a refresh, gitaur writes a commit-graph for the local AUR mirror clone
+# After a refresh, aurox writes a commit-graph for the local AUR mirror clone
 # so the *next* fetch's negotiation reads commit times from an mmap'd file
 # instead of inflating every commit from the pack. This exercises that end to
 # end: the graph must be written, must verify clean, and a second refresh must
@@ -11,7 +11,7 @@ AUR_DIR="$STATE_DIR/aur"
 INFO_DIR="$AUR_DIR/objects/info"
 
 # First refresh bootstraps the bare clone + index, then seeds the commit-graph.
-gaur -Sy
+aurox -Sy
 assert_exit 0
 
 # A commit-graph landed — either a single `commit-graph` file or a `--split`
@@ -30,7 +30,7 @@ fi
 
 # A second refresh with the graph present must still succeed (the negotiation
 # reads the graph; a broken read would error or change results).
-gaur -Sy
+aurox -Sy
 assert_exit 0
 assert_stderr_contains "no ref updates"
 

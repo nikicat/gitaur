@@ -9,8 +9,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
-gaur -S --noconfirm test-needs-fail
+aurox -Sy
+aurox -S --noconfirm test-needs-fail
 assert_exit 1
 assert_pkg_not_installed test-fail-build
 assert_pkg_not_installed test-needs-fail

@@ -2,9 +2,9 @@
 name = "pty-harness"
 version = "0.1.0"
 edition = "2024"
-description = "PTY test harness: spawn the gaur binary under a virtual terminal and walk its TUI for the e2e example drivers."
+description = "PTY test harness: spawn the aurox binary under a virtual terminal and walk its TUI for the e2e example drivers."
 license = "MIT"
-repository = "https://github.com/nikicat/gitaur"
+repository = "https://github.com/nikicat/aurox"
 publish = false
 
 [lib]

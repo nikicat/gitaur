@@ -2,7 +2,7 @@
 # Regression for the `selinux-refpolicy-arch-git` failure: a VCS pkgbase whose
 # `pkgver()` overrides the static `.SRCINFO` pkgver must still install. makepkg
 # resolves the dynamic version only while extracting sources (rewriting
-# `pkgver=` in place), so gitaur freezes it two-phase (`--nobuild` then
+# `pkgver=` in place), so aurox freezes it two-phase (`--nobuild` then
 # `--noextract`) and collects by the real filename. The old path gated
 # collection on the stale `.SRCINFO` version (`prep.new_ver`), found no match
 # after a clean makepkg exit, and failed with "<pkgbase>: makepkg produced no
@@ -14,11 +14,11 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
+aurox -Sy
 
 # Plain `-S` install (the --devel gate is only for -Qu upgrade detection; a
 # named VCS target builds regardless).
-gaur -S --noconfirm test-vcs-bump-git
+aurox -S --noconfirm test-vcs-bump-git
 assert_exit 0
 assert_pkg_installed test-vcs-bump-git
 
@@ -38,6 +38,6 @@ esac
 # Re-running the install must not trip makepkg's "a package has already been
 # built (use -f)" abort on the artifact from the first run: the frozen-version
 # reuse gate recognises it and skips the rebuild.
-gaur -S --noconfirm test-vcs-bump-git
+aurox -S --noconfirm test-vcs-bump-git
 assert_exit 0
 assert_pkg_installed test-vcs-bump-git

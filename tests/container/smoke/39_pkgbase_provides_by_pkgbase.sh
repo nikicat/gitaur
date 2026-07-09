@@ -14,7 +14,7 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
+aurox -Sy
 
 install_foreign test-pkgbase-provides-legacy
 assert_pkg_installed test-pkgbase-provides-legacy
@@ -24,7 +24,7 @@ assert_pkg_installed test-pkgbase-provides-legacy
 # calls counterpart_with_hint(entry, None) → counterpart_unhinted, which
 # walks Pkgname (empty — new pkgnames not in localdb) → Replaces (empty,
 # no replaces= declared) → Provides (pkgbase-level hits legacy).
-RUST_LOG=gitaur=warn,gitaur=info gaur -S --noconfirm test-pkgbase-provides-new
+RUST_LOG=aurox=warn,aurox=info aurox -S --noconfirm test-pkgbase-provides-new
 assert_exit 0
 assert_pkg_installed test-pkgbase-provides-new-a
 assert_pkg_installed test-pkgbase-provides-new-b

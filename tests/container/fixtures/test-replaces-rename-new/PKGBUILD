@@ -10,7 +10,7 @@
 pkgname=test-replaces-rename-new
 pkgver=2.0
 pkgrel=1
-pkgdesc='gitaur test fixture: new half of a replaces-rename pair'
+pkgdesc='aurox test fixture: new half of a replaces-rename pair'
 arch=('any')
 license=('MIT')
 replaces=('test-replaces-rename-legacy')

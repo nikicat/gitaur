@@ -8,7 +8,7 @@
 # and rewrites it onto THIS pkgbase. The picker auto-selects the
 # resulting upgrade row.
 #
-# Regression target: `gaur -Syu` of a foreign-installed pkgname in a
+# Regression target: `aurox -Syu` of a foreign-installed pkgname in a
 # split pkgbase used to install every sibling. expand_pkgbase_targets's
 # pacman shortcut (`pac.is_installed(bare) || pac.in_sync(bare)`) fired
 # before the by_name rewrite branch could record a selection, so
@@ -23,7 +23,7 @@ pkgname=(
 )
 pkgver=2.0
 pkgrel=1
-pkgdesc='gitaur test fixture: split pkg (no intra-split deps) for the -Syu shortcut regression'
+pkgdesc='aurox test fixture: split pkg (no intra-split deps) for the -Syu shortcut regression'
 arch=('any')
 license=('MIT')
 

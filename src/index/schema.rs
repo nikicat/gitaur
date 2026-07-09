@@ -77,7 +77,7 @@ pub struct IndexEntry {
     pub srcinfo_blob_oid: [u8; 20],
     /// Committer timestamp (seconds since the Unix epoch) of the branch tip
     /// that produced this entry. Drives the "freshest first" ordering of the
-    /// `gaur <term>` picker — recently-pushed AUR packages float to the top.
+    /// `aurox <term>` picker — recently-pushed AUR packages float to the top.
     /// `0` for entries built before this field existed or whose commit time
     /// couldn't be read.
     pub commit_time_unix: i64,
@@ -162,12 +162,12 @@ impl IndexFile {
     /// `Pkgname.name` switched from `String` to the typed `PkgBase` / `PkgName`
     /// newtypes. **5 → 6** when `provides` / `conflicts` / `replaces` switched
     /// from `Vec<String>` to `Vec<PkgTarget>` — same bytes, distinct rkyv
-    /// archive type, so the version gate forces a rebuild via `gaur -Sy`.
+    /// archive type, so the version gate forces a rebuild via `aurox -Sy`.
     /// rkyv archives are distinct per Rust type even when the underlying
     /// bytes match, and a new field shifts the layout, so loading an older
     /// file with newer types would silently mis-shape the deserialized
     /// struct without the version gate. Older archives must be rebuilt via
-    /// `gaur -Sy`.
+    /// `aurox -Sy`.
     pub const FORMAT_VERSION: u32 = 6;
 
     /// Empty in-memory index. Used when no on-disk file exists yet.

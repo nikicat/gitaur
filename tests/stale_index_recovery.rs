@@ -13,20 +13,20 @@
 //! [`ScopedStateRoot`] guard so no env-var mutation is needed and the
 //! override is auto-cleared on test exit.
 
-use gitaur::config::Config;
-use gitaur::config::defaults::default_config;
-use gitaur::index::{self, IndexFile};
-use gitaur::mirror;
-use gitaur::names::PkgBase;
-use gitaur::paths;
-use gitaur::runopts::{self, RunOpts};
-use gitaur::testing::{ScopedStateRoot, git};
+use aurox::config::Config;
+use aurox::config::defaults::default_config;
+use aurox::index::{self, IndexFile};
+use aurox::mirror;
+use aurox::names::PkgBase;
+use aurox::paths;
+use aurox::runopts::{self, RunOpts};
+use aurox::testing::{ScopedStateRoot, git};
 use std::path::Path;
 use tempfile::TempDir;
 
 /// Build a non-bare repo with one branch per (pkgbase, .SRCINFO content)
 /// tuple, then clone it bare alongside. The bare becomes the upstream
-/// `cfg.mirror_url` points at — gitaur's bootstrap path drives the rest,
+/// `cfg.mirror_url` points at — aurox's bootstrap path drives the rest,
 /// including the gix refspec config that `incremental_fetch` later needs.
 fn build_upstream_bare(root: &Path, branches: &[(&str, &str)]) -> std::path::PathBuf {
     let src = root.join("src");

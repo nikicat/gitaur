@@ -1,4 +1,4 @@
-//! Rootless refresh of the official-repo sync databases — gitaur's native
+//! Rootless refresh of the official-repo sync databases — aurox's native
 //! equivalent of `checkupdates(1)`, without the `fakeroot` dance.
 //!
 //! `pacman -Sy` needs root because it writes the downloaded DBs into
@@ -6,7 +6,7 @@
 //! itself enforces no such thing: `alpm_db_update` just writes wherever the
 //! handle's dbpath points. So we open an [`Alpm`] handle aimed at a *private*,
 //! user-writable dbpath (its `local` symlinked to the system one), register the
-//! configured repos, and call [`update`] — a normal-user download into gitaur's
+//! configured repos, and call [`update`] — a normal-user download into aurox's
 //! state dir. No root, no `fakeroot`, no subprocess.
 //!
 //! libalpm drives the download through its own libcurl backend and reports
@@ -23,7 +23,7 @@
 //! `O_EXCL` inside `update` and unlinked on return) serializes DB writers but
 //! is a pure *existence* lock: it can't distinguish a live holder from the
 //! orphan a killed refresh leaves behind, and libalpm never cleans that orphan
-//! up — every later refresh just fails with "unable to lock database". gitaur
+//! up — every later refresh just fails with "unable to lock database". aurox
 //! therefore holds an advisory `flock` on the dbpath directory itself
 //! ([`RefreshLock`]) across the whole critical section. The kernel releases a
 //! flock when its holder dies, so *holding it* proves no concurrent refresh is
@@ -58,7 +58,7 @@ pub enum SyncOutcome {
     AlreadyCurrent,
 }
 
-/// Refresh the official-repo sync DBs into gitaur's private dbpath, rootless.
+/// Refresh the official-repo sync DBs into aurox's private dbpath, rootless.
 ///
 /// Opens a mutable alpm handle at [`paths::sync_db_path`], wires a per-repo
 /// download UI into `mp`, and runs [`alpm::AlpmList::update`] over every
@@ -103,7 +103,7 @@ pub fn refresh_sync_db(mp: &MultiProgress) -> Result<SyncOutcome> {
             Error::other(format!(
                 "sync db update: {e}; advisory locking is unavailable on this \
                  filesystem so a stale lock can't be cleared automatically — \
-                 if no other gaur is refreshing, remove {} manually",
+                 if no other aurox is refreshing, remove {} manually",
                 alpm_lockfile.display(),
             ))
         } else {
@@ -182,7 +182,7 @@ impl RefreshLock {
         // `suspend` so the notice isn't torn by the parallel AUR-fetch bars.
         mp.suspend(|| {
             ui::info(
-                "another gaur refresh is running; waiting for it to finish \
+                "another aurox refresh is running; waiting for it to finish \
                  (Ctrl+C skips the repo sync)",
             );
         });
@@ -250,7 +250,7 @@ impl RefreshLock {
     /// locks `/var/lib/pacman/db.lck`, a *different* file.
     ///
     /// Removal is sound *because* `self` holds the advisory refresh lock: no
-    /// other gaur is inside its critical section, so a `db.lck` present now
+    /// other aurox is inside its critical section, so a `db.lck` present now
     /// can only be a dead process's orphan. In degraded mode that proof is
     /// unavailable and the file is left untouched. Absent lock ⇒ no-op.
     fn clear_stale_lock(&self, lockfile: &Path) -> Result<()> {
@@ -275,7 +275,7 @@ impl RefreshLock {
     }
 }
 
-/// gitaur's private dbpath, but only once it's actually usable — at least one
+/// aurox's private dbpath, but only once it's actually usable — at least one
 /// downloaded `*.db` under `sync/` and a `local` symlink that still resolves.
 ///
 /// Returning `None` until both hold is load-bearing: an empty or half-built
@@ -448,7 +448,7 @@ mod tests {
         // The live peer's alpm lock, mid-update().
         fs::write(&lck, b"").unwrap();
 
-        // "Another gaur": a distinct fd holding the advisory lock. flock
+        // "Another aurox": a distinct fd holding the advisory lock. flock
         // conflicts are per open-file-description, so a second open of the
         // same dir contends exactly like a second process would.
         let holder = File::open(db).unwrap();

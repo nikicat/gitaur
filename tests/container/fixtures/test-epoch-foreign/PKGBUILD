@@ -8,7 +8,7 @@
 pkgname=test-epoch
 pkgver=0.1
 pkgrel=1
-pkgdesc='gitaur test fixture: non-epoch baseline for epoch-dominates upgrade'
+pkgdesc='aurox test fixture: non-epoch baseline for epoch-dominates upgrade'
 arch=('any')
 license=('MIT')
 

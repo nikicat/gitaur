@@ -4,14 +4,14 @@
 //! Uses system `git` to build the fixture repos (gix 0.83 doesn't expose
 //! high-level init+commit plumbing). The code under test is gix-driven.
 
-use gitaur::config::defaults::default_config;
-use gitaur::index::build::full_build;
-use gitaur::index::secondary::Secondary;
-use gitaur::index::update::incremental_update;
-use gitaur::index::{load, save};
-use gitaur::mirror::MirrorRepo;
-use gitaur::mirror::fetch::RefUpdate;
-use gitaur::testing::{git, git_stdout};
+use aurox::config::defaults::default_config;
+use aurox::index::build::full_build;
+use aurox::index::secondary::Secondary;
+use aurox::index::update::incremental_update;
+use aurox::index::{load, save};
+use aurox::mirror::MirrorRepo;
+use aurox::mirror::fetch::RefUpdate;
+use aurox::testing::{git, git_stdout};
 use std::path::Path;
 use tempfile::TempDir;
 

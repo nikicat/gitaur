@@ -3,8 +3,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
-gaur -S --noconfirm test-checkdep
+aurox -Sy
+aurox -S --noconfirm test-checkdep
 assert_exit 0
 assert_pkg_installed test-checkdep
 assert_pkg_explicit  test-checkdep

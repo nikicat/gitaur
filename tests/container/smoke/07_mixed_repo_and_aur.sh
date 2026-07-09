@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Direct target list mixes a repo pkg and an AUR pkg. Both should be marked
-# Explicit; gitaur shows both lists before its single confirmation.
+# Explicit; aurox shows both lists before its single confirmation.
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
-gaur -S --noconfirm repo-base test-trivial
+aurox -Sy
+aurox -S --noconfirm repo-base test-trivial
 assert_exit 0
 assert_pkg_installed repo-base
 assert_pkg_explicit repo-base

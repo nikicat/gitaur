@@ -93,7 +93,7 @@ pub fn run(cfg: &Config, worktree: &Path, extra_args: &[&str], fresh_log: bool) 
 
     // Catch SIGINT for the duration of this build. `Signals` installs an
     // async-signal-safe handler that suppresses the default action (which would
-    // kill gitaur) and feeds a blocking iterator instead — so a Ctrl+C mid-build
+    // kill aurox) and feeds a blocking iterator instead — so a Ctrl+C mid-build
     // unwinds as `Error::Interrupted` and the no-arg loop bails back to the
     // table rather than the whole program dying. Dropping `Signals` at the end
     // of the function restores the previous disposition (RAII), so Ctrl+C on the
@@ -206,7 +206,7 @@ fn forward_sigint(pid: Option<u32>) {
 /// full disk on `build.log` shouldn't abort the build (and we must keep
 /// reading the pty so makepkg doesn't block on a full master buffer), but the
 /// user needs to know an output sink went away — surface via `tracing` (which
-/// writes to gitaur's own stderr/log, not the pty), once per sink.
+/// writes to aurox's own stderr/log, not the pty), once per sink.
 fn tee<R: Read, W: Write>(mut reader: R, mut writer: W, log: &Mutex<File>) {
     let mut buf = [0u8; 8192];
     let mut stdout_failed = false;

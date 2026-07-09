@@ -10,18 +10,18 @@
 # `warn!` in the log and leave the foreign pkg alone.
 #
 # Assertions:
-#   * `gaur -Qu` does NOT list `test-orphan-foreign` (the foreign pkg)
+#   * `aurox -Qu` does NOT list `test-orphan-foreign` (the foreign pkg)
 #     as an upgrade row.
 #   * The execution log carries a structured warn naming the orphan and
 #     the conflicting pkgbase so the user can find it and decide to
-#     opt in via `gaur -S <pkgbase>` (which IS allowed).
+#     opt in via `aurox -S <pkgbase>` (which IS allowed).
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
 install_foreign test-orphan-foreign
-gaur -Sy
+aurox -Sy
 
-gaur -Qu
+aurox -Qu
 assert_exit 0
 
 # `-Qu` row would print `test-orphan-aur` for the pkgbase (or
@@ -38,9 +38,9 @@ if grep -qF 'test-orphan-aur' "$LAST_STDOUT"; then
     exit 1
 fi
 
-log=$(ls -t "$STATE_DIR"/logs/gitaur-*.log 2>/dev/null | head -1)
+log=$(ls -t "$STATE_DIR"/logs/aurox-*.log 2>/dev/null | head -1)
 [[ -n "$log" && -s "$log" ]] || {
-    echo "expected a non-empty gitaur log under $STATE_DIR/logs" >&2
+    echo "expected a non-empty aurox log under $STATE_DIR/logs" >&2
     ls -la "$STATE_DIR/logs" >&2; _dump >&2; exit 1
 }
 

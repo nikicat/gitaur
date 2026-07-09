@@ -2,7 +2,7 @@
 //! (REPL phase 3), used by `tests/container/extended/07_shell_cart_apply.sh`.
 //!
 //! The shell only runs interactively (stdin must be a TTY), so this spawns the
-//! real no-arg `gaur` under a PTY (via the shared [`pty_harness::Pty`]) and
+//! real no-arg `aurox` under a PTY (via the shared [`pty_harness::Pty`]) and
 //! scripts the staged-transaction flow against the `test-trivial` AUR fixture:
 //!
 //! ```text
@@ -14,17 +14,17 @@
 //! ```
 //!
 //! Each step both drives the shell and asserts the line it should print. The
-//! `.sh` runs `gaur -Sy` first so the shell's on-disk index can classify
+//! `.sh` runs `aurox -Sy` first so the shell's on-disk index can classify
 //! `test-trivial` as AUR (the shell does not fetch at startup), and asserts the
 //! package is actually installed once this driver exits clean.
 
 use pty_harness::Pty;
 
 fn main() {
-    let mut pty = Pty::spawn_gaur();
+    let mut pty = Pty::spawn_aurox();
 
     // The shell starts at its prompt; the index was built by the `.sh`'s `-Sy`.
-    pty.expect("shell banner", |s| s.contains("gitaur shell"));
+    pty.expect("shell banner", |s| s.contains("aurox shell"));
 
     // Stage the AUR fixture — it lands needing review (review_default=prompt).
     pty.send(b"add test-trivial\r");

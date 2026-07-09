@@ -6,7 +6,7 @@
 pkgname=test-mixed-dep-make
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: mixed makedep+depend on AUR pkgs'
+pkgdesc='aurox test fixture: mixed makedep+depend on AUR pkgs'
 arch=('any')
 license=('MIT')
 depends=('test-trivial')

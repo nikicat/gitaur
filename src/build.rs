@@ -135,11 +135,11 @@ pub struct InstallOpts {
     pub gate: ConfirmGate,
 }
 
-/// Entry point for `gaur -S <targets>`.
+/// Entry point for `aurox -S <targets>`.
 ///
 /// Loads the pacman snapshot and (optionally) the AUR index in parallel, then
 /// hands them to [`install_with_index`]. After printing the unified plan and
-/// getting a single confirmation gitaur drives every `pacman` call with
+/// getting a single confirmation aurox drives every `pacman` call with
 /// `--noconfirm` so the user is asked once; pacman never re-prompts.
 #[instrument(skip(cfg))]
 pub fn cmd_install(
@@ -303,7 +303,7 @@ pub(crate) fn apply_plan(
 /// Install the user's repo targets up front: direct ones as explicit, deps
 /// as `--asdeps`. Two `pacman -S` calls so the install-reason flag is per-
 /// batch; sudo cache bridges them. No-op when both buckets are empty.
-/// Always `--noconfirm`: gitaur already gated this with its own prompt, so
+/// Always `--noconfirm`: aurox already gated this with its own prompt, so
 /// pacman shouldn't ask again.
 fn install_repo_phase(cfg: &Config, plan: &Plan, asdeps: bool) -> Result<()> {
     if !plan.direct_repo.is_empty() {
@@ -815,7 +815,7 @@ fn run_build(cfg: &Config, prep: &Prep<'_>) -> Result<Vec<PathBuf>> {
     if outputs.is_empty() {
         // makepkg exited 0 yet nothing we required landed. Log the expected
         // outputs (the frozen list for VCS, the static version otherwise)
-        // against what's on disk so the failure is diagnosable from the gitaur
+        // against what's on disk so the failure is diagnosable from the aurox
         // log, not just the TTY — this path used to return silently, leaving
         // the `selinux-refpolicy-arch-git` run showing "makepkg succeeded"
         // followed by nothing.
@@ -975,7 +975,7 @@ fn install_stratum(
         }
     }
 
-    // Always `--noconfirm`: gitaur's plan+confirm at the top of `cmd_install`
+    // Always `--noconfirm`: aurox's plan+confirm at the top of `cmd_install`
     // is the single user gate; pacman shouldn't ask again.
     let mut args = vec!["-U".to_owned(), "--needed".into(), "--noconfirm".into()];
     if asdeps_override {
@@ -995,7 +995,7 @@ fn install_stratum(
 /// Entry point for `-Sc` / `-Scc`.
 ///
 /// The depth of pacman's own cache cleanup is already encoded in `argv`;
-/// gitaur just wipes its per-pkgbase worktrees (idempotency cache lives
+/// aurox just wipes its per-pkgbase worktrees (idempotency cache lives
 /// entirely inside them as the produced `.pkg.tar.{zst,xz}` files).
 #[instrument(skip(cfg, argv))]
 pub fn cmd_clean(cfg: &Config, argv: &[String]) -> Result<u8> {

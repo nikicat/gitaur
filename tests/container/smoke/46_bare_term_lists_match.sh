@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bare `gaur <term>` is the yay parity shortcut for a repo+AUR fuzzy search.
+# Bare `aurox <term>` is the yay parity shortcut for a repo+AUR fuzzy search.
 # Interactively it launches the shell REPL seeded with the search; with no TTY
 # (the container runs headless) it degrades to "print the ranked matches and
 # exit 0" instead of auto-installing every regex hit — an explicit safety call.
@@ -8,10 +8,10 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
+aurox -Sy
 assert_exit 0
 
-gaur "^test-trivial$"
+aurox "^test-trivial$"
 assert_exit 0
 # The aligned table renders repo + name as separate columns (like the upgrade
 # table), so the row reads `aur   test-trivial …` rather than `aur/test-trivial`.

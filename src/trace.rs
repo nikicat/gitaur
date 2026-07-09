@@ -1,4 +1,4 @@
-//! Read-side analysis of the Chrome/Perfetto span traces gitaur writes to
+//! Read-side analysis of the Chrome/Perfetto span traces aurox writes to
 //! `state_dir()/traces/` (see [`crate::logging::chrome`]).
 //!
 //! The recurring profiling question — "where does the time inside span X go?" —
@@ -6,12 +6,12 @@
 //! directly: reconstruct the parent/child structure (the file is a flat list of
 //! `X` events that Perfetto nests purely by time-containment within a track),
 //! and turn each span's wall time into a *self* time by subtracting its
-//! children. This module does both once, with tests, so the `gitaur-trace`
+//! children. This module does both once, with tests, so the `aurox-trace`
 //! helper can answer the question without a throwaway script each time.
 //!
 //! Containment is reconstructed per `tid` exactly as Perfetto renders it: events
 //! sorted by start, a span is the parent of the next one that starts before it
-//! ends. gitaur's spans are synchronous within a thread, so siblings never
+//! ends. aurox's spans are synchronous within a thread, so siblings never
 //! overlap and `self = dur − Σ children` is exact.
 
 use std::collections::BTreeMap;
@@ -65,7 +65,7 @@ struct RawEvent {
 
 /// Newest trace file in `state_dir()/traces/`, by filename.
 ///
-/// Trace files are named `gitaur-<YYYYMMDD>-<HHMMSS>-<pid>.json`, so a plain
+/// Trace files are named `aurox-<YYYYMMDD>-<HHMMSS>-<pid>.json`, so a plain
 /// lexical max over the directory is also the most recent run — no `stat` calls.
 pub fn latest_trace() -> Result<PathBuf> {
     let dir = paths::traces_dir();

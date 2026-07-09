@@ -4,9 +4,9 @@
 //! which broke `is_bootstrapped()` and `collect_branches()` — both scan
 //! `refs/heads/*`.
 
-use gitaur::config::defaults::default_config;
-use gitaur::mirror::clone::bootstrap_clone;
-use gitaur::testing::git;
+use aurox::config::defaults::default_config;
+use aurox::mirror::clone::bootstrap_clone;
+use aurox::testing::git;
 use indicatif::MultiProgress;
 use tempfile::TempDir;
 
@@ -40,7 +40,7 @@ fn bootstrap_clone_lands_refs_under_refs_heads() {
         root.path(),
     );
 
-    // Point gitaur at the bare and run the real bootstrap path.
+    // Point aurox at the bare and run the real bootstrap path.
     let mut cfg = default_config();
     cfg.mirror_url = format!("file://{}", bare.display());
     bootstrap_clone(&cfg, &dest, &MultiProgress::new()).expect("bootstrap_clone");

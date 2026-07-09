@@ -19,8 +19,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
-gaur -S --noconfirm test-collision-multi
+aurox -Sy
+aurox -S --noconfirm test-collision-multi
 assert_exit 0
 
 # Both split pkgnames from the multi pkgbase must be installed.
@@ -41,12 +41,12 @@ ver="$(pacman -Qi test-collision-otf 2>/dev/null | awk -F': +' '/^Version/{print
 # Build artifacts: only `test-collision-multi` should have a worktree.
 # `test-collision-otf` (the standalone pkgbase) must NOT be touched — its
 # absence proves the resolver's plan stayed scoped to one pkgbase.
-[[ -d ~/.local/state/gitaur/pkgs/test-collision-multi ]] || {
-    echo "expected test-collision-multi worktree under ~/.local/state/gitaur/pkgs/" >&2
+[[ -d ~/.local/state/aurox/pkgs/test-collision-multi ]] || {
+    echo "expected test-collision-multi worktree under ~/.local/state/aurox/pkgs/" >&2
     exit 1
 }
-[[ ! -d ~/.local/state/gitaur/pkgs/test-collision-otf ]] || {
+[[ ! -d ~/.local/state/aurox/pkgs/test-collision-otf ]] || {
     echo "test-collision-otf pkgbase was built — collision regressed" >&2
-    ls -la ~/.local/state/gitaur/pkgs/ >&2
+    ls -la ~/.local/state/aurox/pkgs/ >&2
     exit 1
 }

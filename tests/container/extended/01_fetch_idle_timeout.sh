@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `gaur -Sy` against an HTTP tarpit must abort once curl's lowSpeedTime
+# `aurox -Sy` against an HTTP tarpit must abort once curl's lowSpeedTime
 # elapses, not hang forever on the dead socket. Verifies:
 #   * exit non-zero
 #   * total wall-clock is within ~2× the configured idle window
@@ -7,7 +7,7 @@
 source /work/tests/container/lib.sh
 bootstrap
 
-# Point gitaur at the tarpit on loopback, with a tight 3-second idle budget
+# Point aurox at the tarpit on loopback, with a tight 3-second idle budget
 # so the test finishes fast. The tarpit accepts TCP and reads the request
 # headers, then stalls — curl's lowSpeedTime is what should bail.
 PORT=18765
@@ -22,14 +22,14 @@ reset_state
 TARPIT_PID=$!
 trap 'kill $TARPIT_PID 2>/dev/null; wait $TARPIT_PID 2>/dev/null || true' EXIT
 
-# Wait for the listener to come up before pointing gitaur at it.
+# Wait for the listener to come up before pointing aurox at it.
 for _ in $(seq 1 50); do
     if (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then break; fi
     sleep 0.1
 done
 
 START=$EPOCHREALTIME
-gaur -Sy --noconfirm
+aurox -Sy --noconfirm
 END=$EPOCHREALTIME
 ELAPSED_MS=$(awk -v s="$START" -v e="$END" 'BEGIN { printf "%d", (e - s) * 1000 }')
 

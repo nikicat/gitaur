@@ -19,13 +19,13 @@ use crate::context_local;
 /// Snapshot of clap-derived flags that need to be visible deep in the call tree.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RunOpts {
-    /// User passed `--noconfirm`: skip every interactive gitaur prompt
-    /// (matches pacman's flag of the same name; gitaur threads it into
+    /// User passed `--noconfirm`: skip every interactive aurox prompt
+    /// (matches pacman's flag of the same name; aurox threads it into
     /// its own prompts including the pre-sudo confirmation).
     pub noconfirm: bool,
 
     /// User passed `--noresync`: don't auto-rebuild the AUR index when the
-    /// on-disk archive is from an incompatible gitaur. Read by
+    /// on-disk archive is from an incompatible aurox. Read by
     /// [`crate::index::load_or_resync`], which errors out instead of silently
     /// kicking off a network fetch + rebuild.
     pub noresync: bool,

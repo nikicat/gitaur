@@ -1,4 +1,4 @@
-# Plan: shell-like (REPL) UI for interactive `gaur`
+# Plan: shell-like (REPL) UI for interactive `aurox`
 
 Status: phases 1–4 implemented; phase 5a (one unified renderer) + 5b (sorted-cart
 invariant) **done**; phase 5c **done** — **tab-completion** (the rustyline
@@ -21,13 +21,13 @@ The headline flow is the upgrade procedure: `upgrade` refreshes the indexes and
 stages the available upgrades; the user refines the set (`discard`/`add`),
 approves the AUR packages (`review`/`approve`; repo packages auto-approve), and
 runs `apply`. An `apply` interrupted or failed mid-build drops back to the
-shell — not out of gaur — with the cart intact, so the user can `discard` the
+shell — not out of aurox — with the cart intact, so the user can `discard` the
 offender and `apply` the rest.
 
 ```
-$ gaur
-gitaur shell — type `help` for commands, `quit` to leave
-gaur> upgrade
+$ aurox
+aurox shell — type `help` for commands, `quit` to leave
+aurox> upgrade
 :: refreshing AUR mirror + index … done (3.8s)
 :: 14 upgrades staged — 11 repo (approved), 3 AUR (need review)
     1  core   glibc          2.40-1 → 2.41-1     approved
@@ -35,35 +35,35 @@ gaur> upgrade
    12  aur    yay-bin        12.4-1 → 12.5-1     review
    13  aur    firefox-git    (vcs)               review
    14  aur    cuda           12.6-1 → 12.8-1     review
-gaur> discard cuda                      # not today
-gaur> add yubikey-personalization       # extra install, same transaction
-gaur> review yay-bin firefox-git        # diff cycle: approve / skip / discard each
+aurox> discard cuda                      # not today
+aurox> add yubikey-personalization       # extra install, same transaction
+aurox> review yay-bin firefox-git        # diff cycle: approve / skip / discard each
   ── yay-bin ── PKGBUILD diff …  [a]pprove [s]kip [d]iscard [v]iew [e]dit: a
   ── firefox-git ── PKGBUILD diff …                                      : a
-gaur> approve yubikey-personalization   # approve without opening a diff
-gaur> show
+aurox> approve yubikey-personalization   # approve without opening a diff
+aurox> show
 :: transaction — 13 package(s), +2 deps · all approved
    …change-set table with sizes + build-time + total…
-gaur> apply
+aurox> apply
    …build + install, one sudo batch…
    ✗ firefox-git failed to build — dropped back to the shell
-gaur> discard firefox-git
-gaur> apply                             # retry the rest; firefox-git no longer staged
+aurox> discard firefox-git
+aurox> apply                             # retry the rest; firefox-git no longer staged
    …done…
-gaur> quit
+aurox> quit
 ```
 
 ## Locked decisions (from review)
 
-1. **Augment, don't replace, the flag CLI.** Bare interactive `gaur` opens the
-   shell. Explicit `gaur -S…/-Ss…/-Si…/-Syu` and all pacman pass-through keep
+1. **Augment, don't replace, the flag CLI.** Bare interactive `aurox` opens the
+   shell. Explicit `aurox -S…/-Ss…/-Si…/-Syu` and all pacman pass-through keep
    their **current one-shot, scriptable** behavior unchanged.
-   *Revised:* interactive **bare-term search** (`gaur <term>…`) now opens the
+   *Revised:* interactive **bare-term search** (`aurox <term>…`) now opens the
    shell too, seeded with that `search` (identical to typing `search <term>…` at
    the prompt) — the old `MultiSelect` picker is gone, so the REPL is the one
-   interactive surface. Non-interactively (pipe / `--noconfirm`) `gaur <term>…`
+   interactive surface. Non-interactively (pipe / `--noconfirm`) `aurox <term>…`
    stays a one-shot **ranked listing** that installs nothing. Non-interactive
-   bare `gaur` (pipe / cron / `--noconfirm`) still does a single `-Syu` pass.
+   bare `aurox` (pipe / cron / `--noconfirm`) still does a single `-Syu` pass.
 2. **Words-only command vocabulary.** `search` `info` `add` `discard` `remove`
    `upgrade` `review` `approve` `show` `apply` `clear` `refresh` `help` `quit`.
    No pacman-letter clusters, no clap. Note the three distinct removal-ish verbs:
@@ -256,7 +256,7 @@ The unified table is the **union** of the two renderers' good parts:
 Resulting layout (roots numbered + approval-tagged; deps indented, unnumbered):
 
 ```
-gaur> show
+aurox> show
 :: transaction — 3 install, +2 deps, 1 remove · all approved
    1  core   approved  glibc      2.40-1 → 2.41-1     12.00 MiB
    2  aur    approved  yay-bin    12.4-1 → 12.5-1      ~9.00 MiB  (3d ago)
@@ -385,7 +385,7 @@ Argument-bearing cart verbs keep raw `String` tokens that the handlers feed to
 ## Dependencies
 
 - **`rustyline`** (added, v18) for the line editor: history
-  (`$XDG_STATE_HOME/gitaur/shell_history`), emacs keybindings, and the
+  (`$XDG_STATE_HOME/aurox/shell_history`), emacs keybindings, and the
   `ShellHelper` `Completer` over verbs + names (phase 5c).
 - **`shell-words`** (added) for tokenizing the input line.
 - Globs reuse the existing **`regex`** dep — no `globset`/`glob` added.
@@ -422,7 +422,7 @@ then is deleted; until then the shell's `upgrade` bridges to it.
 
 The shell starts **cheap**: load the existing on-disk index (for `search`/`info`)
 and build the name universe — **no network refresh at startup**. Fetching belongs
-to an explicit `upgrade` (or `refresh`), per the RFC: `gaur` → prompt instantly;
+to an explicit `upgrade` (or `refresh`), per the RFC: `aurox` → prompt instantly;
 `upgrade` → refresh + stage. This also resolves the old "auto-stage on entry?"
 question — entry stages nothing; `upgrade` is the deliberate first move.
 
@@ -457,7 +457,7 @@ sync-repo adds (`-S name`) with local-file adds (`-U file`).
 **libalpm can.** A single `alpm` transaction may register both additions
 (`trans_add_pkg`, for syncdb packages *and* `pkg_load`'ed `.pkg.tar` files) and
 removals (`trans_remove_pkg`) before one `trans_prepare` + `trans_commit`. This
-is precisely the API gitaur **already drives read-only** in
+is precisely the API aurox **already drives read-only** in
 `pacman::invoke::preflight_dash_u_inner` (`trans_init(NO_LOCK)` → `pkg_load` →
 `trans_add_pkg` → `trans_prepare` → `trans_release`). The only missing pieces for
 a real commit: take the DB lock instead of `NO_LOCK`, add the `trans_remove_pkg`
@@ -465,11 +465,11 @@ calls, `trans_commit` — and do it **with privilege**. This is also the directi
 memory `feedback_native_libalpm_over_pacman` points ("`alpm` crate for DB
 reads+writes … own progress UI; shell out only for the privileged final txn").
 
-**The privilege boundary.** Committing writes `/var/lib/pacman` (root), and gitaur
+**The privilege boundary.** Committing writes `/var/lib/pacman` (root), and aurox
 runs unprivileged (it lets *pacman* escalate). The clean way to keep one-sudo: a
 small **internal privileged subcommand** — `apply` serializes the prepared
 transaction (syncdb add names + AUR file paths + remove names + flags) and
-re-execs `<escalator> gaur __commit-txn <spec>`, which opens alpm, registers
+re-execs `<escalator> aurox __commit-txn <spec>`, which opens alpm, registers
 adds+removes, prepares, commits, and owns the install progress UI. One
 escalation, one transaction, full atomicity across repo + AUR + removals.
 
@@ -516,7 +516,7 @@ Each phase is independently shippable and leaves the flag CLI fully working.
 1. **REPL skeleton. — DONE.** rustyline loop, `shell-words` parse, `Command`
    enum, `help`/`quit`/Ctrl-C/Ctrl-D, persistent history, and the `ShellEnv` +
    pure `dispatch` split with scripted-fake unit tests. Wired at the no-arg
-   interactive branch. Bare interactive `gaur` enters the shell unconditionally
+   interactive branch. Bare interactive `aurox` enters the shell unconditionally
    (no env gate); `upgrade` bridges to `upgrade_loop` for now; the cart verbs are
    stubs. (`src/cli/shell.rs` + `command.rs`.)
 2. **Read-only commands + selector core. — DONE (tab-completion pending).**

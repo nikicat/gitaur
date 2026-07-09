@@ -1,4 +1,4 @@
-//! HTTP tarpit used by `tests/container/extended/*` to exercise gitaur's
+//! HTTP tarpit used by `tests/container/extended/*` to exercise aurox's
 //! idle-fetch timeout (`mirror_idle_timeout_secs` → curl `lowSpeedTime`).
 //!
 //! Accepts TCP, drains the HTTP request line + headers, then sleeps for
@@ -23,7 +23,7 @@ fn main() {
     let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind");
     eprintln!("tarpit listening on 127.0.0.1:{port}");
     for stream in listener.incoming().flatten() {
-        // Standalone test tarpit — no gitaur thread-locals to propagate.
+        // Standalone test tarpit — no aurox thread-locals to propagate.
         #[allow(clippy::disallowed_methods)]
         thread::spawn(move || {
             // Drain headers so the server reaches the "respond" phase before

@@ -1,4 +1,4 @@
-//! `gaur -Qu` and the shared upgrade-query plumbing that also feeds the
+//! `aurox -Qu` and the shared upgrade-query plumbing that also feeds the
 //! `-Syu` interactive picker. Read-only: walks alpm + the AUR index file,
 //! never shells out to `pacman -S` or asks for sudo.
 
@@ -42,7 +42,7 @@ impl DevelPolicy {
     }
 }
 
-/// `gaur -Qu` — show the union of pacman-repo and AUR upgrade candidates.
+/// `aurox -Qu` — show the union of pacman-repo and AUR upgrade candidates.
 ///
 /// One flat, severity-sorted table grouped by `repo` column. Read-only and
 /// unprivileged (no sudo), so safe to call both as the bare `-Qu` and as a
@@ -64,7 +64,7 @@ pub fn collect_upgrade_plan(cfg: &Config, devel: DevelPolicy) -> Result<Vec<PkgU
     }
 }
 
-/// The once-per-session immutable state behind the no-arg `gaur` upgrade loop.
+/// The once-per-session immutable state behind the no-arg `aurox` upgrade loop.
 ///
 /// Holds the AUR index plus its secondary lookup maps, loaded exactly once.
 /// The mirror is fetched at session start and never re-fetched mid-loop, so
@@ -169,7 +169,7 @@ fn aur_upgrades(
                     warn!(
                         installed = %name,
                         pkgbase = %e.pkgbase,
-                        "AUR pkgbase provides this pkg but also conflicts with it without a replaces= — skipped as auto-upgrade; opt in with `gaur -S {}` to switch",
+                        "AUR pkgbase provides this pkg but also conflicts with it without a replaces= — skipped as auto-upgrade; opt in with `aurox -S {}` to switch",
                         e.pkgbase,
                     );
                     continue;

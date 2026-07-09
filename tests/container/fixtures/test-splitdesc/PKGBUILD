@@ -1,7 +1,7 @@
 # Split pkgbase whose `pkgdesc` is declared ONLY per-pkgname — there is no
 # pkgbase-level pkgdesc. `makepkg --printsrcinfo` emits each description inside
 # its `pkgname = …` section, the exact shape of real AUR split packages like
-# `systemd-selinux`. Older gitaur only read pkgbase-level pkgdesc, so every
+# `systemd-selinux`. Older aurox only read pkgbase-level pkgdesc, so every
 # such package showed a blank description in the picker, `-Ss`, and `-Si`.
 # Regression target for per-pkgname pkgdesc parsing + display_desc fallback.
 #

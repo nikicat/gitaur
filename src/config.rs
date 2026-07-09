@@ -1,4 +1,4 @@
-//! Persistent user configuration loaded from `~/.config/gitaur/config.toml`.
+//! Persistent user configuration loaded from `~/.config/aurox/config.toml`.
 
 use crate::cli::shell::cart::AurApproval;
 use crate::error::Result;

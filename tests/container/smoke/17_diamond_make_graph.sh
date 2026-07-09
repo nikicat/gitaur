@@ -4,8 +4,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
-gaur -S --noconfirm test-make-diamond-d
+aurox -Sy
+aurox -S --noconfirm test-make-diamond-d
 assert_exit 0
 assert_pkg_installed test-make-diamond-a
 assert_pkg_installed test-make-diamond-b

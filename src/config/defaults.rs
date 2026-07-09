@@ -13,7 +13,7 @@ pub fn default_config() -> Config {
         refresh_max_age_secs: 3600,
         color: "auto".into(),
         makepkg_path: "makepkg".into(),
-        // `-d` skips makepkg's own dep checks: gitaur pre-installs makedeps
+        // `-d` skips makepkg's own dep checks: aurox pre-installs makedeps
         // stratum-by-stratum, and `makepkg -s` would otherwise try to fetch
         // AUR-only deps via `pacman -S` and fail. Runtime `depends` are
         // satisfied later by the final `pacman -U` resolving intra-stratum.

@@ -1,4 +1,4 @@
-# `-git` suffix → gitaur treats as VCS. Tests:
+# `-git` suffix → aurox treats as VCS. Tests:
 #   * is_vcs_pkg() detection
 #   * --devel flag inclusion in -Syu
 #   * exclusion from default -Syu when --devel absent
@@ -6,7 +6,7 @@
 pkgname=test-vcs-git
 pkgver=r1.deadbeef
 pkgrel=1
-pkgdesc='gitaur test fixture: VCS pkg'
+pkgdesc='aurox test fixture: VCS pkg'
 arch=('any')
 license=('MIT')
 

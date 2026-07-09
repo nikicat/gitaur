@@ -4,7 +4,7 @@
 pkgname=test-csort-c
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: csortprobe ordering'
+pkgdesc='aurox test fixture: csortprobe ordering'
 arch=('any')
 license=('MIT')
 

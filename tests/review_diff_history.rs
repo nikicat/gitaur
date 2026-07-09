@@ -3,11 +3,11 @@
 //! repo with the system `git` CLI, then drives [`review::find_installed_commit`]
 //! against it.
 
-use gitaur::build::review;
-use gitaur::build::review::HistorySearch;
-use gitaur::mirror::MirrorRepo;
-use gitaur::testing::{git, git_stdout};
-use gitaur::version::Ver;
+use aurox::build::review;
+use aurox::build::review::HistorySearch;
+use aurox::mirror::MirrorRepo;
+use aurox::testing::{git, git_stdout};
+use aurox::version::Ver;
 use gix::ObjectId;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;

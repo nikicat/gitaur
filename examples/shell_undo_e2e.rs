@@ -3,7 +3,7 @@
 //! `tests/container/extended/09_shell_undo.sh`.
 //!
 //! The shell only runs interactively (stdin must be a TTY), so this spawns the
-//! real no-arg `gaur` under a PTY (via the shared [`pty_harness::Pty`]) and
+//! real no-arg `aurox` under a PTY (via the shared [`pty_harness::Pty`]) and
 //! scripts the cart-editing flow against two AUR fixtures. It never `apply`s —
 //! the whole point is to exercise pure cart edits — so the `.sh` asserts nothing
 //! was installed:
@@ -23,16 +23,16 @@
 //! are pinned by the unit tests in `src/cli/shell.rs`; this proves the commands
 //! are wired through the real REPL and print the right thing.
 //!
-//! The `.sh` runs `gaur -Sy` first so the shell's on-disk index can classify
+//! The `.sh` runs `aurox -Sy` first so the shell's on-disk index can classify
 //! `test-trivial` and `test-epoch` as AUR (the shell does not fetch at startup).
 
 use pty_harness::Pty;
 
 fn main() {
-    let mut pty = Pty::spawn_gaur();
+    let mut pty = Pty::spawn_aurox();
 
     // The shell starts at its prompt; the index was built by the `.sh`'s `-Sy`.
-    pty.expect("shell banner", |s| s.contains("gitaur shell"));
+    pty.expect("shell banner", |s| s.contains("aurox shell"));
 
     // Stage two AUR fixtures. The cart sorts by spec, so row 1 is `test-epoch`.
     pty.send(b"add test-trivial test-epoch\r");

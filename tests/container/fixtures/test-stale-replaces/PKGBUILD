@@ -8,7 +8,7 @@
 pkgname=test-stale-replaces
 pkgver=2.0
 pkgrel=1
-pkgdesc='gitaur test fixture: stale replaces of own pkgname'
+pkgdesc='aurox test fixture: stale replaces of own pkgname'
 arch=('any')
 license=('MIT')
 replaces=('test-stale-replaces')

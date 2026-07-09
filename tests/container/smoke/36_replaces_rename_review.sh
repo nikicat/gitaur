@@ -14,7 +14,7 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
+aurox -Sy
 
 # Seed: foreign install of the legacy pkg. Models the maintainer-renamed
 # pkgbase scenario — the user's localdb still carries the old name.
@@ -25,7 +25,7 @@ assert_pkg_installed test-replaces-rename-legacy
 # (the new pkgname is in the index) and the user-typed pkgname becomes
 # the hint. The hint isn't installed, so counterpart_for_hint returns
 # None; the unhinted walk then finds the legacy via Replaces.
-RUST_LOG=gitaur=warn,gitaur=info gaur -S --noconfirm test-replaces-rename-new
+RUST_LOG=aurox=warn,aurox=info aurox -S --noconfirm test-replaces-rename-new
 assert_exit 0
 assert_pkg_installed test-replaces-rename-new
 

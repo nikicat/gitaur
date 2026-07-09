@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression: gitaur runs makepkg under a pty so makepkg's `[[ -t 2 ]]` check
+# Regression: aurox runs makepkg under a pty so makepkg's `[[ -t 2 ]]` check
 # passes and its `==>` banners stay coloured. Before that change makepkg saw
 # a plain pipe and dropped colour entirely.
 #
@@ -11,8 +11,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
-gaur -S --noconfirm test-trivial
+aurox -Sy
+aurox -S --noconfirm test-trivial
 assert_exit 0
 
 log="$STATE_DIR/pkgs/test-trivial/build.log"

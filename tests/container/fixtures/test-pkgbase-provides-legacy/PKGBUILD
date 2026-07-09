@@ -8,7 +8,7 @@
 pkgname=test-pkgbase-provides-legacy
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: legacy half of a pkgbase-level-provides pair'
+pkgdesc='aurox test fixture: legacy half of a pkgbase-level-provides pair'
 arch=('any')
 license=('MIT')
 

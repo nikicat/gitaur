@@ -1,29 +1,29 @@
-# gitaur architecture
+# aurox architecture
 
-This is a maintainer's map of how `gitaur` is wired. For user-facing flags
+This is a maintainer's map of how `aurox` is wired. For user-facing flags
 see `README.md`; for the test suite see `docs/TESTING.md`; for profiling
 see `docs/PROFILING.md`.
 
 ## The 30-second tour
 
-`gitaur` is a pacman-compatible CLI that resolves and builds AUR packages
+`aurox` is a pacman-compatible CLI that resolves and builds AUR packages
 against a local clone of [`github.com/archlinux/aur`](https://github.com/archlinux/aur)
 — a single bare repo where every package is its own `refs/heads/<pkgbase>`
 branch (~154 k of them, ~2 GiB pack). Three big moving parts:
 
 1. **The mirror** (`src/mirror/`) — bare clone on disk, refreshed via
-   incremental gix fetches. `~/.local/state/gitaur/aur`.
+   incremental gix fetches. `~/.local/state/aurox/aur`.
 2. **The index** (`src/index/`) — rkyv-archived blob mapping pkgname →
    pkgbase + deps + provides + version. One file, mmapped at load.
-   `~/.local/state/gitaur/index.bin`.
+   `~/.local/state/aurox/index.bin`.
 3. **The build pipeline** (`src/build/`) — resolves a `-S` target list
    into a `Plan`, drives `makepkg` per pkgbase in stratified order, then
    `pacman -U`'s the results.
 
 Anything pacman owns (`-Q`, `-R`, `-T`, `-D`, `-F`, `-U`, `-Su` system
-upgrades, and the `pacman.conf` it reads) is forwarded verbatim. `gitaur`
+upgrades, and the `pacman.conf` it reads) is forwarded verbatim. `aurox`
 owns `-S <pkg>` (install), `-Sy` (mirror refresh), `-Ss`/`-Si` (search/info),
-and `-Sc` (clean). AUR upgrades are the interactive shell's job (`gaur` →
+and `-Sc` (clean). AUR upgrades are the interactive shell's job (`aurox` →
 `upgrade`), not the `-Syu` flag — that's a plain `pacman -Syu` passthrough.
 
 ## Module map
@@ -37,7 +37,7 @@ src/
 ├── cli/
 │   ├── flags.rs        pacman-style clustered flag parser (-Syyu → S,y,y,u)
 │   ├── dispatch.rs     routes to mirror / index / build subcommands; -Su → pacman
-│   ├── search.rs       `gaur <term>...` — yay-style fuzzy search → multi-select → install
+│   ├── search.rs       `aurox <term>...` — yay-style fuzzy search → multi-select → install
 │   ├── shell.rs        the interactive no-arg REPL (cart / approval / apply)
 │   └── shell/          command, selector, cart, upgrade (refresh+reload + cost preview)
 │
@@ -78,7 +78,7 @@ src/
 │   ├── sync.rs         rootless refresh of the official sync DBs (checkupdates-style)
 │   └── verdiff.rs      structural parse + display-diff of Arch versions
 │
-├── config.rs        ~/.config/gitaur/config.toml loader
+├── config.rs        ~/.config/aurox/config.toml loader
 ├── config/
 │   └── defaults.rs     built-in defaults when a field/file is absent
 │
@@ -95,7 +95,7 @@ src/
 ├── logging/
 │   └── chrome.rs       OTEL SpanExporter → Chrome/Perfetto trace JSON
 │
-├── bin/trace.rs     `gitaur-trace` binary: read-side trace analysis
+├── bin/trace.rs     `aurox-trace` binary: read-side trace analysis
 ├── error.rs         single Error enum (anyhow-free; we own the variants)
 ├── git.rs           centralized, instrumented system-`git` invocation
 ├── names.rs         typed PkgName / PkgBase / PkgTarget / VirtualName
@@ -107,7 +107,7 @@ src/
 └── testing.rs       #[doc(hidden)] shared test helpers (git CLI runner)
 ```
 
-## Data flow: `gaur -S <pkg>` end-to-end
+## Data flow: `aurox -S <pkg>` end-to-end
 
 ```
 argv ──► cli::pre-scan ──► clap ──► dispatch::handle_s
@@ -179,7 +179,7 @@ classification then becomes pure data, parallelisable, and cheap.
 > `prepare_one` (`src/build.rs`) and rendered by `review::header`
 > (`src/build/review.rs`).
 
-When `gitaur` is about to build an AUR pkgbase it needs to answer one
+When `aurox` is about to build an AUR pkgbase it needs to answer one
 question: **what does the user currently have installed that this build will
 displace?** The label on the review screen ("install" / "reinstall" /
 "upgrade"), the choice of a diff base for the PKGBUILD review, and the
@@ -334,7 +334,7 @@ walk        = match → diff
   (`dotnet-runtime-7.0`) — that's the name the user typed `pacman -Q`
   to see. The counterpart provenance is a review-time concern.
 - **`pacman -U`'s removal behaviour**: owned by the PKGBUILD's
-  `replaces=` declaration. Gitaur hands pacman the files; pacman's own
+  `replaces=` declaration. Aurox hands pacman the files; pacman's own
   rules govern whether the old pkg comes out.
 - **Idempotency check** in `prepare_one`: keys on
   `entry.pkgnames × new_ver` against the on-disk `.pkg.tar.zst` set.
@@ -357,7 +357,7 @@ The Provides tier breaks down when a pkgbase declares several
 > (`src/resolver.rs`), `PacmanIndex::counterpart_with_hint`
 > (`src/pacman/alpm_db.rs`).
 
-`gitaur::build::Target` pairs each input with an optional
+`aurox::build::Target` pairs each input with an optional
 `hint: Option<PkgName>` — the pkgname the user thinks they have
 installed. Two sources populate it:
 
@@ -436,7 +436,7 @@ Notation:
 - *foreign* = in pacman's localdb but absent from every sync DB. Models
   the dotnet-runtime case (installed via a prior source no longer shipping
   the pkg).
-- *canonical* = installed via gitaur, so its pkgbase is in the AUR mirror
+- *canonical* = installed via aurox, so its pkgbase is in the AUR mirror
   and pkgname = the canonical AUR name.
 - "—" in Smoke would mean correct in code (unit-tested in
   `alpm_db::tests` and `resolver::pkgbase_expand::tests`) but no
@@ -568,7 +568,7 @@ on the 150 k-branch AUR mirror). Two regression tests guard this:
 
 `makepkg -s` tries to install missing deps via `pacman -S`, which can
 only fetch from sync repos. For AUR-only deps the fetch fails — `pacman`
-doesn't know about them. So gitaur:
+doesn't know about them. So aurox:
 
 1. Pre-installs all **repo** deps (direct + transitive) via `pacman -S`.
 2. Pre-installs all **AUR makedeps + checkdeps** stratum-by-stratum via
@@ -588,7 +588,7 @@ that don't help when most queries are regex over `pkgname` + `pkgdesc`.
 
 The catalog is rebuilt incrementally — `index::update::incremental_update`
 applies the `RefUpdate` deltas produced by `mirror::fetch::incremental_fetch`,
-so a `gaur -Sy` doesn't re-parse the 99 % of pkgbases that didn't move.
+so a `aurox -Sy` doesn't re-parse the 99 % of pkgbases that didn't move.
 
 ### Why no build state DB — idempotency keys on the artifact filename
 
@@ -638,7 +638,7 @@ specific quirks worth knowing:
 Pacman accepts flags freely on either side of the operation
 (`pacman --noconfirm -S foo` and `pacman -S --noconfirm foo` both work).
 clap with `trailing_var_arg + allow_hyphen_values` is needed so flags
-unknown to gitaur (e.g. pacman's `-Rns`) don't trip clap. The cost: any
+unknown to aurox (e.g. pacman's `-Rns`) don't trip clap. The cost: any
 flag after `-S` lands in the trailing var arg and never reaches
 `cli.noconfirm`. `cli/flags.rs` re-parses argv into `PacFlags`; `dispatch`
 ORs the two sources together. If you add a new global flag, you'll need
@@ -648,13 +648,13 @@ to plumb it through both.
 
 | Path                                          | Owner            | Contents                              |
 | --------------------------------------------- | ---------------- | ------------------------------------- |
-| `~/.local/state/gitaur/aur/`                  | gix bare clone   | AUR mirror, branches under `refs/heads/<pkgbase>` |
-| `~/.local/state/gitaur/index.bin`             | `index::save`    | rkyv-archived `IndexFile`             |
-| `~/.local/state/gitaur/pkgs/<pkgbase>/`       | linked worktrees | per-pkgbase build dir (+ cached `.pkg.tar.*` — the build cache key) |
-| `~/.local/state/gitaur/metrics.db`            | rusqlite         | per-pkgbase build duration (cost hint only) |
-| `~/.local/state/gitaur/logs/`                 | logging          | last 10 invocation logs               |
-| `~/.local/state/gitaur/traces/`               | logging          | per-run Chrome/Perfetto span traces   |
-| `~/.config/gitaur/config.toml`                | user             | overrides for `config::defaults`      |
+| `~/.local/state/aurox/aur/`                  | gix bare clone   | AUR mirror, branches under `refs/heads/<pkgbase>` |
+| `~/.local/state/aurox/index.bin`             | `index::save`    | rkyv-archived `IndexFile`             |
+| `~/.local/state/aurox/pkgs/<pkgbase>/`       | linked worktrees | per-pkgbase build dir (+ cached `.pkg.tar.*` — the build cache key) |
+| `~/.local/state/aurox/metrics.db`            | rusqlite         | per-pkgbase build duration (cost hint only) |
+| `~/.local/state/aurox/logs/`                 | logging          | last 10 invocation logs               |
+| `~/.local/state/aurox/traces/`               | logging          | per-run Chrome/Perfetto span traces   |
+| `~/.config/aurox/config.toml`                | user             | overrides for `config::defaults`      |
 
 ## Common gotchas for new maintainers
 
@@ -669,7 +669,7 @@ to plumb it through both.
 - **makepkg refuses to run as root**: the build worktree must be owned
   by a non-root user. In CI / containers this means an unprivileged
   `builder` user with passwordless sudo for the pacman calls.
-- **Sudo is consolidated, not cached by gitaur**: we don't run
+- **Sudo is consolidated, not cached by aurox**: we don't run
   `sudo -v` keepalives. We assume the OS sudo cache (5-15 min) bridges
   the per-stratum prompts.
 - **Don't add `aur_order: Vec<String>`**: it was replaced by

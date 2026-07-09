@@ -189,7 +189,7 @@ impl Secondary {
     /// Order matches `classify`: pkgname → provides → pkgbase. The
     /// pkgbase fallback lets `-Si bisq` find an entry whose only pkgname
     /// is `bisq-desktop`. `target` is `&str` because CLI argv is by
-    /// definition unclassified — gitaur doesn't know if the user typed
+    /// definition unclassified — aurox doesn't know if the user typed
     /// a pkgname, a virtual, or a pkgbase.
     pub fn lookup<'a>(&self, idx: &'a IndexFile, target: &str) -> Option<&'a IndexEntry> {
         let bare = strip_version_constraint(target);

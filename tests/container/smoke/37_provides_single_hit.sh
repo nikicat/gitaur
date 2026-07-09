@@ -12,7 +12,7 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
+aurox -Sy
 
 # Seed: only legacy-a is foreign-installed. legacy-b is intentionally
 # absent — that's the distinguishing condition versus smoke 32.
@@ -24,7 +24,7 @@ assert_pkg_not_installed test-multi-provides-legacy-b
 # expand_pkgbase_targets rewrites the spec to the pkgbase and derives a
 # hint of legacy-a. counterpart_with_hint and the unhinted walk both
 # converge on legacy-a (no ambiguity), so no diagnostics should fire.
-RUST_LOG=gitaur=warn,gitaur=info gaur -S --noconfirm test-multi-provides-legacy-a
+RUST_LOG=aurox=warn,aurox=info aurox -S --noconfirm test-multi-provides-legacy-a
 assert_exit 0
 assert_pkg_installed test-multi-provides-new
 

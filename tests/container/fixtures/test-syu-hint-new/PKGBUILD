@@ -19,7 +19,7 @@
 pkgname=test-syu-hint-new
 pkgver=2.0
 pkgrel=1
-pkgdesc='gitaur test fixture: pkgbase with two installed provides; tests -Syu hint plumbing'
+pkgdesc='aurox test fixture: pkgbase with two installed provides; tests -Syu hint plumbing'
 arch=('any')
 license=('MIT')
 provides=('test-syu-hint-newer' 'test-syu-hint-older')

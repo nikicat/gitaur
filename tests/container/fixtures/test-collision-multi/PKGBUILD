@@ -11,7 +11,7 @@ pkgbase=test-collision-multi
 pkgname=(test-collision-otf test-collision-ttf)
 pkgver=2.0
 pkgrel=1
-pkgdesc='gitaur test fixture: split pkg with sibling-name collision'
+pkgdesc='aurox test fixture: split pkg with sibling-name collision'
 arch=('any')
 license=('MIT')
 

@@ -4,7 +4,7 @@
 pkgname=repo-base
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: lives in the local sync repo'
+pkgdesc='aurox test fixture: lives in the local sync repo'
 arch=('any')
 license=('MIT')
 

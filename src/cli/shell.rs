@@ -1,4 +1,4 @@
-//! Interactive shell (REPL) for the no-arg `gaur` invocation.
+//! Interactive shell (REPL) for the no-arg `aurox` invocation.
 //!
 //! A persistent prompt the user drives with word-commands (`search`, `add`,
 //! `upgrade`, `apply`, …) against long-lived session state, replacing the
@@ -1131,9 +1131,9 @@ fn help_topic(topic: &str) -> String {
 /// Run the interactive shell. Returns the desired process exit code.
 ///
 /// `initial_search` seeds the session: when launched via the bare-positional
-/// shortcut (`gaur <term>…`), dispatch passes the typed terms here and the shell
+/// shortcut (`aurox <term>…`), dispatch passes the typed terms here and the shell
 /// runs one `search` before the prompt loop — identical to starting the shell
-/// and typing `search <term>…`. Empty for the plain no-arg `gaur` launch.
+/// and typing `search <term>…`. Empty for the plain no-arg `aurox` launch.
 #[instrument(skip(cfg))]
 pub fn run(cfg: &Config, devel: DevelPolicy, initial_search: &[SearchTerm]) -> Result<u8> {
     info!(devel = ?devel, terms = initial_search.len(), "shell session start");
@@ -1156,12 +1156,12 @@ pub fn run(cfg: &Config, devel: DevelPolicy, initial_search: &[SearchTerm]) -> R
     };
     let mut state = State::default();
 
-    env.print("gitaur shell — type `help` for commands, `quit` to leave");
+    env.print("aurox shell — type `help` for commands, `quit` to leave");
     if env.session.is_none() {
-        env.print("no AUR index yet — run `gaur -Sy` to enable AUR search/info");
+        env.print("no AUR index yet — run `aurox -Sy` to enable AUR search/info");
     }
 
-    // Seed the session with the launch-time search (`gaur <term>…`): run it once
+    // Seed the session with the launch-time search (`aurox <term>…`): run it once
     // up front so the numbered result list is on screen before the first prompt,
     // exactly as if the user had typed `search <term>…`.
     if !initial_search.is_empty() {
@@ -1186,7 +1186,7 @@ pub fn run(cfg: &Config, devel: DevelPolicy, initial_search: &[SearchTerm]) -> R
     rl.load_history(&history).ok();
 
     let code = loop {
-        match rl.readline("gaur> ") {
+        match rl.readline("aurox> ") {
             Ok(line) => {
                 if !line.trim().is_empty() {
                     // Best-effort: a full history ring shouldn't abort input.
@@ -1436,7 +1436,7 @@ impl ShellEnv for RealEnv<'_> {
         }
         if !missing.is_empty() {
             if self.session.is_none() {
-                ui::warn("no AUR index; run `gaur -Sy` first");
+                ui::warn("no AUR index; run `aurox -Sy` first");
             }
             ui::warn(&format!(
                 "not in repos or AUR: {}",

@@ -4,7 +4,7 @@ pkgname=test-epoch
 pkgver=0.1
 pkgrel=1
 epoch=2
-pkgdesc='gitaur test fixture: epoch > installed-non-epoch'
+pkgdesc='aurox test fixture: epoch > installed-non-epoch'
 arch=('any')
 license=('MIT')
 

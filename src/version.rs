@@ -183,7 +183,7 @@ impl From<&Ver> for Version {
 }
 
 /// Boundary conversion at the alpm seam. `ipkg.version()` returns
-/// `&alpm::Ver`; this `From` impl is what produces a typed gitaur `Version`
+/// `&alpm::Ver`; this `From` impl is what produces a typed aurox `Version`
 /// without going through `Display::to_string`. Mirrors the
 /// `PkgName::new(ipkg.name())` boundary in `PacmanIndex::build`.
 impl From<&alpm::Ver> for Version {

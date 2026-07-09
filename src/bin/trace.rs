@@ -1,14 +1,14 @@
-//! `gitaur-trace` — inspect the per-run span traces gitaur writes to
+//! `aurox-trace` — inspect the per-run span traces aurox writes to
 //! `state_dir()/traces/`.
 //!
 //! The flat Chrome trace-event JSON renders fine in Perfetto, but answering
 //! "where did the time in `receive` go?" from the terminal otherwise meant a
-//! throwaway script each time. This wraps [`gitaur::trace`]'s containment-tree
+//! throwaway script each time. This wraps [`aurox::trace`]'s containment-tree
 //! and self-time analysis in two views:
 //!
-//!   gitaur-trace                 # summary: spans by total self time
-//!   gitaur-trace tree            # full per-thread containment tree
-//!   gitaur-trace tree --span receive   # just the subtree(s) under `receive`
+//!   aurox-trace                 # summary: spans by total self time
+//!   aurox-trace tree            # full per-thread containment tree
+//!   aurox-trace tree --span receive   # just the subtree(s) under `receive`
 //!
 //! With no `--file`, it picks the newest trace in the traces directory.
 
@@ -16,10 +16,10 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use gitaur::trace::{self, Agg, Node};
+use aurox::trace::{self, Agg, Node};
 
 #[derive(Parser)]
-#[command(name = "gitaur-trace", about = "Analyze gitaur span traces")]
+#[command(name = "aurox-trace", about = "Analyze aurox span traces")]
 struct Cli {
     /// Trace file to read (default: newest in the traces directory).
     #[arg(short, long, global = true)]
@@ -70,7 +70,7 @@ fn main() -> anyhow::Result<()> {
     // a slice and the tree below mis-attributes its parent's self time.
     if !over.is_empty() && !matches!(cmd, Cmd::Overlaps) {
         eprintln!(
-            "  warning: {} overlapping slice(s) Perfetto will drop — run `gitaur-trace overlaps`",
+            "  warning: {} overlapping slice(s) Perfetto will drop — run `aurox-trace overlaps`",
             over.len(),
         );
     }

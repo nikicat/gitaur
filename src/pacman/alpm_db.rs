@@ -82,7 +82,7 @@ pub struct RepoHit {
 ///
 /// Mirrors `pacman -Ss`: the first sync DB (pacman.conf order) that carries a
 /// pkgname wins, so a name shadowed in a later repo isn't listed twice. Used
-/// by the `gaur <term>` picker to show repo packages alongside AUR ones the
+/// by the `aurox <term>` picker to show repo packages alongside AUR ones the
 /// way yay/paru do.
 #[instrument]
 pub fn search_sync(terms: &[SearchTerm]) -> Result<Vec<RepoHit>> {
@@ -213,7 +213,7 @@ pub fn open() -> Result<Alpm> {
     build_alpm(None, None)
 }
 
-/// Like [`open`], but reading sync repos from gitaur's rootless sync db.
+/// Like [`open`], but reading sync repos from aurox's rootless sync db.
 ///
 /// When that db has been populated (see [`crate::pacman::sync::refresh_sync_db`]),
 /// upgrade checks reflect the just-fetched official-repo versions without a
@@ -228,7 +228,7 @@ pub fn open_synced() -> Result<Alpm> {
     build_alpm(sync::synced_db_path().as_deref(), None)
 }
 
-/// Open a handle aimed at gitaur's private dbpath for a *write* (the rootless
+/// Open a handle aimed at aurox's private dbpath for a *write* (the rootless
 /// `syncdbs().update()`), used by [`sync::refresh_sync_db`].
 ///
 /// The logfile is redirected to `/dev/null`: a sync-db update may `logaction`,
@@ -253,7 +253,7 @@ pub(crate) fn system_db_path() -> Result<PathBuf> {
 fn build_alpm(dbpath: Option<&Path>, logfile: Option<&Path>) -> Result<Alpm> {
     let mut conf = load_pacman_conf()?;
     if let Some(db) = dbpath {
-        debug!(dbpath = %db.display(), "alpm reading sync repos from gitaur's rootless db");
+        debug!(dbpath = %db.display(), "alpm reading sync repos from aurox's rootless db");
         conf.db_path = db.to_string_lossy().into_owned();
     }
     if let Some(lf) = logfile {

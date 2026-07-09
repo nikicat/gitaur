@@ -1,17 +1,17 @@
 # Optimizing the AUR mirror fetch
 
-A record of the work that brought `gaur -Sy` against the AUR mirror from
+A record of the work that brought `aurox -Sy` against the AUR mirror from
 ~11 s to ~3.5–5 s (warm cache). Most of the time was, and to some extent
 still is, spent inside `gix` doing per-ref work on a ref store with ~155k
 branches (one per AUR package).
 
 This is the *what and why* of each change. For *how to capture a profile*
 see [`PROFILING.md`](PROFILING.md); for reading a captured trace from the
-terminal see the `gitaur-trace` section of the top-level `README.md`.
+terminal see the `aurox-trace` section of the top-level `README.md`.
 
 ## Where the time goes
 
-`gitaur` fetches with a refspec that maps **every** remote branch, so the
+`aurox` fetches with a refspec that maps **every** remote branch, so the
 ref store has ~155k entries and several fetch phases are inherently
 O(155k). The dominant gix spans of a warm incremental fetch, and what each
 does:
@@ -22,7 +22,7 @@ does:
 | `mark mappings` | negotiate have-set: resolve each local ref, look up each want in the commit-graph | find + commit-graph lookup |
 | `mark_all_refs` | seed the negotiation graph from all local refs | per-ref graph insert |
 | `receiving pack` / `write_to_directory` | receive and index the pack | — |
-| `git` (write_commit_graph) | `gitaur` shells out to system git to write a commit-graph after each fetch | — |
+| `git` (write_commit_graph) | `aurox` shells out to system git to write a commit-graph after each fetch | — |
 | `update_refs()` | turn each mapping into a ref edit, then `apply` the transaction | find + exists + edit-build |
 | `apply` | commit the ref transaction (verifies every edit) | per-edit verify |
 
@@ -37,9 +37,9 @@ Each run writes a Chrome/Perfetto trace to `state_dir()/traces/`. Inspect
 it without a browser:
 
 ```sh
-gitaur-trace                          # spans by total self time
-gitaur-trace tree --span "update_refs()"
-gitaur-trace tree --span "mark mappings"
+aurox-trace                          # spans by total self time
+aurox-trace tree --span "update_refs()"
+aurox-trace tree --span "mark mappings"
 ```
 
 The optimization-relevant spans carry split-phase timing fields, e.g.
@@ -55,7 +55,7 @@ reports `{find_ms, commit_ms}`. A low `exists_ms` is the signal that the
 
 All gix-side changes live on
 [`nikicat/gitoxide#b-plus-c-integration`](https://github.com/nikicat/gitoxide/tree/b-plus-c-integration).
-`gitaur`'s `Cargo.toml` pins a specific rev and documents each change in the
+`aurox`'s `Cargo.toml` pins a specific rev and documents each change in the
 dependency comment. To iterate locally, add a patch pointing at a checkout:
 
 ```toml
@@ -66,7 +66,7 @@ gix = { path = "/path/to/gitoxide/gix" }
 Workflow for a gix change: instrument the hot loop with split-phase timing
 → measure on the mirror → implement → re-run the gix test matrix
 (`cargo nextest run -p gix --features blocking-network-client fetch`) → push
-the fork → re-pin `gitaur` → rebuild → verify the trace.
+the fork → re-pin `aurox` → rebuild → verify the trace.
 
 ## Done
 
@@ -93,7 +93,7 @@ nothing.
 ### 3. Cache packed-refs in a HashMap during `update_refs`
 `gix` · upstream PR #2605
 
-Companion to #2. Together #1–#3 brought `gaur -Sy` from ~11 s to ~5 s
+Companion to #2. Together #1–#3 brought `aurox -Sy` from ~11 s to ~5 s
 (roughly `git fetch` parity at the time).
 
 ### 4. Skip the loose-ref probe when building the have-set
@@ -107,8 +107,8 @@ snapshot via `try_find_packed_only`, falling back to the full lookup for names
 that really are loose (preserving loose-over-packed precedence).
 `find_ms` ~2.1 s → ~0.6 s.
 
-### 5. `gitaur`: write a commit-graph after each fetch
-`gitaur` · `a3788fd`
+### 5. `aurox`: write a commit-graph after each fetch
+`aurox` · `a3788fd`
 
 Shells out to `git commit-graph write --split` after a fetch. This is a cost in
 its own right (the `git` span) but it's the enabler for #6: with a commit-graph
@@ -153,7 +153,7 @@ skipping the exists probe, peel, and ff-walk. `update_refs()` self
 ~1.17 s → ~0.61 s (`exists_ms` ~430 ms → ~75 ms).
 
 ### 10. Feed the commit-graph the fetched tips instead of `--reachable`
-`gitaur` · `git.rs` / `mirror.rs`
+`aurox` · `git.rs` / `mirror.rs`
 
 The post-fetch `git commit-graph write` ran `--reachable`, which re-walks all
 ~155k refs every time just to discover the handful of new commits. The
@@ -164,7 +164,7 @@ bootstrap and full-rebuild paths keep `--reachable` (no delta to feed). The
 `write_commit_graph` span dropped ~1.30 s → ~0.10 s on a 137-ref refresh.
 
 ### 11. Load the index concurrently with the fetch
-`gitaur` · `mirror.rs`
+`aurox` · `mirror.rs`
 
 `cmd_refresh` ran strictly serially: fetch, *then* load `index.bin`, apply,
 save. But the load is local file I/O against a different file than anything the
@@ -176,7 +176,7 @@ whole fetch. The post-fetch tail is now just `incremental_update` + `save` +
 `write_commit_graph` (~0.35 s total).
 
 ### 12. Pack accumulated loose refs periodically
-`gitaur` · `git.rs` / `mirror.rs`
+`aurox` · `git.rs` / `mirror.rs`
 
 The fast paths in #4/#7/#9 only fire for *packed* refs, but git writes every
 updated ref as a loose file (it never rewrites the ~10 MB `packed-refs` for one
@@ -212,8 +212,8 @@ A `ref tx resolve` `detail!` span now reports this `find_ms`, completing the
 - `gix-transport` http spans with curl CURLINFO timing (`90a0a85d3`),
   the `mark mappings` split-phase span (`d5b3ee00e`), and a `gix-ref`
   profiling helper (`fb64ef178`) — make the costs visible.
-- `gitaur`: per-run OTEL→Chrome span traces (`f522c47`) and the
-  `gitaur-trace` analysis CLI (`b2020e6`).
+- `aurox`: per-run OTEL→Chrome span traces (`f522c47`) and the
+  `aurox-trace` analysis CLI (`b2020e6`).
 - `nextest` default-filter excluding two git-version-coupled `fetch_pack`
   tests so fork builds stay green on Arch's newer git (`f36a03f16`).
 
@@ -247,8 +247,8 @@ Ordered roughly by expected payoff. None attempted yet.
 - **`receive` side.** `write_to_directory` (pack index, ~1.3 s) is now a
   meaningful share of the total — the commit-graph write (#10) and the index
   load (#11) are handled. The pack index lives inside gix's `receive`, so
-  overlapping it from gitaur isn't possible without restructuring; the
-  remaining gitaur-side tail (`save`, ~0.25 s) is small enough that hiding it
+  overlapping it from aurox isn't possible without restructuring; the
+  remaining aurox-side tail (`save`, ~0.25 s) is small enough that hiding it
   under the now-cheap commit-graph write would save little.
 
 - **`mark mappings` `commit_ms` (~355 ms).** The `get_or_insert_commit`

@@ -7,7 +7,7 @@
 //! resolves `repo-base`, through `test-provides-repo-base`'s
 //! `provides=('repo-base=9.0')`, so an index-first lookup would print that
 //! provider's block instead of the sync repo's. The shell is interactive
-//! (stdin must be a TTY), so this spawns the real no-arg `gaur` under a PTY:
+//! (stdin must be a TTY), so this spawns the real no-arg `aurox` under a PTY:
 //!
 //! ```text
 //!   info repo-base     → `Repository      : local-repo` block (sync-DB hit;
@@ -16,14 +16,14 @@
 //!   quit               → clean exit
 //! ```
 //!
-//! The `.sh` runs `gaur -Sy` first so the AUR half has an index to answer
+//! The `.sh` runs `aurox -Sy` first so the AUR half has an index to answer
 //! from; the repo half must work regardless.
 
 use pty_harness::Pty;
 
 fn main() {
-    let mut pty = Pty::spawn_gaur();
-    pty.expect("shell banner", |s| s.contains("gitaur shell"));
+    let mut pty = Pty::spawn_aurox();
+    pty.expect("shell banner", |s| s.contains("aurox shell"));
 
     // A name both sources resolve: the sync repo owns `repo-base` while the
     // AUR index reaches it via test-provides-repo-base's provides=. Repo must

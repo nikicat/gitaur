@@ -4,13 +4,13 @@
 //! wall time on large mirrors (the AUR mirror has ~150k branches).
 //!
 //! Lives in its own integration-test binary so the
-//! [`gitaur::index::build::WORKER_REPO_OPENS`] counter is isolated from other
+//! [`aurox::index::build::WORKER_REPO_OPENS`] counter is isolated from other
 //! integration tests sharing the same process / static.
 
-use gitaur::config::defaults::default_config;
-use gitaur::index::build::{WORKER_REPO_OPENS, full_build};
-use gitaur::mirror::MirrorRepo;
-use gitaur::testing::git;
+use aurox::config::defaults::default_config;
+use aurox::index::build::{WORKER_REPO_OPENS, full_build};
+use aurox::mirror::MirrorRepo;
+use aurox::testing::git;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use tempfile::TempDir;

@@ -1,5 +1,5 @@
 //! Custom OpenTelemetry [`SpanExporter`] that writes the Chrome/Perfetto
-//! trace-event JSON gitaur has always produced.
+//! trace-event JSON aurox has always produced.
 //!
 //! It's fed from OTEL [`SpanData`] (which carries *explicit* start/end
 //! timestamps) instead of `tracing-chrome`, which could only stamp a span at

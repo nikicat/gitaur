@@ -2,7 +2,7 @@
 pkgname=test-make-chain-c
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: bottom of 3-deep makedep chain'
+pkgdesc='aurox test fixture: bottom of 3-deep makedep chain'
 arch=('any')
 license=('MIT')
 

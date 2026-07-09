@@ -133,7 +133,7 @@ impl Origin {
     /// Whether `target` should count as user-requested. True when it was
     /// queued `Direct`, or when its bare name is in `direct_set` — the user
     /// typed it explicitly even though the LIFO queue happened to pop it as a
-    /// dependency first (`gaur -S cargo` where `cargo` is also an AUR pkg's
+    /// dependency first (`aurox -S cargo` where `cargo` is also an AUR pkg's
     /// makedep). The `direct_set` backstop is only relevant to the bucketing
     /// split, not the rebuild override (see [`resolve_target_source`]).
     fn is_direct(self, target: &PkgTarget, direct_set: &HashSet<PkgTarget>) -> bool {
@@ -206,7 +206,7 @@ pub fn resolve(
                     enqueue_repo_deps(pac, &concrete, &mut queue);
                 }
                 // direct_set is keyed on the **user-typed** name so explicit
-                // `gaur -S cargo` flips the resolved provider (`rust`) into
+                // `aurox -S cargo` flips the resolved provider (`rust`) into
                 // direct_repo even when it also appears as another pkg's dep.
                 let bucket = if origin.is_direct(&target, &direct_set) {
                     &mut plan.direct_repo

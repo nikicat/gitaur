@@ -1,11 +1,11 @@
 # AUR pkg whose install collides with the pre-seeded `test-conflict-pre`
 # (see /srv/foreign-pkgs/). With `--noconfirm`, pacman defaults the
 # "Remove test-conflict-pre? [y/N]" question to N and aborts the transaction
-# — that's exactly the failure smoke 57 wants to observe in the gitaur log.
+# — that's exactly the failure smoke 57 wants to observe in the aurox log.
 pkgname=test-conflict-aur
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: AUR pkg that conflicts with a pre-installed foreign pkg'
+pkgdesc='aurox test fixture: AUR pkg that conflicts with a pre-installed foreign pkg'
 arch=('any')
 license=('MIT')
 conflicts=('test-conflict-pre')

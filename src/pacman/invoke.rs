@@ -43,7 +43,7 @@ pub struct PkgUpgrade {
 /// (foreign / AUR) are skipped here — they go through [`crate::build`].
 #[instrument]
 pub fn query_repo_upgrades() -> Result<Vec<PkgUpgrade>> {
-    // Read available versions from gitaur's rootless sync db when it's been
+    // Read available versions from aurox's rootless sync db when it's been
     // refreshed (`-Sy`), so the upgrade list reflects the latest repos without
     // a privileged `pacman -Sy`. Falls back to the system db otherwise.
     let alpm = alpm_db::open_synced()?;
@@ -89,7 +89,7 @@ pub fn query_repo_upgrades_in(alpm: &Alpm) -> Vec<PkgUpgrade> {
 ///
 /// When escalation kicks in, the user sees the exact command first and gates
 /// it with a y/n confirm. Without this, the escalator (typically `sudo`)
-/// pops a password prompt with no context about what gitaur is about to
+/// pops a password prompt with no context about what aurox is about to
 /// run — a hostile UX especially mid-build when several minutes have
 /// elapsed since the user's last interaction. The `noconfirm` flag (read
 /// from [`runopts`]) suppresses the prompt for non-interactive callers.
@@ -130,7 +130,7 @@ pub fn exec_pacman(cfg: &Config, argv: &[String]) -> Result<u8> {
 
 /// Run pacman attached to the inherited stdio — its own progress bars and native
 /// prompts, no output capture (the user is watching live). Maps the exit status
-/// to gitaur's `Ok(0)` / [`Error::PacmanExit`].
+/// to aurox's `Ok(0)` / [`Error::PacmanExit`].
 fn exec_pacman_inherited(program: &str, spawn_args: &[String]) -> Result<u8> {
     let status = Command::new(program).args(spawn_args).status()?;
     let code = status_to_exit_code(status);

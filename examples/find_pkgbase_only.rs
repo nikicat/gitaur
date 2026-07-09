@@ -7,14 +7,14 @@
 //!
 //!     cargo run --release --example find_pkgbase_only
 
-use gitaur::index;
-use gitaur::index::secondary::Secondary;
-use gitaur::names::{PkgBase, PkgName};
-use gitaur::paths;
+use aurox::index;
+use aurox::index::secondary::Secondary;
+use aurox::names::{PkgBase, PkgName};
+use aurox::paths;
 use std::borrow::Borrow;
 
 fn main() {
-    let idx = index::load(&paths::index_path()).expect("load index — run `gaur -Sy` first");
+    let idx = index::load(&paths::index_path()).expect("load index — run `aurox -Sy` first");
     let by = Secondary::build(&idx);
 
     let mut hits: Vec<(PkgBase, Vec<PkgName>)> = Vec::new();

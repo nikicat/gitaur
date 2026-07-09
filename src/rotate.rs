@@ -1,4 +1,4 @@
-//! Creation + retention for gitaur's per-run files (logs, traces).
+//! Creation + retention for aurox's per-run files (logs, traces).
 //!
 //! [`RotationPolicy`] is the contract a family of per-run artifacts implements:
 //! where its files live, their extension, and how many to keep. The provided
@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 
 /// Stem prefix shared by every per-run file. Lets [`RotationPolicy::owns`]
 /// avoid touching unrelated files a user might drop in the directory.
-const PREFIX: &str = "gitaur-";
+const PREFIX: &str = "aurox-";
 
-/// `gitaur-<timestamp>-<pid>` — the filename stem for this run. Computed once
+/// `aurox-<timestamp>-<pid>` — the filename stem for this run. Computed once
 /// per run and handed to every policy's [`create`](RotationPolicy::create) so a
 /// run's log and trace share one stem and are trivial to correlate.
 pub(crate) fn run_basename() -> String {
@@ -24,7 +24,7 @@ pub(crate) fn run_basename() -> String {
     format!("{PREFIX}{stamp}-{pid}")
 }
 
-/// One family of per-run artifacts that gitaur creates each run and caps on
+/// One family of per-run artifacts that aurox creates each run and caps on
 /// startup. Implementors describe the family; the provided methods do the work.
 pub(crate) trait RotationPolicy {
     /// Directory holding this family's files. Resolved at call time (not
@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn create_makes_dir_and_extension() {
         let (_tmp, p) = policy(10);
-        let (_file, path) = p.create("gitaur-20260526-120000-42").unwrap();
+        let (_file, path) = p.create("aurox-20260526-120000-42").unwrap();
         assert!(path.exists());
         assert_eq!(path.extension().unwrap(), "log");
         assert!(path.starts_with(p.dir()), "file lands in the policy dir");
@@ -149,8 +149,8 @@ mod tests {
     #[test]
     fn owns_matches_stem_and_extension() {
         let (_tmp, p) = policy(10);
-        assert!(p.owns(OsStr::new("gitaur-x.log")));
-        assert!(!p.owns(OsStr::new("gitaur-x.json"))); // wrong extension
+        assert!(p.owns(OsStr::new("aurox-x.log")));
+        assert!(!p.owns(OsStr::new("aurox-x.json"))); // wrong extension
         assert!(!p.owns(OsStr::new("other.log"))); // missing stem
     }
 
@@ -169,7 +169,7 @@ mod tests {
         let now = SystemTime::now();
         let mut all = Vec::new();
         for i in 0u64..15 {
-            let path = p.dir().join(format!("gitaur-{i:02}.log"));
+            let path = p.dir().join(format!("aurox-{i:02}.log"));
             // Older files come first: i=0 is oldest, i=14 is newest.
             touch_with_mtime(&path, now - Duration::from_secs(60 * (15 - i)));
             all.push(path);
@@ -203,12 +203,12 @@ mod tests {
         let now = SystemTime::now();
         let mut files = Vec::new();
         for i in 1u64..15 {
-            let path = p.dir().join(format!("gitaur-{i:02}.log"));
+            let path = p.dir().join(format!("aurox-{i:02}.log"));
             // i=1 is oldest file, i=14 is newest.
             touch_with_mtime(&path, now - Duration::from_secs(60 * (15 - i)));
             files.push((i, path));
         }
-        let trap = p.dir().join("gitaur-00.log");
+        let trap = p.dir().join("aurox-00.log");
         std::fs::create_dir(&trap).unwrap();
         // Trap is older than any file so it ends up in the prune tail.
         File::open(&trap)

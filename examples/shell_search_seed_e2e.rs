@@ -1,10 +1,10 @@
-//! End-to-end driver for the bare-term launch `gaur <term>…`, used by
+//! End-to-end driver for the bare-term launch `aurox <term>…`, used by
 //! `tests/container/extended/08_shell_search_seed.sh`.
 //!
-//! `gaur <term>…` interactively opens the shell *seeded* with that search — the
+//! `aurox <term>…` interactively opens the shell *seeded* with that search — the
 //! same result as starting the shell and typing `search <term>…`. There is no
 //! picker any more (the REPL is the one interactive surface). This spawns the
-//! real `gaur test-trivial` under a PTY and asserts:
+//! real `aurox test-trivial` under a PTY and asserts:
 //!
 //! ```text
 //!   (launch)  → shell banner, then the seeded numbered result list, at a prompt
@@ -12,7 +12,7 @@
 //!   quit      → clean exit
 //! ```
 //!
-//! The `.sh` runs `gaur -Sy` first so the on-disk index can classify
+//! The `.sh` runs `aurox -Sy` first so the on-disk index can classify
 //! `test-trivial` as an AUR package (the shell does not fetch at startup).
 
 use pty_harness::Pty;
@@ -20,10 +20,10 @@ use pty_harness::Pty;
 fn main() {
     // Launch straight into the seeded search — the exact-name regex keeps the
     // list to the single `test-trivial` fixture so `add 1` is unambiguous.
-    let mut pty = Pty::spawn_gaur_args(&["^test-trivial$"]);
+    let mut pty = Pty::spawn_aurox_args(&["^test-trivial$"]);
 
     // The shell still prints its banner…
-    pty.expect("shell banner", |s| s.contains("gitaur shell"));
+    pty.expect("shell banner", |s| s.contains("aurox shell"));
     // …and the seeded search ran before the prompt: the numbered row is on
     // screen without the user typing `search`. The aligned table renders repo +
     // name as separate columns, so the row reads `1  aur   test-trivial …`.

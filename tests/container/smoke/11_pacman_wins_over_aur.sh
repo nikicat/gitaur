@@ -6,11 +6,11 @@
 # preferred the newer virtual version) would route to the provider instead.
 source /work/tests/container/lib.sh
 bootstrap; reset_state
-gaur -Sy
+aurox -Sy
 
 # repo-base must classify Source::Repo even though the AUR index also
 # resolves the name through the provider's provides=.
-gaur -S --noconfirm repo-base
+aurox -S --noconfirm repo-base
 assert_exit 0
 assert_pkg_installed repo-base
 # It's the sync repo's build, not something makepkg produced at 9.0.

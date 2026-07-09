@@ -4,7 +4,7 @@
 //! it) so each invocation shows up as a `git` span in the per-run trace —
 //! carrying the subcommand, working directory, exit code and wall time — and
 //! fails with a consistent error that quotes git's own stderr rather than a
-//! bare exit status. gitaur already depends on the `git` binary at runtime (it
+//! bare exit status. aurox already depends on the `git` binary at runtime (it
 //! drives worktree materialization and PKGBUILD diffs); keeping the spawns in
 //! one place is what makes them uniformly observable.
 
@@ -152,7 +152,7 @@ pub fn write_commit_graph(repo: &Path, new_commits: Option<&[ObjectId]>) {
 /// Fold all loose refs into `packed-refs` for the bare repository at `repo`.
 ///
 /// Each fetch writes its changed refs as loose files, which accumulate forever
-/// on a mirror gitaur only ever fetches. Loose refs miss gix's borrowed
+/// on a mirror aurox only ever fetches. Loose refs miss gix's borrowed
 /// packed-refs fast path (#4/#7/#9): each one costs an `open()` syscall in the
 /// negotiate/update find loops and inflates the `loose_names` set every ref is
 /// hashed against. Packing returns the whole store to the all-packed state

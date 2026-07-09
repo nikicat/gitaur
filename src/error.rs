@@ -6,7 +6,7 @@ use toml::de::Error as TomlDeError;
 /// Crate result alias.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Unified error variant for all gitaur subsystems.
+/// Unified error variant for all aurox subsystems.
 #[derive(Debug, Error)]
 pub enum Error {
     /// I/O failure.

@@ -2,7 +2,7 @@
 //! produced by `makepkg --printsrcinfo`).
 //!
 //! Arch-suffixed list keys (`depends_x86_64`, `provides_aarch64`, …) are
-//! folded into their canonical base name — gitaur doesn't need per-arch
+//! folded into their canonical base name — aurox doesn't need per-arch
 //! resolution for index lookups.
 
 use crate::error::{Error, Result};
