@@ -10,11 +10,11 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
+aurox -Sy
 
 # test-trivial and test-epoch are sibling AUR pkgs with no inter-dependency,
 # so they land in the same stratum and exercise the per-stratum ordering.
-RUST_LOG=gitaur=info gaur -S --noconfirm test-trivial test-epoch
+RUST_LOG=aurox=info aurox -S --noconfirm test-trivial test-epoch
 assert_exit 0
 assert_pkg_installed test-trivial
 assert_pkg_installed test-epoch

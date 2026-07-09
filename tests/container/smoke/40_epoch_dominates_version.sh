@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Epoch dominates pkgver comparison — libalpm vercmp says `2:0.1-1` is
 # newer than `0.1-1` regardless of how the bare versions compare.
-# Gitaur's upgrade pipeline must honour that, both at the
+# Aurox's upgrade pipeline must honour that, both at the
 # counterpart-resolution step (Pkgname-tier match registers as upgrade,
 # not reinstall) and at the pacman -U handoff (no `--needed` short-
 # circuit, no downgrade refusal).
@@ -12,7 +12,7 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
+aurox -Sy
 
 # Seed: foreign install at 0.1-1 (no epoch). Same pkgname as the AUR
 # fixture so the new pkgbase will be a canonical Pkgname-tier match.
@@ -26,7 +26,7 @@ pacman -Q test-epoch | grep -qF '0.1-1' || {
 }
 
 # Trigger: install the AUR pkgbase at epoch=2, pkgver=0.1.
-RUST_LOG=gitaur=info gaur -S --noconfirm test-epoch
+RUST_LOG=aurox=info aurox -S --noconfirm test-epoch
 assert_exit 0
 assert_pkg_installed test-epoch
 

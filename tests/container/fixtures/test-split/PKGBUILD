@@ -6,7 +6,7 @@ pkgbase=test-split
 pkgname=(test-split-core test-split-extras)
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: split pkg'
+pkgdesc='aurox test fixture: split pkg'
 arch=('any')
 license=('MIT')
 

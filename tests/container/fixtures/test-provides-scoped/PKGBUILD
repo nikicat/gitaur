@@ -12,7 +12,7 @@ pkgbase=test-provides-scoped
 pkgname=(test-provides-scoped-main test-provides-scoped-cli test-provides-scoped-daemon)
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: scoped provides on a split pkgbase'
+pkgdesc='aurox test fixture: scoped provides on a split pkgbase'
 arch=('any')
 license=('MIT')
 

@@ -1,7 +1,7 @@
-# gitaur — yay-like AUR helper backed by the GitHub mirror
+# aurox — yay-like AUR helper backed by the GitHub mirror
 
 > **Historical planning document.** This is the original master plan /
-> brainstorm that kicked off gitaur. It is kept for context only — the
+> brainstorm that kicked off aurox. It is kept for context only — the
 > "Status (updated)" section near the bottom is a stale snapshot (it still
 > mentions a `build/state_db.rs`, a never-completed bootstrap clone, "43
 > tests", and features long since exercised end-to-end). For the current,
@@ -22,14 +22,14 @@
 - Disabling pack deltas / zlib does **not** help — graph traversal cost grows with pack size; default packing is near-optimal.
 - `git fetch --porcelain` reports changed refs cheaply, enabling incremental re-index of just the deltas.
 
-These numbers say: a libgit2-native, rayon-parallel helper with a pre-parsed in-memory index can give yay-class UX while being fully offline-from-AUR. That's `gitaur`.
+These numbers say: a libgit2-native, rayon-parallel helper with a pre-parsed in-memory index can give yay-class UX while being fully offline-from-AUR. That's `aurox`.
 
 User decisions already made: full pacman pass-through, recursive AUR dep resolution, `git worktree` staging, full-PKGBUILD-on-first-install + diff-on-update.
 
 ## Project layout
 
 ```
-~/src/gitaur/
+~/src/aurox/
 ├── Cargo.toml
 ├── README.md (later)
 ├── src/
@@ -79,13 +79,13 @@ User decisions already made: full pacman pass-through, recursive AUR dep resolut
 State at runtime:
 
 ```
-~/.local/state/gitaur/
+~/.local/state/aurox/
 ├── aur/              # bare git2 clone of github.com/archlinux/aur (~2 GiB)
 ├── pkgs/<pkgbase>/   # one worktree per package being built (kept until --clean)
 ├── index.bin         # rkyv-archived IndexFile, mmap'd at load (~60–80 MB)
 └── state.db          # SQLite: builds(pkgbase, last_built_commit_oid, last_built_version, built_at)
 
-~/.config/gitaur/config.toml  # optional, see §6
+~/.config/aurox/config.toml  # optional, see §6
 ```
 
 ## Design (recommended approach)
@@ -129,10 +129,10 @@ Search (`-Ss`) walks `entries` linearly with rayon (~50 ms for 155k regex matche
 
 ### 2. Sync / fetch flow
 
-`gaur` (no args) and `gaur -Sy`:
+`aurox` (no args) and `aurox -Sy`:
 
 1. `mirror::open_or_bootstrap()`:
-   - If `~/.local/state/gitaur/aur/` missing: full bare clone from `https://github.com/archlinux/aur.git` via `git2::build::RepoBuilder::new().bare(true).clone(...)`, with `RemoteCallbacks::transfer_progress` reporting bytes + objects to the terminal.
+   - If `~/.local/state/aurox/aur/` missing: full bare clone from `https://github.com/archlinux/aur.git` via `git2::build::RepoBuilder::new().bare(true).clone(...)`, with `RemoteCallbacks::transfer_progress` reporting bytes + objects to the terminal.
    - Else: open the existing bare repo with `Repository::open_bare`.
 2. `incremental_fetch()`: `remote.fetch(&["+refs/heads/*:refs/heads/*"], opts, None)` with an `update_tips` callback that collects `(refname, old_oid, new_oid)` into a `Vec<RefUpdate>`. First fetch after bootstrap skips this since the index was freshly built.
 3. If updates exist: `index::update::incremental_update(&repo, &updates, &mut index)` — for each changed ref, resolve `new_oid → tree → .SRCINFO blob`, reparse, replace entry. Deletions → `new_oid == zero` → drop entry.
@@ -172,7 +172,7 @@ First run: ~5 min clone + ~4 s full index. Subsequent: typically 100–500 ms fe
 For each `pkgbase` in `aur_order`:
 
 8. **Worktree creation** (`mirror::worktree::add_worktree`):
-   - Target path: `~/.local/state/gitaur/pkgs/<pkgbase>`.
+   - Target path: `~/.local/state/aurox/pkgs/<pkgbase>`.
    - If path exists from a prior run: open it with `git2::Repository::open`, check that `HEAD` is on `refs/heads/<pkgbase>`, then `repo.reset(&new_head, git2::ResetType::Hard, None)` to the current mirror tip — preserves the worktree for diffs and avoids `git2::Worktree::prune` churn. If path exists but isn't a valid worktree (stale / corrupted), delete and recreate.
    - Fresh worktree: `mirror.worktree("<pkgbase>", path, Some(&WorktreeAddOptions::new().reference(<branch>)))`. Branch reference is `refs/heads/<pkgbase>` resolved on the bare mirror repo.
 
@@ -203,7 +203,7 @@ For each `pkgbase` in `aur_order`:
       - `-s` → install build-time deps via pacman. Redundant with our Phase C batch but acts as a belt-and-suspenders check; the cost is one alpm read.
       - `--noconfirm` → no interactive prompts from makepkg itself.
       - `--needed` → don't reinstall already-current packages.
-      - We do **not** pass `-i` (makepkg's auto-install) — gitaur installs from the built file with explicit `--asdeps` semantics in step 13.
+      - We do **not** pass `-i` (makepkg's auto-install) — aurox installs from the built file with explicit `--asdeps` semantics in step 13.
     - Spawn via `std::process::Command`, inherit stdio so user sees compile output live. Capture exit code; on nonzero, jump to failure handling below.
 
 12. **Detect produced packages**:
@@ -216,7 +216,7 @@ For each `pkgbase` in `aur_order`:
 
 14. **Record success** in `state.db.builds`: upsert `(pkgbase, last_built_commit_oid = HEAD oid, last_built_version = "<epoch>:<pkgver>-<pkgrel>", built_at = now())`. Write in a single `INSERT … ON CONFLICT(pkgbase) DO UPDATE` statement.
 
-15. **Worktree retention**: kept under `pkgs/<pkgbase>/` so the next update can diff against it via `state.last_built_tree`. The `state_db` row is the source of truth for "last built revision"; the worktree is convenience. `gaur -Sc` clears worktrees but preserves `state.db`; `gaur -Scc` clears both.
+15. **Worktree retention**: kept under `pkgs/<pkgbase>/` so the next update can diff against it via `state.last_built_tree`. The `state_db` row is the source of truth for "last built revision"; the worktree is convenience. `aurox -Sc` clears worktrees but preserves `state.db`; `aurox -Scc` clears both.
 
 #### Failure handling within Phase D
 
@@ -233,7 +233,7 @@ A single `pkgbase` PKGBUILD can produce N pkgnames. The dep graph treats pkgbase
 
 Order: **pacman first, then AUR** (AUR builds may link against freshly-upgraded repo libs).
 
-1. `gaur -Sy` (refresh mirror + index).
+1. `aurox -Sy` (refresh mirror + index).
 2. `exec_pacman(["-Syu", ...passthrough_args])`.
 3. AUR upgrade detection:
    - `alpm.localdb().pkgs()` filtered to those NOT in any syncdb → foreign candidates.
@@ -244,7 +244,7 @@ Order: **pacman first, then AUR** (AUR builds may link against freshly-upgraded 
 
 ### 5. PKGBUILD review state
 
-SQLite at `~/.local/state/gitaur/state.db` (single table, see schema above) via `rusqlite` (bundled feature so no system-libsqlite3 dependency). Row-level atomicity, future-proof for concurrent invocations. Diff computation uses `git2::Diff::tree_to_tree`.
+SQLite at `~/.local/state/aurox/state.db` (single table, see schema above) via `rusqlite` (bundled feature so no system-libsqlite3 dependency). Row-level atomicity, future-proof for concurrent invocations. Diff computation uses `git2::Diff::tree_to_tree`.
 
 ### 6. Threading model
 
@@ -265,13 +265,13 @@ clap with `allow_external_subcommands(true)`. Owned flag-combinations:
 
 Everything else (`-Q`, `-R`, `-T`, `-D`, `-F`, `-U`-direct, `-Sg`, etc.) → `exec_pacman(argv)`. Sudo gate: prepend `sudo` (configurable: `doas`, `run0`) when op ∈ `{-S, -R, -U, -Sy, -Syu, -Syyu, -Sc, -D}` and not `--print`/`-p`.
 
-### 8. Config (`~/.config/gitaur/config.toml`)
+### 8. Config (`~/.config/aurox/config.toml`)
 
 ```toml
-build_dir = "~/.local/state/gitaur/pkgs"
+build_dir = "~/.local/state/aurox/pkgs"
 mirror_url = "https://github.com/archlinux/aur.git"
 index_threads = 4
-refresh_max_age_secs = 3600        # `gitaur` no-args refetches if older
+refresh_max_age_secs = 3600        # `aurox` no-args refetches if older
 color = "auto"                     # auto | always | never
 makepkg_path = "makepkg"
 makepkg_args = ["-s", "--noconfirm", "--needed"]
@@ -321,7 +321,7 @@ Ship the complete tool in one pass. The whole feature set above is in scope:
 - alpm-driven installed/repo classification; batched repo-dep install in one pacman call.
 - Full build flow as specified in §3 — sudo warmup, worktree-per-pkgbase, PKGBUILD review (full on first install / diff on update) with `[V]/[E]/[D]/[S]/[A]/Enter` prompt loop, makepkg invocation with PKGDEST/SRCDEST/BUILDDIR env, split-package partitioning, state.db recording.
 - `-Syu` AUR upgrade detection: foreign-package vs index version compare; `--devel` opts in VCS packages.
-- TOML config at `~/.config/gitaur/config.toml` with documented defaults.
+- TOML config at `~/.config/aurox/config.toml` with documented defaults.
 
 Build order within the single milestone (each step independently runnable, total ~2 weeks):
 
@@ -356,23 +356,23 @@ Test harness:
 - `tests/fake_mirror.rs` — local bare repo with hand-crafted branches, no network. Drives index build, fetch-detection, dep resolution offline.
 - `tests/srcinfo_parser.rs` — golden files in `tests/fixtures/srcinfo/` (~20 real `.SRCINFO`s, including split + arch-specific + VCS examples).
 - `criterion` benches: `bench_index_build` (target ≤2.2 s), `bench_index_load` (target ≤500 ms incl. secondary indexes).
-- **Sandbox dogfooding**: real `gaur -S <fixture>` runs inside `systemd-nspawn` Arch container so host stays clean. Script kept at `scripts/smoke.sh` once we have something to test (not created up front).
-- Pre-v0.3 release gate: 2 weeks of `gaur -Syu` on the dev box alongside yay, gitaur first, log mismatches.
+- **Sandbox dogfooding**: real `aurox -S <fixture>` runs inside `systemd-nspawn` Arch container so host stays clean. Script kept at `scripts/smoke.sh` once we have something to test (not created up front).
+- Pre-v0.3 release gate: 2 weeks of `aurox -Syu` on the dev box alongside yay, aurox first, log mismatches.
 
 ## Critical files to be created
 
-- /home/nb/src/gitaur/Cargo.toml
-- /home/nb/src/gitaur/src/main.rs
-- /home/nb/src/gitaur/src/paths.rs
-- /home/nb/src/gitaur/src/mirror/clone.rs
-- /home/nb/src/gitaur/src/mirror/fetch.rs
-- /home/nb/src/gitaur/src/index/srcinfo.rs
-- /home/nb/src/gitaur/src/index/schema.rs
-- /home/nb/src/gitaur/src/index/build.rs
-- /home/nb/src/gitaur/src/cli/mod.rs
-- /home/nb/src/gitaur/src/cli/dispatch.rs
-- /home/nb/src/gitaur/src/build/makepkg.rs
-- /home/nb/src/gitaur/src/pacman/invoke.rs
+- /home/nb/src/aurox/Cargo.toml
+- /home/nb/src/aurox/src/main.rs
+- /home/nb/src/aurox/src/paths.rs
+- /home/nb/src/aurox/src/mirror/clone.rs
+- /home/nb/src/aurox/src/mirror/fetch.rs
+- /home/nb/src/aurox/src/index/srcinfo.rs
+- /home/nb/src/aurox/src/index/schema.rs
+- /home/nb/src/aurox/src/index/build.rs
+- /home/nb/src/aurox/src/cli/mod.rs
+- /home/nb/src/aurox/src/cli/dispatch.rs
+- /home/nb/src/aurox/src/build/makepkg.rs
+- /home/nb/src/aurox/src/pacman/invoke.rs
 
 ---
 
@@ -406,14 +406,14 @@ Test harness:
 - `resolver::classify` + `resolver::topo` (Tarjan-style with readable cycle paths) + `resolver::DepGraph::resolve` → `Plan`.
 - `build::makepkg` (PKGDEST/SRCDEST/BUILDDIR env), `build::install` (`find_produced`, `extract_pkgname` partition by direct/transitive), `build::review` (line-diff against last-built tree via gix-object), `build::state_db` (sqlite, upsert/prune).
 - `build::cmd_install` end-to-end pipeline; `cmd_sysupgrade` (foreign-pkg detect + VCS gate via `--devel`); `cmd_clean` (-Sc / -Scc).
-- Tests: 43 inline `#[cfg(test)]` + 3 integration in `tests/fake_mirror.rs`. Shared `gitaur::testing::git` helper avoids global gitconfig interference (no `commit.gpgsign` surprises).
+- Tests: 43 inline `#[cfg(test)]` + 3 integration in `tests/fake_mirror.rs`. Shared `aurox::testing::git` helper avoids global gitconfig interference (no `commit.gpgsign` surprises).
 - 8 feedback memories captured (style, structured concurrency, sudo deferral, partial-bootstrap recovery, indicatif pitfalls, clap+pacman pattern, shared test helpers, etc.).
 
 ### Not yet exercised end-to-end
 
-- A real `gaur -S cower` against the live AUR mirror — clone has been started but never fully completed during a session (~8–9 min on this connection); the post-clone `gitaur::index::build::full_build` against 155k branches has not been measured in-tree.
+- A real `aurox -S cower` against the live AUR mirror — clone has been started but never fully completed during a session (~8–9 min on this connection); the post-clone `aurox::index::build::full_build` against 155k branches has not been measured in-tree.
 - `pacman::alpm_db` is compile-tested but not run against the real `/var/lib/pacman` (it will be, the moment a `-S` succeeds).
-- `gaur -Syu` end-to-end against installed foreign pkgs.
+- `aurox -Syu` end-to-end against installed foreign pkgs.
 - Split-package install (e.g. `mingw-w64-gcc`).
 - `--devel` flow against an actual `-git` pkg.
 

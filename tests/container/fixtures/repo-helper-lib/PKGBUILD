@@ -1,9 +1,9 @@
 # Lives in the local sync repo; used as a makedep by test-with-makedep so
-# gitaur has to install it from pacman (--asdeps) before driving makepkg.
+# aurox has to install it from pacman (--asdeps) before driving makepkg.
 pkgname=repo-helper-lib
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: helper lib in sync repo'
+pkgdesc='aurox test fixture: helper lib in sync repo'
 arch=('any')
 license=('MIT')
 

@@ -1,6 +1,6 @@
-//! `gitaur` binary entry. Initializes tracing + dispatches to [`gitaur::cli::run`].
+//! `aurox` binary entry. Initializes tracing + dispatches to [`aurox::cli::run`].
 
-use gitaur::{cli, logging, ui};
+use aurox::{cli, logging, ui};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {

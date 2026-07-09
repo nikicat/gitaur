@@ -5,7 +5,7 @@
 pkgname=repo-with-dep
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: sync pkg that depends on repo-helper-lib'
+pkgdesc='aurox test fixture: sync pkg that depends on repo-helper-lib'
 arch=('any')
 license=('MIT')
 depends=('repo-helper-lib')

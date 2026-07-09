@@ -4,7 +4,7 @@
 pkgname=test-make-via-repo
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: makedep is in the sync repo, not AUR'
+pkgdesc='aurox test fixture: makedep is in the sync repo, not AUR'
 arch=('any')
 license=('MIT')
 makedepends=('repo-helper-lib')

@@ -1,7 +1,7 @@
 pkgname=test-split-as-makedep-client
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: client makedepending on a split pkg name'
+pkgdesc='aurox test fixture: client makedepending on a split pkg name'
 arch=('any')
 license=('MIT')
 makedepends=('test-split-as-makedep-helper-lib')

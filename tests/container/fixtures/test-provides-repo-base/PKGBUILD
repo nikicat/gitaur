@@ -6,7 +6,7 @@
 pkgname=test-provides-repo-base
 pkgver=9.0
 pkgrel=1
-pkgdesc='gitaur test fixture: AUR provider shadowing the sync-repo name repo-base'
+pkgdesc='aurox test fixture: AUR provider shadowing the sync-repo name repo-base'
 arch=('any')
 license=('MIT')
 provides=('repo-base=9.0')

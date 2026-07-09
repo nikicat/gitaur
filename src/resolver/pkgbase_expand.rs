@@ -363,7 +363,7 @@ fn record_target_hint(
 }
 
 /// Merge `additions` into the per-pkgbase selection list, deduping. Multiple
-/// targets in the same `gaur -S` invocation may reference different
+/// targets in the same `aurox -S` invocation may reference different
 /// pkgnames of the same split pkgbase (`-S bisq-cli bisq-daemon`); each
 /// must extend the selection rather than overwrite it.
 fn extend_selection(
@@ -728,7 +728,7 @@ mod tests {
 
     #[test]
     fn pkgname_in_multi_pkgbase_restricts_to_that_pkgname() {
-        // Regression: `gaur -S bisq-cli` (a pkgname of the split pkgbase
+        // Regression: `aurox -S bisq-cli` (a pkgname of the split pkgbase
         // `bisq`) used to install all three siblings because the by_name hit
         // was a bare passthrough — install_stratum has no way to filter
         // without a selection. Selection must pin the install to bisq-cli;
@@ -818,7 +818,7 @@ mod tests {
 
     #[test]
     fn multiple_pkgnames_in_same_split_pkgbase_merge_selection() {
-        // `gaur -S bisq-cli bisq-daemon` must install BOTH (and not
+        // `aurox -S bisq-cli bisq-daemon` must install BOTH (and not
         // bisq-desktop). The second target must extend the existing
         // selection rather than overwrite it.
         let (idx, by, pac) = fixture();

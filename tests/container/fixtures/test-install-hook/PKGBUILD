@@ -4,7 +4,7 @@
 pkgname=test-install-hook
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: has .install hook'
+pkgdesc='aurox test fixture: has .install hook'
 arch=('any')
 license=('MIT')
 install=test-install-hook.install

@@ -4,7 +4,7 @@
 # first declared (legacy-a), which is wrong when the user actually meant
 # legacy-b. This is exactly the dotnet-core-7.0-bin shape: provides both
 # `aspnet-runtime` and `dotnet-runtime-7.0`; user has both installed; runs
-# `gaur -S dotnet-runtime-7.0`.
+# `aurox -S dotnet-runtime-7.0`.
 #
 # Declaration order is load-bearing: legacy-a comes first so the unhinted
 # walk would pick it. The smoke test's `-S test-multi-provides-legacy-b`
@@ -17,7 +17,7 @@
 pkgname=test-multi-provides-new
 pkgver=2.0
 pkgrel=1
-pkgdesc='gitaur test fixture: aspnet-runtime-shape pkgbase with multiple installed provides'
+pkgdesc='aurox test fixture: aspnet-runtime-shape pkgbase with multiple installed provides'
 arch=('any')
 license=('MIT')
 provides=('test-multi-provides-legacy-a' 'test-multi-provides-legacy-b')

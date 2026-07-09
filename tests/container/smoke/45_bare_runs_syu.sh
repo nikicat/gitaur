@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bare, non-interactive `gitaur` is a plain `pacman -Syu` passthrough (the
+# Bare, non-interactive `aurox` is a plain `pacman -Syu` passthrough (the
 # interactive shell owns the AUR-aware upgrade flow; with no TTY there's
 # nobody to drive it).
 #
@@ -11,7 +11,7 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur --noconfirm
+aurox --noconfirm
 assert_exit 0
 grep -qE 'about to elevate via sudo|nothing to do' "$LAST_STDERR" || {
     echo "expected upgrade-branch marker (sudo elevation or 'nothing to do') in stderr" >&2

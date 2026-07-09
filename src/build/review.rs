@@ -762,12 +762,12 @@ mod tests {
     #[test]
     fn diff_command_targets_pkgbuild_in_mirror() {
         let zero = ObjectId::null(Kind::Sha1);
-        let cmd = diff_command(Path::new("/var/lib/gitaur/foo.git"), zero, zero, None);
+        let cmd = diff_command(Path::new("/var/lib/aurox/foo.git"), zero, zero, None);
         let args = args_of(&cmd);
         assert_eq!(args.first().map(String::as_str), Some("-C"));
         assert_eq!(
             args.get(1).map(String::as_str),
-            Some("/var/lib/gitaur/foo.git")
+            Some("/var/lib/aurox/foo.git")
         );
         assert_eq!(args.get(2).map(String::as_str), Some("diff"));
         // Pathspec separator and target file at the tail.

@@ -10,7 +10,7 @@
 pkgname=test-collision-otf
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: standalone pkgbase with colliding pkgname'
+pkgdesc='aurox test fixture: standalone pkgbase with colliding pkgname'
 arch=('any')
 license=('MIT')
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # `-S <virtual>` where exactly one pkgname of a split pkgbase declares
 # `provides=<virtual>`. yay/paru install only that one pkgname (because the
-# AUR-RPC tells them which pkgname declared the provides). gitaur must match:
+# AUR-RPC tells them which pkgname declared the provides). aurox must match:
 #   * the providing pkgname is built, installed, and marked Explicit;
 #   * the sibling pkgnames are NOT built or installed (makepkg --pkg= +
 #     install-side file filter both kick in).
@@ -12,8 +12,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
-gaur -S --noconfirm scoped-virt
+aurox -Sy
+aurox -S --noconfirm scoped-virt
 assert_exit 0
 
 # Only the providing pkgname is installed, and as Explicit (the user named it

@@ -12,14 +12,14 @@ bootstrap; reset_state
 
 # Build the on-disk index so the shell can classify test-trivial and test-epoch
 # as AUR packages (the shell loads the index at startup but never fetches).
-gaur -Sy
+aurox -Sy
 assert_exit 0
 
 driver="$EXAMPLES_DIR/shell_undo_e2e"
 [[ -x "$driver" ]] || { echo "missing driver example: $driver (run.sh must build it)" >&2; exit 1; }
 
 out="$(mktemp)"
-if ! GITAUR="$GITAUR" "$driver" >"$out" 2>&1; then
+if ! AUROX="$AUROX" "$driver" >"$out" 2>&1; then
     echo "shell undo driver failed (remove-reject / keep / undo / redo did not complete)" >&2
     cat "$out" >&2
     exit 1

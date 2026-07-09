@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Rootless official-repo update check.
 #
-# `gaur -Sy` refreshes the pacman sync databases WITHOUT root (native libalpm
-# into gitaur's private dbpath), and the resulting upgrade surfaces in
-# `gaur -Qu` — even though the *system* db, which only `sudo pacman -Sy` could
+# `aurox -Sy` refreshes the pacman sync databases WITHOUT root (native libalpm
+# into aurox's private dbpath), and the resulting upgrade surfaces in
+# `aurox -Qu` — even though the *system* db, which only `sudo pacman -Sy` could
 # refresh, still shows the old version. That gap is the whole point of the
 # feature: check for repo updates without touching root-owned state.
 #
@@ -11,8 +11,8 @@
 #   * repo-base 1.0-1 is installed from the local sync repo.
 #   * repo-base 2.0-1 is published into the local repo AFTER the system db was
 #     last synced, so plain `pacman -Qu` still believes 1.0-1 is current.
-#   * `gaur -Sy` (rootless) pulls the fresh db into ~/.local/state/gitaur/syncdb.
-#   * `gaur -Qu` reads THAT db (via open_synced) and reports 1.0-1 -> 2.0-1.
+#   * `aurox -Sy` (rootless) pulls the fresh db into ~/.local/state/aurox/syncdb.
+#   * `aurox -Qu` reads THAT db (via open_synced) and reports 1.0-1 -> 2.0-1.
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
@@ -36,7 +36,7 @@ stage="$(mktemp -d)"
 cat > "$stage/.PKGINFO" <<EOF
 pkgname = repo-base
 pkgver = 2.0-1
-pkgdesc = gitaur test fixture (bumped)
+pkgdesc = aurox test fixture (bumped)
 arch = any
 size = 0
 EOF
@@ -53,12 +53,12 @@ if pacman -Qu 2>/dev/null | grep -q '^repo-base '; then
 fi
 
 # The feature: a rootless `-Sy` refreshes the repo db with no sudo elevation.
-gaur -Sy
+aurox -Sy
 assert_exit 0
 assert_stderr_contains "official package databases refreshed"
 assert_stderr_not_contains "about to elevate via sudo"
 [[ -f "$STATE_DIR/syncdb/sync/local-repo.db" ]] || {
-    echo "private sync db was not populated by gaur -Sy" >&2
+    echo "private sync db was not populated by aurox -Sy" >&2
     _dump >&2
     exit 1
 }
@@ -66,8 +66,8 @@ assert_stderr_not_contains "about to elevate via sudo"
 # The payoff: `-Qu` reads the rootless-synced db and reports the upgrade that
 # the system db can't. (RUST_LOG=error quiets the "foreign pkg not in AUR index"
 # notes for base packages — expected, since core/extra were stripped above.)
-export RUST_LOG=gitaur=error
-gaur -Qu
+export RUST_LOG=aurox=error
+aurox -Qu
 assert_exit 0
 assert_stderr_contains "repo-base"
 assert_stderr_contains "1.0-1"

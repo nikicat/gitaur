@@ -1,4 +1,4 @@
-//! `gitaur` library crate. Same module tree as the binary; `main.rs` thin-wraps
+//! `aurox` library crate. Same module tree as the binary; `main.rs` thin-wraps
 //! [`cli::run`]. Exposed here so `tests/` integration suites can drive
 //! individual layers (mirror, index, resolver) directly.
 

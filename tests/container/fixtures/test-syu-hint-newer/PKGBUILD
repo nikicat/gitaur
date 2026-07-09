@@ -21,7 +21,7 @@
 pkgname=test-syu-hint-newer
 pkgver=9.0
 pkgrel=1
-pkgdesc='gitaur test fixture: newer-than-new installed virtual for -Syu hint regression'
+pkgdesc='aurox test fixture: newer-than-new installed virtual for -Syu hint regression'
 arch=('any')
 license=('MIT')
 

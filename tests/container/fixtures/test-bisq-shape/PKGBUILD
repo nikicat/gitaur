@@ -1,12 +1,12 @@
 # Split pkgbase mirroring the real `bisq` AUR entry: 3 pkgnames, none with
 # intra-split runtime deps. Regression target for the bug where
-# `gaur -S <pkgname>` of a split pkgbase used to install every sibling
+# `aurox -S <pkgname>` of a split pkgbase used to install every sibling
 # .pkg.tar.zst in the same pacman -U transaction.
 pkgbase=test-bisq-shape
 pkgname=(test-bisq-shape-cli test-bisq-shape-daemon test-bisq-shape-desktop)
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: 3-way split pkg with no intra-split deps'
+pkgdesc='aurox test fixture: 3-way split pkg with no intra-split deps'
 arch=('any')
 license=('MIT')
 

@@ -124,6 +124,49 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
+name = "aurox"
+version = "0.1.0"
+dependencies = [
+ "alpm",
+ "alpm-utils",
+ "anyhow",
+ "clap",
+ "console",
+ "dialoguer",
+ "dirs",
+ "gix",
+ "glob",
+ "indicatif",
+ "jiff",
+ "linkme",
+ "memmap2",
+ "nix 0.31.3",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "pacmanconf",
+ "portable-pty",
+ "pty-harness",
+ "rayon",
+ "regex",
+ "rkyv",
+ "rusqlite",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "signal-hook 0.3.18",
+ "smallvec",
+ "syntect",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "vt100",
+]
+
+[[package]]
 name = "aws-lc-rs"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -825,49 +868,6 @@ dependencies = [
  "r-efi 6.0.0",
  "wasip2",
  "wasip3",
-]
-
-[[package]]
-name = "gitaur"
-version = "0.1.0"
-dependencies = [
- "alpm",
- "alpm-utils",
- "anyhow",
- "clap",
- "console",
- "dialoguer",
- "dirs",
- "gix",
- "glob",
- "indicatif",
- "jiff",
- "linkme",
- "memmap2",
- "nix 0.31.3",
- "opentelemetry",
- "opentelemetry_sdk",
- "pacmanconf",
- "portable-pty",
- "pty-harness",
- "rayon",
- "regex",
- "rkyv",
- "rusqlite",
- "rustyline",
- "serde",
- "serde_json",
- "shell-words",
- "signal-hook 0.3.18",
- "smallvec",
- "syntect",
- "tempfile",
- "thiserror 2.0.18",
- "toml",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "vt100",
 ]
 
 [[package]]

@@ -50,7 +50,7 @@ static COLOR: OnceLock<ColorMode> = OnceLock::new();
 /// Install the process-wide color mode. First caller wins.
 ///
 /// Also drives `console`'s own global gate so `always`/`never` actually force
-/// color on/off even when output isn't a TTY (e.g. `gaur --color always |
+/// color on/off even when output isn't a TTY (e.g. `aurox --color always |
 /// cat`). Without this, `color_on` would pick the colored code branch but
 /// every `console::style(...)` would still strip its escapes on a pipe.
 /// `auto` leaves console's built-in per-stream TTY detection untouched.

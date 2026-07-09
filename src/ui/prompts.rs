@@ -9,7 +9,7 @@ use std::io::{BufRead, IsTerminal, Write};
 /// Y/n confirmation prompt with `Y` default. Honors `noconfirm` to auto-accept.
 ///
 /// Falls back to a plain `stdin.read_line` when stdin is not a TTY so callers
-/// can pipe an answer (`echo n | gaur -S foo`), matching pacman/yay UX.
+/// can pipe an answer (`echo n | aurox -S foo`), matching pacman/yay UX.
 pub fn confirm(prompt: &str, noconfirm: bool) -> std::io::Result<bool> {
     if noconfirm {
         return Ok(true);
@@ -36,7 +36,7 @@ pub fn confirm(prompt: &str, noconfirm: bool) -> std::io::Result<bool> {
 /// Ask the user which pkgnames of a split pkgbase to install.
 ///
 /// makepkg packages every pkgname of a split PKGBUILD in one go (there's no
-/// flag to skip), but `gitaur` filters the resulting `.pkg.tar.zst` set
+/// flag to skip), but `aurox` filters the resulting `.pkg.tar.zst` set
 /// before `pacman -U` runs — so **unselected pkgnames are built but never
 /// installed**. Selected pkgnames are installed as `Explicit`.
 ///

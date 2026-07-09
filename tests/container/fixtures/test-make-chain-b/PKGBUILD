@@ -3,7 +3,7 @@
 pkgname=test-make-chain-b
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: middle of 3-deep makedep chain'
+pkgdesc='aurox test fixture: middle of 3-deep makedep chain'
 arch=('any')
 license=('MIT')
 makedepends=('test-make-chain-c')

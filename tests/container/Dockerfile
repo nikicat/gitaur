@@ -1,4 +1,4 @@
-# gitaur integration test runner — ephemeral Arch userspace.
+# aurox integration test runner — ephemeral Arch userspace.
 #
 # Three things are baked into the image so per-test containers start ready:
 #   1. base-devel + makepkg + fakeroot + rust toolchain
@@ -7,8 +7,8 @@
 #      and /srv/local-repo (local pacman sync DB) are populated and pacman.conf
 #      is updated, with `pacman -Sy` already run.
 #
-# At runtime the gitaur source tree is bind-mounted read-only at /work; the
-# only per-test work is wiping ~/.local/state/gitaur and writing config.toml.
+# At runtime the aurox source tree is bind-mounted read-only at /work; the
+# only per-test work is wiping ~/.local/state/aurox and writing config.toml.
 # That keeps the inner-loop cost to "podman run + cargo-built binary exec".
 
 FROM archlinux:latest
@@ -30,15 +30,15 @@ RUN pacman -Syu --noconfirm --needed \
         pacman-contrib \
     && pacman -Scc --noconfirm
 
-# `builder` is the non-root user makepkg/gitaur tests run as.
+# `builder` is the non-root user makepkg/aurox tests run as.
 # Passwordless sudo is fine *inside an ephemeral container* — never copy
 # this pattern outside the test image.
 RUN useradd -m -G wheel -s /bin/bash builder \
     && echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
 
 RUN install -d -o builder -g builder \
-        /home/builder/.local/state/gitaur \
-        /home/builder/.cache/gitaur \
+        /home/builder/.local/state/aurox \
+        /home/builder/.cache/aurox \
         /srv/local-repo \
         /srv/mock-aur \
         /srv/foreign-pkgs \
@@ -64,7 +64,7 @@ WORKDIR /work
 # `RUST_LOG=off` mutes the console tracing layer by default — the suite's shell
 # assertions grep `ui::*` (eprintln) output only, and the PTY-driven loop test
 # can't tolerate stray WARN lines scrolling the picker off the screen. The
-# unconditional file-log layer (`state_dir()/logs/gitaur-*.log` at debug) still
+# unconditional file-log layer (`state_dir()/logs/aurox-*.log` at debug) still
 # captures everything for post-mortem; an individual test can re-export
 # `RUST_LOG=…` if it specifically wants tracing on stderr.
 ENV CARGO_TARGET_DIR=/tmp/target \

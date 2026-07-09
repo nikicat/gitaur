@@ -5,6 +5,6 @@ bootstrap; reset_state
 
 rm -f "$STATE_DIR/index.bin"
 
-gaur -S --noconfirm test-trivial
+aurox -S --noconfirm test-trivial
 [[ "$LAST_EXIT" != "0" ]] || { echo "expected nonzero exit"; _dump; exit 1; }
 assert_stderr_contains "test-trivial"

@@ -1,6 +1,8 @@
-# gitaur — agent notes
+# aurox — agent notes
 
-`gitaur` (binary: `gaur`) is a Rust AUR helper with pacman-parity UX.
+`aurox` is a Rust AUR helper with pacman-parity UX (the name: AUR + the
+gitoxide/Rust-oxide ox; its predecessor name `gaur` — another wild ox — was
+taken on the AUR).
 
 ## Testing
 

@@ -3,7 +3,7 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -S --noconfirm --asdeps repo-base
+aurox -S --noconfirm --asdeps repo-base
 assert_exit 0
 assert_pkg_installed repo-base
 assert_pkg_asdep repo-base

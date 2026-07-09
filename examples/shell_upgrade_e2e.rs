@@ -1,7 +1,7 @@
 //! End-to-end driver for the shell's `upgrade` procedure (REPL phase 4), used
 //! by `tests/container/extended/04_shell_upgrade_repo.sh`.
 //!
-//! No-arg `gaur` opens the shell. This drives the upgrade flow against an
+//! No-arg `aurox` opens the shell. This drives the upgrade flow against an
 //! installed-but-outdated **repo** package: `upgrade` refreshes + seeds the
 //! pending upgrade (auto-approved, since it's a repo row), then `apply` renders
 //! the cost-overlay change-set preview, takes the transaction confirm + the
@@ -17,8 +17,8 @@
 use pty_harness::Pty;
 
 fn main() {
-    let mut pty = Pty::spawn_gaur();
-    pty.expect("shell banner", |s| s.contains("gitaur shell"));
+    let mut pty = Pty::spawn_aurox();
+    pty.expect("shell banner", |s| s.contains("aurox shell"));
 
     // Refresh + seed the pending upgrades; the repo row auto-approves and shows
     // its old → new transition.

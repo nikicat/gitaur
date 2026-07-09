@@ -12,7 +12,7 @@
 pkgname=test-multi-provides-legacy-a
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: first legacy half of an aspnet-runtime-shape pair'
+pkgdesc='aurox test fixture: first legacy half of an aspnet-runtime-shape pair'
 arch=('any')
 license=('MIT')
 

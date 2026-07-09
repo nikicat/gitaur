@@ -38,7 +38,7 @@ pub mod chrome;
 /// changes (`set_name`, `add_child`, `message`) land in the log, but the very
 /// chatty per-percent `trace!` events do not. Per-crate overrides silence the
 /// HTTP-plumbing layers (h2 frame-by-frame, hyper connection pool, rustls
-/// platform verifier, reqwest connect) which otherwise drown gitaur's own
+/// platform verifier, reqwest connect) which otherwise drown aurox's own
 /// events ~5:1 during a single fetch.
 const FILE_LOG_FILTER: &str = "debug,h2=info,hyper=info,hyper_util=info,reqwest=info,rustls=info,rustls_platform_verifier=info";
 
@@ -61,7 +61,7 @@ impl Drop for Guard {
         if let Some(provider) = self.provider.take()
             && let Err(e) = provider.shutdown()
         {
-            eprintln!("gitaur: failed to flush span trace: {e}");
+            eprintln!("aurox: failed to flush span trace: {e}");
         }
     }
 }
@@ -76,7 +76,7 @@ pub fn init() -> Guard {
     // `fmt::layer()` defaults to stdout, which competes with subprocess
     // stdout (makepkg, pacman -U). Pin to stderr so log lines interleave
     // cleanly with `ui::{step,note,…}` (which all use eprintln) and don't
-    // pollute callers that capture gitaur's stdout.
+    // pollute callers that capture aurox's stdout.
     let console_layer = fmt::layer()
         .with_target(false)
         .with_writer(std::io::stderr)
@@ -96,7 +96,7 @@ pub fn init() -> Guard {
             (Some(layer), Some(path))
         }
         Err(e) => {
-            eprintln!("gitaur: file logging disabled: {e}");
+            eprintln!("aurox: file logging disabled: {e}");
             (None, None)
         }
     };
@@ -112,13 +112,13 @@ pub fn init() -> Guard {
                 .with_simple_exporter(chrome::ChromeExporter::new(file))
                 .build();
             let layer = tracing_opentelemetry::layer()
-                .with_tracer(provider.tracer("gitaur"))
+                .with_tracer(provider.tracer("aurox"))
                 .with_threads(true)
                 .with_filter(EnvFilter::new(FILE_LOG_FILTER));
             (Some(layer), Some(provider), Some(path))
         }
         Err(e) => {
-            eprintln!("gitaur: span tracing disabled: {e}");
+            eprintln!("aurox: span tracing disabled: {e}");
             (None, None, None)
         }
     };
@@ -141,7 +141,7 @@ pub fn init() -> Guard {
     Guard { provider }
 }
 
-/// The per-run text log in `state_dir()/logs/` (`gitaur-*.log`).
+/// The per-run text log in `state_dir()/logs/` (`aurox-*.log`).
 struct Logs;
 
 impl RotationPolicy for Logs {
@@ -157,7 +157,7 @@ impl RotationPolicy for Logs {
 }
 
 /// The per-run Chrome/Perfetto span trace in `state_dir()/traces/`
-/// (`gitaur-*.json`). Kept lower than logs because trace JSON is far larger.
+/// (`aurox-*.json`). Kept lower than logs because trace JSON is far larger.
 struct Traces;
 
 impl RotationPolicy for Traces {
@@ -190,7 +190,7 @@ fn parse_console_filter(
         Err(std::env::VarError::NotUnicode(_)) => {
             writeln!(
                 diag,
-                "gitaur: RUST_LOG is not valid UTF-8; falling back to RUST_LOG=warn",
+                "aurox: RUST_LOG is not valid UTF-8; falling back to RUST_LOG=warn",
             )
             .ok();
             EnvFilter::new("warn")
@@ -198,7 +198,7 @@ fn parse_console_filter(
         Ok(raw) => EnvFilter::try_new(&raw).unwrap_or_else(|e| {
             writeln!(
                 diag,
-                "gitaur: ignoring malformed RUST_LOG='{raw}' ({e}); falling back to RUST_LOG=warn",
+                "aurox: ignoring malformed RUST_LOG='{raw}' ({e}); falling back to RUST_LOG=warn",
             )
             .ok();
             EnvFilter::new("warn")
@@ -230,9 +230,9 @@ mod tests {
         assert_eq!(Logs.ext(), "log");
         assert_eq!(Traces.ext(), "json");
         // `owns` (trait-provided) keys off that extension.
-        assert!(Logs.owns(OsStr::new("gitaur-x.log")));
-        assert!(!Logs.owns(OsStr::new("gitaur-x.json")));
-        assert!(Traces.owns(OsStr::new("gitaur-x.json")));
+        assert!(Logs.owns(OsStr::new("aurox-x.log")));
+        assert!(!Logs.owns(OsStr::new("aurox-x.json")));
+        assert!(Traces.owns(OsStr::new("aurox-x.json")));
     }
 
     #[test]

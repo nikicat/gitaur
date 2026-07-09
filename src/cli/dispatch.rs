@@ -15,7 +15,7 @@ use crate::ui;
 use std::io::IsTerminal;
 
 /// Top-level routing entry — clap already pre-scanned for pacman-owned ops,
-/// so by this point `cli.args` is gitaur's responsibility (`-S` family,
+/// so by this point `cli.args` is aurox's responsibility (`-S` family,
 /// the bare-arg yay shortcuts, or none-at-all).
 pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
     let argv = &cli.args;
@@ -26,7 +26,7 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
     // command bridges to the iterative upgrade loop. A non-interactive run
     // (--noconfirm, piped stdin, cron) does a single `-Syu` pass like explicit
     // `-Syu`. Replaces an older "no-args = -Sy only" shortcut: bare `yay` /
-    // bare `paru` both upgrade, and gitaur's lone outlier was a surprise rather
+    // bare `paru` both upgrade, and aurox's lone outlier was a surprise rather
     // than a feature.
     if f.op.is_none() && f.positional.is_empty() {
         let interactive = !cli.noconfirm && std::io::stdin().is_terminal();
@@ -37,7 +37,7 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
                 &[],
             );
         }
-        // Non-interactive bare `gaur` (cron / pipe / `--noconfirm`) is a plain
+        // Non-interactive bare `aurox` (cron / pipe / `--noconfirm`) is a plain
         // `pacman -Syu --noconfirm` — there's no human to answer pacman's
         // prompts, so `--noconfirm` is required (the explicit `-Su` flag keeps
         // the user's own flags instead).
@@ -53,9 +53,9 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
             build::DevelPolicy::from_enabled(cli.devel || cfg.devel || f.has_long("devel")),
         ),
         Some(other) => Err(Error::other(format!(
-            "unsupported gitaur op `-{other}` (pacman pass-through goes via the pre-scan, this dispatch is `-S` / `-Qu` only)"
+            "unsupported aurox op `-{other}` (pacman pass-through goes via the pre-scan, this dispatch is `-S` / `-Qu` only)"
         ))),
-        // yay parity: `gaur <term>...` with no operation letter is a fuzzy
+        // yay parity: `aurox <term>...` with no operation letter is a fuzzy
         // search across the sync repos + AUR index. Interactively this launches
         // the shell REPL seeded with the search — identical to starting the
         // shell and typing `search <term>…` (no picker; the REPL is the one
@@ -95,15 +95,15 @@ fn pkg_targets(positional: &[String]) -> Vec<PkgTarget> {
 /// Handle the `-S` family (`-S`, `-Sy`, `-Syu`, `-Ss`, `-Si`, `-Sc`).
 fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8> {
     // `--noconfirm` / `--asdeps` / `--devel` may appear before *or* after the
-    // operation (`gaur --noconfirm -S foo` vs `gaur -S --noconfirm foo`).
+    // operation (`aurox --noconfirm -S foo` vs `aurox -S --noconfirm foo`).
     // clap's `trailing_var_arg` captures everything after `-S`, so flags that
     // followed the op are inside `argv` and never reach `cli.*`. Merge here.
     let noconfirm = cli.noconfirm || f.has_long("noconfirm");
     let asdeps = cli.asdeps || f.has_long("asdeps");
 
     if f.has('h') || f.has_long("help") {
-        // Same auto-generated help as `gaur --help` — clap already lists
-        // every gitaur-owned flag (with its doc comment) plus the operations
+        // Same auto-generated help as `aurox --help` — clap already lists
+        // every aurox-owned flag (with its doc comment) plus the operations
         // section from `after_help`. No reason to maintain a separate copy.
         use clap::CommandFactory;
         Cli::command().print_help().ok();
@@ -121,19 +121,19 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
         return build::cmd_clean(cfg, argv);
     }
 
-    // `-Su` (system upgrade) is pacman's job, not gitaur's: the interactive
-    // shell (`gaur` → `upgrade`) owns the AUR-aware upgrade flow now, so the
+    // `-Su` (system upgrade) is pacman's job, not aurox's: the interactive
+    // shell (`aurox` → `upgrade`) owns the AUR-aware upgrade flow now, so the
     // explicit flag just passes the whole argv through to `pacman -Su…` (same
-    // as `-Q`/`-R`/etc.). gitaur's own `-Sy` mirror refresh is deliberately not
+    // as `-Q`/`-R`/etc.). aurox's own `-Sy` mirror refresh is deliberately not
     // run here — `pacman -Sy` syncs its own DBs; refresh the AUR mirror with a
-    // standalone `gaur -Sy` or via the shell.
+    // standalone `aurox -Sy` or via the shell.
     if f.has('u') {
         return invoke::exec_pacman(cfg, argv);
     }
 
     let refresh = f.has('y');
     // Pacman convention: -Sy is incremental, -Syy forces a full re-fetch.
-    // For gitaur that means re-cloning the bare mirror from scratch.
+    // For aurox that means re-cloning the bare mirror from scratch.
     let force_reclone = f.op_letters.iter().filter(|c| **c == 'y').count() >= 2;
 
     if refresh {

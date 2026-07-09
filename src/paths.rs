@@ -1,4 +1,4 @@
-//! XDG-aware path helpers for gitaur state and config files.
+//! XDG-aware path helpers for aurox state and config files.
 
 use crate::context_local;
 use crate::names::PkgBase;
@@ -16,7 +16,7 @@ context_local! {
     pub(crate) static state_root: Option<PathBuf> = None;
 }
 
-/// Root for per-user mutable state (e.g. `$XDG_STATE_HOME/gitaur`).
+/// Root for per-user mutable state (e.g. `$XDG_STATE_HOME/aurox`).
 ///
 /// Honors the [`state_root`] override when present so tests can reroute state
 /// into a tempdir without mutating process-wide env vars. Production callers
@@ -27,14 +27,14 @@ pub fn state_dir() -> PathBuf {
     }
     dirs::state_dir()
         .unwrap_or_else(|| dirs::home_dir().expect("home dir").join(".local/state"))
-        .join("gitaur")
+        .join("aurox")
 }
 
-/// Root for per-user config (e.g. `$XDG_CONFIG_HOME/gitaur`).
+/// Root for per-user config (e.g. `$XDG_CONFIG_HOME/aurox`).
 pub fn config_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| dirs::home_dir().expect("home dir").join(".config"))
-        .join("gitaur")
+        .join("aurox")
 }
 
 /// Path to the bare clone of the AUR mirror.
@@ -69,11 +69,11 @@ pub fn index_path() -> PathBuf {
     state_dir().join("index.bin")
 }
 
-/// Private pacman dbpath for gitaur's rootless official-repo db sync.
+/// Private pacman dbpath for aurox's rootless official-repo db sync.
 ///
 /// See [`crate::pacman::sync`]. Holds a `sync/` dir of downloaded repo DBs and a
 /// `local` symlink to the system localdb, so libalpm reads the real
-/// installed-package set while available versions come from gitaur's own fetch.
+/// installed-package set while available versions come from aurox's own fetch.
 pub fn sync_db_path() -> PathBuf {
     state_dir().join("syncdb")
 }
@@ -103,7 +103,7 @@ pub fn metrics_db_path() -> PathBuf {
     state_dir().join("metrics.db")
 }
 
-/// Persistent command history for the interactive shell (`gaur` REPL).
+/// Persistent command history for the interactive shell (`aurox` REPL).
 ///
 /// Lives under the state dir alongside logs/traces so it follows the same
 /// XDG + test-override rules; rustyline loads it at session start and appends

@@ -3,7 +3,7 @@
 pkgname=test-trivial
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: trivial pkg'
+pkgdesc='aurox test fixture: trivial pkg'
 arch=('any')
 license=('MIT')
 

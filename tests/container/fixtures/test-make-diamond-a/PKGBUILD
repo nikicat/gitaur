@@ -3,7 +3,7 @@
 pkgname=test-make-diamond-a
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: diamond bottom'
+pkgdesc='aurox test fixture: diamond bottom'
 arch=('any')
 license=('MIT')
 

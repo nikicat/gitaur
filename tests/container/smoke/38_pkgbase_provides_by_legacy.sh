@@ -13,7 +13,7 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
+aurox -Sy
 
 install_foreign test-pkgbase-provides-legacy
 assert_pkg_installed test-pkgbase-provides-legacy
@@ -22,7 +22,7 @@ assert_pkg_installed test-pkgbase-provides-legacy
 # by_provides (the new pkgbase declares it), rewrites the spec to the
 # new pkgbase, and records `hints[<pkgbase>] = legacy`. prepare_one
 # then calls counterpart_with_hint(entry, Some(legacy)).
-RUST_LOG=gitaur=warn,gitaur=info gaur -S --noconfirm test-pkgbase-provides-legacy
+RUST_LOG=aurox=warn,aurox=info aurox -S --noconfirm test-pkgbase-provides-legacy
 assert_exit 0
 assert_pkg_installed test-pkgbase-provides-new-a
 assert_pkg_installed test-pkgbase-provides-new-b

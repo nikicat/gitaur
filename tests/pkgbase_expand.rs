@@ -14,16 +14,16 @@
 //! * the `by_name` collision case (commit-mono-font shape) doesn't land an
 //!   unrelated pkgbase in the build plan.
 
-use gitaur::build::Target;
-use gitaur::config::defaults::default_config;
-use gitaur::error::Result;
-use gitaur::index::build::full_build;
-use gitaur::index::secondary::Secondary;
-use gitaur::mirror::MirrorRepo;
-use gitaur::names::{PkgBase, PkgName, PkgTargetSetExt};
-use gitaur::pacman::alpm_db::PacmanIndex;
-use gitaur::resolver::{expand_pkgbase_targets, resolve};
-use gitaur::testing::git;
+use aurox::build::Target;
+use aurox::config::defaults::default_config;
+use aurox::error::Result;
+use aurox::index::build::full_build;
+use aurox::index::secondary::Secondary;
+use aurox::mirror::MirrorRepo;
+use aurox::names::{PkgBase, PkgName, PkgTargetSetExt};
+use aurox::pacman::alpm_db::PacmanIndex;
+use aurox::resolver::{expand_pkgbase_targets, resolve};
+use aurox::testing::git;
 use std::path::Path;
 use tempfile::TempDir;
 

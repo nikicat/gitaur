@@ -3,7 +3,7 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
-gaur -S --noconfirm test-cycle-a
+aurox -Sy
+aurox -S --noconfirm test-cycle-a
 [[ "$LAST_EXIT" != "0" ]] || { echo "expected nonzero exit"; _dump; exit 1; }
 assert_stderr_contains "cycle"

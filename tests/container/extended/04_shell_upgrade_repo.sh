@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end of the shell's `upgrade` procedure for a repo package (REPL phase 4).
 #
-# No-arg `gaur` opens the shell. `upgrade` refreshes + seeds the pending repo
+# No-arg `aurox` opens the shell. `upgrade` refreshes + seeds the pending repo
 # upgrade into the cart (auto-approved); `apply` renders the cost-overlay
 # change-set preview, confirms, and runs the partial `pacman -Syu`. The shell is
 # interactive (needs a TTY), so the flow is driven by the `shell_upgrade_e2e`
@@ -32,7 +32,7 @@ driver="$EXAMPLES_DIR/shell_upgrade_e2e"
 [[ -x "$driver" ]] || { echo "missing driver example: $driver (run.sh must build it)" >&2; exit 1; }
 
 out="$(mktemp)"
-if ! GITAUR="$GITAUR" "$driver" >"$out" 2>&1; then
+if ! AUROX="$AUROX" "$driver" >"$out" 2>&1; then
     echo "shell upgrade driver failed" >&2
     cat "$out" >&2
     exit 1

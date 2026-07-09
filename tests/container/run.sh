@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Drive the gitaur container test suite.
+# Drive the aurox container test suite.
 #
 # Usage:
 #   tests/container/run.sh                  # smoke tier only
@@ -9,22 +9,22 @@
 #   tests/container/run.sh smoke/05_*.sh    # one or more specific scripts
 #
 # Engine: podman by default, override with CONTAINER=docker.
-# Image is cached as `gitaur-test:latest`; rebuild with --rebuild.
+# Image is cached as `aurox-test:latest`; rebuild with --rebuild.
 # Parallelism: -j N (default = $(nproc), 1 disables, all tests are
 # fully isolated by container so contention is on host CPU/IO only).
 #
 # Coverage mode:
 #   --coverage <dir>   Bind-mount <dir> into each test container at /profraw
-#                      and set LLVM_PROFILE_FILE so the gitaur binary writes
+#                      and set LLVM_PROFILE_FILE so the aurox binary writes
 #                      LLVM source-coverage data there. Also skips the host
 #                      `cargo build` step (the caller is expected to have
 #                      already built an instrumented binary and to set
-#                      GITAUR=<path-inside-/work>). Driven by scripts/coverage.sh.
+#                      AUROX=<path-inside-/work>). Driven by scripts/coverage.sh.
 
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-podman}"
-IMAGE="gitaur-test:latest"
+IMAGE="aurox-test:latest"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TESTS_DIR="$REPO_ROOT/tests/container"
 
@@ -55,12 +55,12 @@ fi
 # Build the binary on the host once, mount /work read-only. In coverage mode
 # the orchestrator has already produced an instrumented binary, so we skip.
 if [[ -z "$coverage_dir" ]]; then
-    # Build gaur plus every example driver the suite shells out to: `tarpit`
+    # Build aurox plus every example driver the suite shells out to: `tarpit`
     # (HTTP-stall for the idle-timeout test) and the PTY loop drivers
     # (`upgrade_loop_e2e`, `loop_built_tag_e2e`, …). `--examples` builds them
     # all, so adding a new scenario driver needs no edit here. Cheap, and keeps
     # the tests container-side (no host cargo inside the container).
-    ( cd "$REPO_ROOT" && cargo build --bin gaur --examples )
+    ( cd "$REPO_ROOT" && cargo build --bin aurox --examples )
 else
     mkdir -p "$coverage_dir"
 fi
@@ -106,9 +106,9 @@ run_one() {
         # (`builder`) so the unprivileged test process can write profraw.
         cov_args=(
             -v "$COVERAGE_DIR:/profraw:rw,U"
-            -e "LLVM_PROFILE_FILE=/profraw/gitaur-%p-%m.profraw"
+            -e "LLVM_PROFILE_FILE=/profraw/aurox-%p-%m.profraw"
         )
-        [[ -n "${GITAUR:-}" ]] && cov_args+=(-e "GITAUR=$GITAUR")
+        [[ -n "${AUROX:-}" ]] && cov_args+=(-e "AUROX=$AUROX")
     fi
 
     if "$CONTAINER" run --rm \
@@ -137,7 +137,7 @@ run_one() {
 export -f run_one
 export CONTAINER IMAGE REPO_ROOT results_dir
 export COVERAGE_DIR="$coverage_dir"
-export GITAUR="${GITAUR:-}"
+export AUROX="${AUROX:-}"
 
 pass=0 fail=0
 # `stdbuf -oL` flushes xargs's stdout per line so the FAIL+body block reaches

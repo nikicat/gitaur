@@ -5,7 +5,7 @@
 pkgname=test-provides-virt
 pkgver=2.5
 pkgrel=1
-pkgdesc='gitaur test fixture: provides virtual myvirt'
+pkgdesc='aurox test fixture: provides virtual myvirt'
 arch=('any')
 license=('MIT')
 provides=('myvirt=2.5')

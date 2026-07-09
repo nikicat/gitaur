@@ -1,4 +1,4 @@
-# Plan: GPG key auto-import for `gaur` AUR builds
+# Plan: GPG key auto-import for `aurox` AUR builds
 
 Status: proposed (not yet implemented)
 
@@ -7,12 +7,12 @@ Status: proposed (not yet implemented)
 Before building an AUR pkgbase whose `.SRCINFO` declares `validpgpkeys`,
 detect which of those keys are absent from the user's GPG keyring and offer
 to `gpg --recv-keys` them — turning makepkg's hard "unknown public key"
-failure into a one-time prompt, matching yay/paru but keeping gitaur's
+failure into a one-time prompt, matching yay/paru but keeping aurox's
 explicit/auditable stance.
 
-Today gitaur runs `makepkg -d --noconfirm --needed` (`src/config/defaults.rs:20`)
+Today aurox runs `makepkg -d --noconfirm --needed` (`src/config/defaults.rs:20`)
 with **no** `--skippgpcheck`, so a missing `validpgpkeys` key fails the build.
-yay/paru add a helper-side key-import step layered on top of makepkg; gitaur
+yay/paru add a helper-side key-import step layered on top of makepkg; aurox
 currently does not. This feature adds it.
 
 ## Locked design decisions
@@ -147,11 +147,11 @@ Add `#[error("gpg: {0}")] Gpg(String)` variant.
 
 ### 5. Docs
 
-- **`docs/COMPARISON.md`**: update the "Missing PGP keys" row — gitaur moves
+- **`docs/COMPARISON.md`**: update the "Missing PGP keys" row — aurox moves
   from "left to user's keyring (build fails loudly)" to "prompts to import
   (`ask` default; `never`/`always` configurable)". Add a short subsection
-  under *Where gitaur diverges* noting yay/paru import as a helper-side step
-  layered on makepkg, while gitaur batches the prompt once up front (before
+  under *Where aurox diverges* noting yay/paru import as a helper-side step
+  layered on makepkg, while aurox batches the prompt once up front (before
   sudo) rather than per-pkg.
 - **`docs/ARCHITECTURE.md`**: brief note on the build-pipeline insertion
   point + the worktree-`.SRCINFO`-not-index sourcing rationale.

@@ -1,19 +1,19 @@
 //! Find AUR pkgbases that resolve to the deepest stratum stack — i.e. the
-//! biggest build pipeline `gaur -S <pkg>` would print (decline the
+//! biggest build pipeline `aurox -S <pkg>` would print (decline the
 //! confirmation prompt for a dry run).
 //!
-//! Uses the real resolver, so the strata count matches what gitaur would
+//! Uses the real resolver, so the strata count matches what aurox would
 //! actually do. Skips entries the resolver rejects (cycles, missing deps).
 
-use gitaur::config::defaults::default_config;
-use gitaur::index::{self, secondary::Secondary};
-use gitaur::names::PkgBase;
-use gitaur::pacman::alpm_db::{self, PacmanIndex};
-use gitaur::paths;
-use gitaur::resolver;
+use aurox::config::defaults::default_config;
+use aurox::index::{self, secondary::Secondary};
+use aurox::names::PkgBase;
+use aurox::pacman::alpm_db::{self, PacmanIndex};
+use aurox::paths;
+use aurox::resolver;
 
 fn main() {
-    let idx = index::load(&paths::index_path()).expect("load index — run `gaur -Sy` first");
+    let idx = index::load(&paths::index_path()).expect("load index — run `aurox -Sy` first");
     let by = Secondary::build(&idx);
     let alpm = alpm_db::open().expect("open alpm");
     let pac = PacmanIndex::build(&alpm);

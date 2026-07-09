@@ -25,10 +25,10 @@
 
 #![cfg(target_os = "linux")]
 
-use gitaur::config::defaults::default_config;
-use gitaur::index::build::full_build;
-use gitaur::mirror::MirrorRepo;
-use gitaur::testing::git;
+use aurox::config::defaults::default_config;
+use aurox::index::build::full_build;
+use aurox::mirror::MirrorRepo;
+use aurox::testing::git;
 use nix::sys::resource::{UsageWho, getrusage};
 use std::io::Write;
 use std::path::{Path, PathBuf};

@@ -7,7 +7,7 @@
 pkgname=test-provides-rename-new
 pkgver=2.0
 pkgrel=1
-pkgdesc='gitaur test fixture: new half of a provides-rename pair'
+pkgdesc='aurox test fixture: new half of a provides-rename pair'
 arch=('any')
 license=('MIT')
 provides=('test-provides-rename-legacy')

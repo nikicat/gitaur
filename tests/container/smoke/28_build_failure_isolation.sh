@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Per-pkgbase failure isolation: when one pkgbase's makepkg fails the run
 # must not abort. Independent pkgbases in the same stratum keep building
-# and get installed, gitaur exits non-zero, and the failed pkgbase is
+# and get installed, aurox exits non-zero, and the failed pkgbase is
 # named in the summary.
 #
 # Pairs test-trivial (succeeds) with test-fail-build (build() returns 1)
@@ -10,8 +10,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
-gaur -S --noconfirm test-trivial test-fail-build
+aurox -Sy
+aurox -S --noconfirm test-trivial test-fail-build
 assert_exit 1
 assert_pkg_installed     test-trivial
 assert_pkg_not_installed test-fail-build

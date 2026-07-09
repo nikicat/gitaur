@@ -1,33 +1,33 @@
 [package]
-name = "gitaur"
+name = "aurox"
 version = "0.1.0"
 edition = "2024"
 description = "AUR helper backed by the github.com/archlinux/aur mirror"
 license = "MIT"
-repository = "https://github.com/nikicat/gitaur"
+repository = "https://github.com/nikicat/aurox"
 keywords = ["aur", "archlinux", "pacman", "package-manager"]
 categories = ["command-line-utilities"]
 
 # `pty-harness` (the e2e example drivers' shared PTY harness) is a workspace
 # member so it shares this Cargo.lock. Outside a workspace, running cargo inside
 # its directory would write a second, redundant `pty-harness/Cargo.lock`.
-# `default-members` keeps bare `cargo build`/`cargo test` scoped to gitaur.
+# `default-members` keeps bare `cargo build`/`cargo test` scoped to aurox.
 [workspace]
 members = ["pty-harness"]
 default-members = ["."]
 
 [lib]
-name = "gitaur"
+name = "aurox"
 path = "src/lib.rs"
 
 [[bin]]
-name = "gaur"
+name = "aurox"
 path = "src/main.rs"
 
 # Dev/profiling helper: reads the per-run span traces in state_dir()/traces/
 # and answers "where did the time in span X go?" without a throwaway script.
 [[bin]]
-name = "gitaur-trace"
+name = "aurox-trace"
 path = "src/bin/trace.rs"
 
 [dependencies]
@@ -35,7 +35,7 @@ path = "src/bin/trace.rs"
 # published gix release:
 #  - upstream PRs #2604 (gix-ref: skip name validation in packed-refs binary
 #    search) and #2605 (gix: cache packed-refs in a HashMap during fetch
-#    update_refs), which together bring `gitaur -Sy` against the AUR mirror from
+#    update_refs), which together bring `aurox -Sy` against the AUR mirror from
 #    ~11s to ~5s (≈ git fetch parity), plus a follow-up lazy packed-refs name
 #    index;
 #  - a gix-transport patch that wraps the curl worker's `perform()` in a
@@ -58,7 +58,7 @@ path = "src/bin/trace.rs"
 #    commit-graph (via `get_or_insert_commit`) instead of inflating the object
 #    just to check it isn't a tag — only annotated tags / symrefs still peel.
 #    Cuts `mark_all_refs` on the AUR mirror from ~3.3s to ~0.3s (depends on the
-#    commit-graph gitaur now writes after each fetch; see src/git.rs);
+#    commit-graph aurox now writes after each fetch; see src/git.rs);
 #  - the same `try_find_packed_only` fast path applied to `update_refs`, which
 #    re-resolved every mapping's local tracking ref (another loose `open()` per
 #    ref) when applying fetched updates — cuts its `find_ms` on the AUR mirror
@@ -151,7 +151,7 @@ portable-pty = "0.9"
 
 # Safe SIGINT handling (no `unsafe` sigaction, which the crate denies): catch a
 # Ctrl+C during an AUR build, set a flag, and forward it to makepkg's process
-# group instead of letting it kill gitaur. See `build::makepkg::run`.
+# group instead of letting it kill aurox. See `build::makepkg::run`.
 signal-hook = "0.3"
 
 # `nix::sys::signal::killpg` forwards the interrupt to the makepkg process group

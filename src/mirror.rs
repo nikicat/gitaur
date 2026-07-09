@@ -2,7 +2,7 @@
 //!
 //! Built on [`gix`] (gitoxide), pure Rust. No subprocess, no libgit2.
 //! Per-pkgbase directories are *materialized* from the bare repo's tree
-//! objects rather than created via `git worktree add` — gitaur owns those
+//! objects rather than created via `git worktree add` — aurox owns those
 //! directories, so a plain checkout is sufficient.
 
 use crate::config::Config;
@@ -96,7 +96,7 @@ impl MirrorRepo {
 }
 
 /// Loose refs accumulate (one file per changed ref) every fetch and never get
-/// packed on a mirror gitaur only fetches. Once this many have piled up, fold
+/// packed on a mirror aurox only fetches. Once this many have piled up, fold
 /// them back into `packed-refs`. The pack rewrites the whole ~10 MB file, so a
 /// threshold this size amortizes that ~1 s cost across hundreds of fetches
 /// while keeping the loose set — and the fast-path miss it causes — bounded.
@@ -125,7 +125,7 @@ fn loose_branch_ref_count(path: &Path) -> usize {
     n
 }
 
-/// Refresh gitaur's databases: the AUR mirror always, and — unless
+/// Refresh aurox's databases: the AUR mirror always, and — unless
 /// [`Config::check_repo_updates`] is off — the official-repo sync DBs in
 /// parallel.
 ///
@@ -134,7 +134,7 @@ fn loose_branch_ref_count(path: &Path) -> usize {
 /// best-effort: a failure there is reported as a warning and never fails the
 /// AUR refresh (whose result is what this returns).
 ///
-/// `force_reclone` (set by `gaur -Syy`) blows away the existing bare clone and
+/// `force_reclone` (set by `aurox -Syy`) blows away the existing bare clone and
 /// re-bootstraps from scratch, regardless of whether the current clone looks
 /// healthy. Use when the on-disk repo is suspected corrupted or you want a
 /// clean baseline.
@@ -251,7 +251,7 @@ fn refresh_aur_mirror(cfg: &Config, force_reclone: bool, mp: &MultiProgress) -> 
     // `&idx_path` without an `Arc`; the fetch keeps the foreground (and its
     // progress UI) on this thread.
     //
-    // A failed load (rkyv validation, schema mismatch after a gitaur upgrade,
+    // A failed load (rkyv validation, schema mismatch after a aurox upgrade,
     // etc.) is **recovered from in-place** by falling back to a full rebuild
     // below — otherwise the user would be stuck in a loop where `-Sy` errors
     // out before it can rebuild.
@@ -263,7 +263,7 @@ fn refresh_aur_mirror(cfg: &Config, force_reclone: bool, mp: &MultiProgress) -> 
             match index::load(&idx_path) {
                 Ok(idx) => Some(idx),
                 Err(e) => {
-                    // Expected after a gitaur upgrade bumps the schema: the
+                    // Expected after a aurox upgrade bumps the schema: the
                     // rebuild below is announced by "building index"/"index
                     // built", and on the resync path `load_or_resync` has
                     // already told the user why. So this is a trace, not a

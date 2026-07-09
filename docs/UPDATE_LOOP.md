@@ -1,8 +1,8 @@
 # Update loop, change-set preview & build-cost estimates (design)
 
-> **Superseded — historical design doc.** The no-arg `gaur` **loop driver** and
+> **Superseded — historical design doc.** The no-arg `aurox` **loop driver** and
 > its `dialoguer` **picker** described here were retired: the interactive
-> upgrade flow is now the shell (`gaur` → `upgrade` → `apply`), and the explicit
+> upgrade flow is now the shell (`aurox` → `upgrade` → `apply`), and the explicit
 > `-Syu` flag is a plain `pacman -Syu` passthrough. See
 > [`docs/plans/shell-ui.md`](plans/shell-ui.md) for the current design.
 >
@@ -15,7 +15,7 @@
 > now; `src/cli/upgrade_loop.rs` no longer exists. Read the cost-machinery
 > rationale below as current; read the loop/picker mechanics as history.
 
-Status (historical): **phases 1–3 implemented; phase 4 pending.** The no-arg `gaur` loop,
+Status (historical): **phases 1–3 implemented; phase 4 pending.** The no-arg `aurox` loop,
 session state, reviewed-set gating, picker badges, change-set preview, and
 SIGINT-during-build → bail-to-table now live in `src/cli/upgrade_loop.rs` +
 `src/build/makepkg.rs` (backed by `build::UpgradeSession` and the
@@ -49,8 +49,8 @@ refresh (-Sy) ──► collect_upgrade_plan ──► select_upgrades (picker)
 That exit is the problem. The real-world upgrade session is iterative:
 
 1. The picker is dominated by repo packages on first open, so the natural
-   first move is "apply the repo upgrades." After that, gitaur **exits.**
-2. To continue with AUR packages you re-run `gaur`, which **re-fetches the
+   first move is "apply the repo upgrades." After that, aurox **exits.**
+2. To continue with AUR packages you re-run `aurox`, which **re-fetches the
    mirror DBs** (`mirror::cmd_refresh`) before showing the picker again —
    tens of seconds of wasted work for a list that hasn't changed.
 3. AUR builds fail (or get interrupted) more often than repo installs. When
@@ -70,12 +70,12 @@ That exit is the problem. The real-world upgrade session is iterative:
 
 These were settled before the design was finalized:
 
-- **Loop only on no-arg `gaur`.** Explicit `gaur -Syu` keeps its current
+- **Loop only on no-arg `aurox`.** Explicit `aurox -Syu` keeps its current
   single-shot behavior (scriptable / yay-compatible). No new config knob.
 - **Selecting a package expands its unsatisfied dependencies** into the
   table, visually indented, so the user sees the *total* change set.
   Implemented via **confirm-stage expansion** (route 1, below).
-- **Ctrl+C during an AUR build bails to the table**, not out of gitaur. Only
+- **Ctrl+C during an AUR build bails to the table**, not out of aurox. Only
   Ctrl+C (or a normal "done") *on the table* exits the program.
 - **No in-table "refresh" action.** To pick up newer upstream versions the
   user exits and restarts — the fetch belongs at session start, not mid-loop.
@@ -103,7 +103,7 @@ These were settled before the design was finalized:
 - **See the whole change set** — checking a package reveals the unsatisfied
   deps it pulls in.
 - **Resilient to failure and interruption** — a failed or Ctrl+C'd AUR build
-  drops you back to the table, never out of gitaur.
+  drops you back to the table, never out of aurox.
 - **No redundant reviews** — approve a PKGBUILD once per session.
 - **Cost visibility** — rows show a size estimate (later: build time).
 
@@ -122,7 +122,7 @@ The loop hoists the expensive, once-per-session work *out* of the iteration
 and keeps only the cheap recompute inside it.
 
 ```
-                       ┌─ once per session (no-arg gaur) ───────┐
+                       ┌─ once per session (no-arg aurox) ───────┐
                        │  refresh mirror + index (-Sy)           │
                        │  load IndexFile + Secondary (mmap)      │   ← never repeated
                        │  open MirrorRepo                        │
@@ -167,7 +167,7 @@ fetched once); only the *localdb* changes as packages get installed.
 The candidate list shrinks naturally without touching the mirror:
 
 - **Repo rows.** `query_repo_upgrades` (`src/pacman/invoke.rs:38`) compares
-  localdb against gitaur's rootless syncdb. `pacman -Syu` moves localdb
+  localdb against aurox's rootless syncdb. `pacman -Syu` moves localdb
   forward; the rootless syncdb is unchanged, so an upgraded repo pkg now
   vercmp-matches and drops out of the next recompute.
 - **AUR rows.** `aur_upgrades` (`src/build/upgrade.rs:50`) compares localdb
@@ -177,7 +177,7 @@ The candidate list shrinks naturally without touching the mirror:
   outdated, so it reappears next iteration — exactly what we want for retry.
 
 A fresh fetch mid-session would only add brand-new upstream versions, not
-worth a 10–30 s stall every iteration. Restarting `gaur` covers that case.
+worth a 10–30 s stall every iteration. Restarting `aurox` covers that case.
 The mirror is fixed for the whole session, which also means a PKGBUILD's
 content is fixed — so the `reviewed` flag can key on pkgbase alone.
 
@@ -306,8 +306,8 @@ forward; noted, but phase 1 does not depend on it.)
 | Context when Ctrl+C arrives | Result |
 | --------------------------- | ------ |
 | An AUR build (`makepkg`) is running | abort *that* build, mark the pkgbase interrupted, **return to the table** |
-| The picker/table is displayed | **exit gitaur** |
-| Normal "done" (empty selection) on the table | exit gitaur |
+| The picker/table is displayed | **exit aurox** |
+| Normal "done" (empty selection) on the table | exit aurox |
 
 Mechanism (the trickiest part of phase 1):
 
@@ -328,7 +328,7 @@ Mechanism (the trickiest part of phase 1):
   sudo-gate decline inside a batch.
 
 Worth prototyping early — getting signal delivery right across the pty
-boundary (child gets the signal to stop; gitaur intercepts to survive) is
+boundary (child gets the signal to stop; aurox intercepts to survive) is
 fiddly and underpins the whole "resilient session" promise.
 
 ## Session state vs persisted state
@@ -349,7 +349,7 @@ sets after each `cmd_install` (and on `Error::Interrupted`).
 
 ### Size — from the pacman DBs, no store — DONE
 
-For any candidate row gitaur reads size without persisting anything, because
+For any candidate row aurox reads size without persisting anything, because
 the picker only shows installed-but-outdated packages:
 
 - **Repo rows / repo deps** — exact compressed download size from the sync DB
@@ -371,7 +371,7 @@ members; the single-pkgname `isize` is enough for the small-vs-huge ranking, so
 that wasn't added.)
 
 Imprecision is accepted by decision: installed≠download size, and a manually
-installed package may differ from what gitaur would build. The number is a
+installed package may differ from what aurox would build. The number is a
 hint, not a contract.
 
 ### Build time — the one stored metric — DONE

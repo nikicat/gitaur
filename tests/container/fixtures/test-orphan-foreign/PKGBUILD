@@ -5,7 +5,7 @@
 pkgname=test-orphan-foreign
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: foreign pkg with no transparent AUR upgrade'
+pkgdesc='aurox test fixture: foreign pkg with no transparent AUR upgrade'
 arch=('any')
 license=('MIT')
 

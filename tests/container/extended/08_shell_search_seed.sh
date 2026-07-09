@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end of the bare-term launch: `gaur <term>` opens the shell seeded with
+# End-to-end of the bare-term launch: `aurox <term>` opens the shell seeded with
 # that search (no picker — the REPL is the one interactive surface).
 #
 # The shell is interactive (needs a TTY), so the flow is driven by the
@@ -11,14 +11,14 @@ bootstrap; reset_state
 
 # Build the on-disk index so the seeded search can classify test-trivial as an
 # AUR package (the shell loads the index at startup but never fetches).
-gaur -Sy
+aurox -Sy
 assert_exit 0
 
 driver="$EXAMPLES_DIR/shell_search_seed_e2e"
 [[ -x "$driver" ]] || { echo "missing driver example: $driver (run.sh must build it)" >&2; exit 1; }
 
 out="$(mktemp)"
-if ! GITAUR="$GITAUR" "$driver" >"$out" 2>&1; then
+if ! AUROX="$AUROX" "$driver" >"$out" 2>&1; then
     echo "shell search-seed driver failed (banner / seeded list / add-by-number)" >&2
     cat "$out" >&2
     exit 1

@@ -1,9 +1,9 @@
 //! Top-level CLI entry.
 //!
 //! Pre-scans argv for the pacman operation letter; if it's an operation
-//! gitaur doesn't own (`Q`/`R`/`T`/`D`/`F`/`U`), we skip clap entirely and
+//! aurox doesn't own (`Q`/`R`/`T`/`D`/`F`/`U`), we skip clap entirely and
 //! forward raw to `pacman` so unknown pacman short flags aren't rejected.
-//! Otherwise clap parses our gitaur-owned flags + supplies auto-generated
+//! Otherwise clap parses our aurox-owned flags + supplies auto-generated
 //! `--help`/`--version`.
 
 use crate::config::Config;
@@ -21,14 +21,14 @@ pub mod shell;
 
 /// yay-like AUR helper backed by the github.com/archlinux/aur mirror.
 ///
-/// Pacman operations gitaur doesn't own (`-Q`, `-R`, `-T`, `-D`, `-F`, `-U`)
+/// Pacman operations aurox doesn't own (`-Q`, `-R`, `-T`, `-D`, `-F`, `-U`)
 /// are forwarded to `pacman` unchanged — run them with `pacman -Sh` / `-Qh`
 /// for their own option lists. Two yay parity shortcuts:
-///   * `gitaur`            → `-Syu` (refresh + upgrade with picker)
-///   * `gaur <term>...`  → AUR fuzzy search + interactive install picker
+///   * `aurox`            → `-Syu` (refresh + upgrade with picker)
+///   * `aurox <term>...`  → AUR fuzzy search + interactive install picker
 #[derive(Parser, Debug)]
 #[command(
-    name = "gitaur",
+    name = "aurox",
     version,
     about,
     long_about = None,
@@ -47,8 +47,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub noconfirm: bool,
 
-    /// Don't auto-rebuild the AUR index when it's from an older gitaur; error
-    /// out instead (rerun `gaur -Sy` yourself to rebuild).
+    /// Don't auto-rebuild the AUR index when it's from an older aurox; error
+    /// out instead (rerun `aurox -Sy` yourself to rebuild).
     #[arg(long, global = true)]
     pub noresync: bool,
 
@@ -66,7 +66,7 @@ pub struct Cli {
     pub args: Vec<String>,
 }
 
-const AFTER_HELP: &str = "GITAUR-OWNED OPERATIONS:\n\
+const AFTER_HELP: &str = "AUROX-OWNED OPERATIONS:\n\
   -S <pkg>...    install AUR packages (plan shown, one confirm, batched sudo)\n\
   -Sy            refresh AUR mirror + rebuild index (incremental fetch)\n\
   -Syy           force full re-clone of the AUR mirror (~8–9 min)\n\
@@ -77,18 +77,18 @@ const AFTER_HELP: &str = "GITAUR-OWNED OPERATIONS:\n\
   -Qu            list upgrades from repos + AUR, no sudo (dry-run for -Syu)\n\
 \n\
 YAY PARITY SHORTCUTS:\n\
-  gaur                 run -Syu (refresh + upgrade)\n\
-  gaur <term>...       fuzzy AUR search → multi-select picker → install\n\
+  aurox                 run -Syu (refresh + upgrade)\n\
+  aurox <term>...       fuzzy AUR search → multi-select picker → install\n\
 \n\
 PASS-THROUGH (raw `pacman` — clap doesn't parse these):\n\
   -Q (except -Qu), -R, -T, -D, -F, -U, and any flags they accept\n\
 \n\
 ENVIRONMENT:\n\
-  RUST_LOG=gitaur=debug    raise console tracing level\n\
+  RUST_LOG=aurox=debug    raise console tracing level\n\
   EDITOR                   used by PKGBUILD review's `edit` choice\n\
 \n\
-Execution logs (debug level, last 10 runs): $XDG_STATE_HOME/gitaur/logs/\n\
-Persistent settings: ~/.config/gitaur/config.toml";
+Execution logs (debug level, last 10 runs): $XDG_STATE_HOME/aurox/logs/\n\
+Persistent settings: ~/.config/aurox/config.toml";
 
 /// Top-level entry. Returns the desired process exit code.
 pub fn run() -> Result<u8> {
@@ -111,7 +111,7 @@ pub fn run() -> Result<u8> {
 
     // Pre-scan: if the first operation letter is pacman-owned, forward
     // verbatim and never let clap see it (clap would reject unknown short
-    // flags like `-Rns`). `-Qu` is the one Q-family op gitaur owns — it
+    // flags like `-Rns`). `-Qu` is the one Q-family op aurox owns — it
     // augments `pacman -Qu` with AUR upgrade candidates, so we let it fall
     // through to clap + dispatch.
     if let Some(op) = first_op_letter(&raw_argv) {
@@ -132,12 +132,12 @@ pub fn run() -> Result<u8> {
     dispatch::dispatch(&cfg, &cli)
 }
 
-/// Decide whether argv is the gitaur-owned `-Qu` form (merge of repo + AUR
+/// Decide whether argv is the aurox-owned `-Qu` form (merge of repo + AUR
 /// upgrades) or a pure-pacman query that should pass straight through.
 ///
 /// `run()` forwards every `-Q*` to pacman by default because clap doesn't
 /// know pacman's short flags and would reject `-Qul`, `-Qe`, `-Qm`, etc.
-/// Gitaur only reimplements one member of the Q family — bare `-Qu` — so
+/// Aurox only reimplements one member of the Q family — bare `-Qu` — so
 /// the carve-out is intentionally narrow: cluster of nothing but `u`'s, no
 /// positional filter. `-Qul`, `-Qu pkgname`, `-Quq`, … all keep pacman's
 /// exact semantics by failing this check and falling through to the
@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_gitaur_ops() {
+    fn detects_aurox_ops() {
         assert_eq!(first_op_letter(&argv(&["-Syu"])), Some('S'));
         assert_eq!(first_op_letter(&argv(&["-Ss", "vim"])), Some('S'));
     }
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn long_flag_before_pacman_op_still_routes_to_pacman() {
-        // `gaur --noconfirm -Rns vim` must detect the `-R` even when a
+        // `aurox --noconfirm -Rns vim` must detect the `-R` even when a
         // long flag precedes it, so the full argv (including `--noconfirm`,
         // which pacman also accepts) goes through to pacman unmodified.
         assert_eq!(

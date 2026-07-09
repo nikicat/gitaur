@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # When `pacman -U` fails on a conflict, the execution log must carry enough
 # detail to post-mortem the failure without re-running. The diagnostic chain
-# in invoke.rs lands two signals in $STATE_DIR/logs/gitaur-*.log:
+# in invoke.rs lands two signals in $STATE_DIR/logs/aurox-*.log:
 #   1. libalpm pre-flight: a `preflight: conflict detected` WARN with
 #      structured pkg1=/pkg2= fields (we run trans_prepare ourselves so the
 #      offending pair is queryable in the log, not buried in pacman's prompt).
@@ -17,15 +17,15 @@ source /work/tests/container/lib.sh
 bootstrap; reset_state
 
 install_foreign test-conflict-pre
-gaur -Sy
+aurox -Sy
 
 # Install the AUR pkg whose PKGBUILD conflicts with the seed.
-gaur -S --noconfirm test-conflict-aur
+aurox -S --noconfirm test-conflict-aur
 assert_exit 1
 
-log=$(ls -t "$STATE_DIR"/logs/gitaur-*.log 2>/dev/null | head -1)
+log=$(ls -t "$STATE_DIR"/logs/aurox-*.log 2>/dev/null | head -1)
 [[ -n "$log" && -s "$log" ]] || {
-    echo "expected a non-empty gitaur log under $STATE_DIR/logs" >&2
+    echo "expected a non-empty aurox log under $STATE_DIR/logs" >&2
     ls -la "$STATE_DIR/logs" 2>&1 >&2
     _dump >&2
     exit 1

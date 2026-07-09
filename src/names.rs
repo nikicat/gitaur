@@ -1,6 +1,6 @@
 //! Typed wrappers for [`PkgName`] and [`PkgBase`].
 //!
-//! The two name-shaped strings gitaur conflates at its peril: `PkgName` is
+//! The two name-shaped strings aurox conflates at its peril: `PkgName` is
 //! a pacman pkgname (what `pacman -Q` reports), `PkgBase` is an AUR pkgbase
 //! (a branch name on the mirror, the makepkg unit).
 //!

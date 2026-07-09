@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TTY counterpart to 57_pacman_conflict_logged. When gitaur runs on a real
+# TTY counterpart to 57_pacman_conflict_logged. When aurox runs on a real
 # terminal, `exec_pacman` hands pacman the inherited TTY so it draws its own
 # download/transaction progress bars and reads prompts natively — instead of
 # teeing pacman's stdout through a pipe (which forces pacman's degraded
@@ -12,7 +12,7 @@
 # proves the is_terminal() branch was taken. The libalpm pre-flight diagnostic
 # is independent of the channel and must still land.
 #
-# `script(1)` (util-linux) gives gaur a pty for stdin/stdout/stderr; -e returns
+# `script(1)` (util-linux) gives aurox a pty for stdin/stdout/stderr; -e returns
 # the child's exit code, -q silences its banner. The seed fixture
 # (`test-conflict-pre`) is staged as a foreign artifact; the AUR fixture
 # (`test-conflict-aur`) carries `conflicts=('test-conflict-pre')`.
@@ -20,13 +20,13 @@ source /work/tests/container/lib.sh
 bootstrap; reset_state
 
 install_foreign test-conflict-pre
-gaur -Sy
+aurox -Sy
 
-# Drive the conflicting install with gaur's stdio on a pty. typescript saved so
+# Drive the conflicting install with aurox's stdio on a pty. typescript saved so
 # we can also assert the user's exact reported symptom (the broken pipe) is gone.
 ts="$(mktemp)"
 set +e
-script -qec "$GITAUR -S --noconfirm test-conflict-aur" "$ts" >/dev/null 2>&1
+script -qec "$AUROX -S --noconfirm test-conflict-aur" "$ts" >/dev/null 2>&1
 rc=$?
 set -e
 [[ "$rc" == 1 ]] || {
@@ -43,9 +43,9 @@ if grep -qiF 'unable to write to pipe' "$ts"; then
     exit 1
 fi
 
-log=$(ls -t "$STATE_DIR"/logs/gitaur-*.log 2>/dev/null | head -1)
+log=$(ls -t "$STATE_DIR"/logs/aurox-*.log 2>/dev/null | head -1)
 [[ -n "$log" && -s "$log" ]] || {
-    echo "expected a non-empty gitaur log under $STATE_DIR/logs" >&2
+    echo "expected a non-empty aurox log under $STATE_DIR/logs" >&2
     ls -la "$STATE_DIR/logs" 2>&1 >&2
     exit 1
 }
@@ -58,7 +58,7 @@ echo "$(grep -F 'preflight: conflict detected' "$log" || true)" | grep -qF 'test
     exit 1
 }
 
-# (2) The capture-on-failure event is ABSENT: on a tty gitaur lets pacman own
+# (2) The capture-on-failure event is ABSENT: on a tty aurox lets pacman own
 #     the terminal, so there is nothing to tee into the log. This is the inverse
 #     of 57 and the proof exec_pacman took its is_terminal() branch.
 if grep -qF 'pacman output captured on failure' "$log"; then

@@ -1,7 +1,7 @@
 pkgname=test-cycle-b
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: cycle B'
+pkgdesc='aurox test fixture: cycle B'
 arch=('any')
 license=('MIT')
 depends=('test-cycle-a')

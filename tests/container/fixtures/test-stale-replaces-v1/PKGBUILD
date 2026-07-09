@@ -2,7 +2,7 @@
 # staged as a `.pkg.tar.zst` under /srv/foreign-pkgs/. The smoke test
 # applies it with `pacman -U` to seed an older install of the same
 # pkgname the AUR fixture ships at v2.0 — so the trigger
-# `gaur -S test-stale-replaces` exercises the Pkgname-beats-stale-Replaces
+# `aurox -S test-stale-replaces` exercises the Pkgname-beats-stale-Replaces
 # guard end-to-end through alpm → counterpart → review trace.
 #
 # Directory name diverges from pkgname on purpose: setup-fixtures iterates
@@ -13,7 +13,7 @@
 pkgname=test-stale-replaces
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: older baseline for the stale-replaces case'
+pkgdesc='aurox test fixture: older baseline for the stale-replaces case'
 arch=('any')
 license=('MIT')
 

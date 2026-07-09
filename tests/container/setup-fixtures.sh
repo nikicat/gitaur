@@ -2,7 +2,7 @@
 # Materialize fixture PKGBUILDs into:
 #   1. /srv/mock-aur    — a single bare git repo with one `refs/heads/<pkgbase>`
 #                         per AUR fixture. This mimics github.com/archlinux/aur's
-#                         ref layout exactly so gitaur's mirror logic is exercised.
+#                         ref layout exactly so aurox's mirror logic is exercised.
 #   2. /srv/local-repo  — a real pacman sync DB built from any `repo=official`
 #                         fixture (built once with makepkg, dropped into the dir,
 #                         indexed via repo-add).
@@ -29,7 +29,7 @@ FOREIGN_PKGS="${FOREIGN_PKGS:-/srv/foreign-pkgs}"
 
 # ---- mock AUR bare repo ----------------------------------------------------
 # One commit per pkgbase, each on a separate branch named after the pkgbase.
-# Matches the real github.com/archlinux/aur convention so gitaur's existing
+# Matches the real github.com/archlinux/aur convention so aurox's existing
 # update_refs / packed-refs code paths run unchanged.
 init_mock_aur() {
     git init --bare --quiet "$MOCK_AUR"
@@ -53,7 +53,7 @@ add_aur_pkg() {
     cp -r "$src"/* "$stage/"
     pushd "$stage" >/dev/null
     # An optional `commit-date` file pins the branch tip's committer time so
-    # tests can assert gitaur's freshest-commit-first search ordering against
+    # tests can assert aurox's freshest-commit-first search ordering against
     # known timestamps (otherwise every fixture commits at the same build
     # second and the order is just the pkgbase tie-break). It's metadata for
     # the harness, not part of the package, so drop it before committing the
@@ -63,7 +63,7 @@ add_aur_pkg() {
         commit_date="$(cat commit-date)"
         rm -f commit-date
     fi
-    # Real archlinux/aur packages carry both PKGBUILD and .SRCINFO; gitaur's
+    # Real archlinux/aur packages carry both PKGBUILD and .SRCINFO; aurox's
     # index builder parses the .SRCINFO blob, so synthesize it from PKGBUILD.
     makepkg --printsrcinfo > .SRCINFO
     git init --quiet -b "$pkgbase"
@@ -83,7 +83,7 @@ add_aur_pkg() {
 
 # ---- local pacman sync repo ------------------------------------------------
 # Each `repo=official` fixture is built with makepkg then registered into
-# a sync DB the container's pacman.conf points at. From gitaur's view these
+# a sync DB the container's pacman.conf points at. From aurox's view these
 # packages classify as Source::Repo and trigger the pacman-fast-path.
 build_and_register_official() {
     local pkgbase="$1"

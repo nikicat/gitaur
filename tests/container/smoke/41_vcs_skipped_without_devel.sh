@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `gaur -Qu` must NOT list VCS pkgbases (`-git`/`-svn`/`-hg`/`-bzr`)
+# `aurox -Qu` must NOT list VCS pkgbases (`-git`/`-svn`/`-hg`/`-bzr`)
 # unless `--devel` is on. Their on-disk pkgver is whatever `pkgver()`
 # returned at last build — without `--devel` the upgrade query has no
 # way to know upstream has moved, so silently including them would
@@ -12,19 +12,19 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
+aurox -Sy
 
 # Build & install the VCS fixture via the regular -S path. Once
 # installed, it's a foreign pkg from pacman's view (the AUR isn't a
 # sync DB), so it's eligible for `aur_upgrades`'s `pac.foreign()` scan.
-gaur -S --noconfirm test-vcs-git
+aurox -S --noconfirm test-vcs-git
 assert_exit 0
 assert_pkg_installed test-vcs-git
 
 # Query upgrades without --devel. The table is empty when no upgrades
 # exist; either no table prints at all, or it prints without
 # mentioning test-vcs-git.
-gaur -Qu
+aurox -Qu
 assert_exit 0
 
 # upgrade_table writes to stderr (see ui::tables::upgrade_table).

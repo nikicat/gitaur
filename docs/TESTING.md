@@ -1,4 +1,4 @@
-# Testing gitaur
+# Testing aurox
 
 Two tiers. Both are required to pass before merging.
 
@@ -20,8 +20,8 @@ What lives where:
 | In-process I/O       | `tests/*.rs`                               | full mirror fetch + index build + incremental update |
 
 The `tests/` directory holds true integration tests: each is a separate
-binary that links the gitaur lib. `tests/testing.rs` (re-exported via
-`gitaur::testing`) is a shared helper module that wraps the system
+binary that links the aurox lib. `tests/testing.rs` (re-exported via
+`aurox::testing`) is a shared helper module that wraps the system
 `git` CLI for fixture setup, since gix doesn't expose every plumbing
 operation we need.
 
@@ -34,7 +34,7 @@ operation we need.
 
 ## Tier 2 — Container integration suite
 
-Real Arch userspace. Runs every gitaur command path against real
+Real Arch userspace. Runs every aurox command path against real
 `makepkg`, real `pacman -S/-U/-D`, and real `alpm` — but with fixture
 PKGBUILDs designed to build in well under a second.
 
@@ -55,7 +55,7 @@ Image build: ~2 min one-time. Smoke suite: ~30 s on 8 cores.
 tests/container/
 ├── Dockerfile               base-devel + builder user + baked fixtures
 ├── setup-fixtures.sh        builds repo-* pkgs, publishes AUR-* branches
-├── lib.sh                   bash helpers: gaur, assert_*, bootstrap, reset_state
+├── lib.sh                   bash helpers: aurox, assert_*, bootstrap, reset_state
 ├── run.sh                   the harness — parallel containers + xargs -P
 ├── fixtures/<pkgbase>/      one PKGBUILD per fixture, optional .install / repo
 ├── smoke/NN_*.sh            everyday cases (run in CI)
@@ -70,8 +70,8 @@ Each smoke test is a self-contained bash script:
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
-gaur -S --noconfirm test-trivial
+aurox -Sy
+aurox -S --noconfirm test-trivial
 assert_exit 0
 assert_pkg_installed test-trivial
 assert_pkg_explicit  test-trivial
@@ -154,7 +154,7 @@ bash tests/container/run.sh smoke/23_my_case.sh
 Available helpers (defined in `lib.sh`):
 
 ```
-gaur <args...>                # runs $GITAUR with args; captures stdout/stderr/exit
+aurox <args...>                # runs $AUROX with args; captures stdout/stderr/exit
 LAST_STDOUT / LAST_STDERR     # captured-output file paths
 LAST_EXIT                     # captured exit code
 assert_exit N
@@ -165,7 +165,7 @@ assert_pkg_not_installed <name>
 assert_pkg_explicit <name>    # pacman Install Reason = Explicitly installed
 assert_pkg_asdep <name>       # pacman Install Reason = as a dependency
 install_foreign <pkgbase>     # sudo pacman -U /srv/foreign-pkgs/<pkgbase>-*.pkg.tar.zst
-reset_state                   # wipe ~/.local/state/gitaur between phases
+reset_state                   # wipe ~/.local/state/aurox between phases
 ```
 
 ### Debugging a failing container test
@@ -173,16 +173,16 @@ reset_state                   # wipe ~/.local/state/gitaur between phases
 ```sh
 # Run one test verbosely:
 podman run --rm -v "$PWD:/work:ro" -v "$(mktemp -d):/tmp/target" \
-    gitaur-test:latest \
+    aurox-test:latest \
     bash -xc "cd /work && bash tests/container/smoke/05_aur_with_aur_dep.sh"
 
 # Interactive shell in the test image, fixtures already baked:
 podman run --rm -it -v "$PWD:/work:ro" -v "$(mktemp -d):/tmp/target" \
-    gitaur-test:latest bash
+    aurox-test:latest bash
 ```
 
-Inside the container the gaur binary is at `/work/target/debug/gaur`,
-`RUST_LOG=gitaur=debug` is the helpful verbosity level.
+Inside the container the aurox binary is at `/work/target/debug/aurox`,
+`RUST_LOG=aurox=debug` is the helpful verbosity level.
 
 ### Common pitfalls
 
@@ -221,8 +221,8 @@ unless you also edit the fixture's `PKGBUILD`.
 The unit + container suites use synthetic fixtures by design, so they
 exercise the code paths but not the messy shape of real-world AUR data.
 For sanity-checking changes to `resolver/` or to plan-rendering, run
-`gaur -S <pkgbase>` against representative entries from a populated
-index (`gaur -Sy` first) and decline the `Proceed with installation?`
+`aurox -S <pkgbase>` against representative entries from a populated
+index (`aurox -Sy` first) and decline the `Proceed with installation?`
 prompt — the resolver prints the full Plan up front, so `n` exits
 cleanly without touching `makepkg` or `pacman`.
 
@@ -245,14 +245,14 @@ negative-test target for the missing-deps error path, but not for plan
 rendering.
 
 `examples/deep_strata.rs` is the scanner that produced this list — run
-it after `gaur -Sy` to refresh the candidates if the index drifts:
+it after `aurox -Sy` to refresh the candidates if the index drifts:
 
 ```sh
 cargo run --example deep_strata
 ```
 
 It uses the real `resolver::resolve`, so anything it reports is
-something gitaur can actually plan.
+something aurox can actually plan.
 
 ## CI
 
@@ -281,7 +281,7 @@ confusing failures over and over:
 
 - **Stale image after a fixture change.** The container image bakes in the
   mock AUR + local repo from `fixtures/*/` at *image-build* time. `run.sh`
-  recompiles and mounts the `gaur` binary every run, but only rebuilds the
+  recompiles and mounts the `aurox` binary every run, but only rebuilds the
   **image** on `--rebuild` (or when it's absent). So after editing a fixture
   (`PKGBUILD`/`repo`/`commit-date`), the `Dockerfile`, or `setup-fixtures.sh`,
   you **must**
@@ -296,10 +296,10 @@ confusing failures over and over:
 
 Per project rule (`memory/feedback_*`):
 
-- **No workarounds in tests.** If the test reveals a bug in gitaur, fix
-  gitaur. Don't paper over with `|| true` or skip-this-for-now sentinels.
+- **No workarounds in tests.** If the test reveals a bug in aurox, fix
+  aurox. Don't paper over with `|| true` or skip-this-for-now sentinels.
 - **Trace through the cause.** Most container failures so far have been
-  real gitaur bugs surfacing for the first time, not test setup issues.
+  real aurox bugs surfacing for the first time, not test setup issues.
   Don't assume the test is wrong before checking the binary's behaviour.
 
 ## Future work for tier 2

@@ -1,14 +1,14 @@
 # Second legacy half of the aspnet-runtime shape. Paired with
 # test-multi-provides-legacy-a; both must be installed before
 # test-multi-provides-new gets `-S`'d to exercise the multi-match Provides
-# branch. The smoke test types this pkgname on the gitaur command line,
+# branch. The smoke test types this pkgname on the aurox command line,
 # so the hint plumbing must steer the counterpart resolution to *this*
 # legacy pkg even though test-multi-provides-new lists legacy-a first
 # in its `provides=` array (which is what the unhinted walk would pick).
 pkgname=test-multi-provides-legacy-b
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: second legacy half of an aspnet-runtime-shape pair'
+pkgdesc='aurox test fixture: second legacy half of an aspnet-runtime-shape pair'
 arch=('any')
 license=('MIT')
 

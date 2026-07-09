@@ -1,5 +1,5 @@
 //! The aligned result table for the ranked search list (shell `search` + the
-//! non-interactive `gaur <term>` listing).
+//! non-interactive `aurox <term>` listing).
 //!
 //! Columns: `repo · name · version · size · build-time · description`. It shares
 //! the change-set/upgrade table's cell machinery so the same bugs are fixed

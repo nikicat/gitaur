@@ -151,7 +151,7 @@ fn parse_branch(repo: &gix::Repository, branch: &str, oid: ObjectId) -> Result<I
     let mut entry = srcinfo::parse(text)?;
     entry.commit_oid = oid_bytes(oid);
     entry.srcinfo_blob_oid = oid_bytes(blob_oid);
-    // Committer time of the branch tip — what `gaur <term>` sorts the AUR
+    // Committer time of the branch tip — what `aurox <term>` sorts the AUR
     // hits on. A branch whose commit time can't be decoded keeps the `0`
     // default (sorts oldest), rather than failing the whole branch parse.
     entry.commit_time_unix = commit.time().map(|t| t.seconds).unwrap_or_default();

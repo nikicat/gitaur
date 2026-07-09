@@ -5,8 +5,8 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
-gaur -S --noconfirm test-mixed-dep-make
+aurox -Sy
+aurox -S --noconfirm test-mixed-dep-make
 assert_exit 0
 assert_pkg_installed test-mixed-dep-make
 assert_pkg_explicit  test-mixed-dep-make

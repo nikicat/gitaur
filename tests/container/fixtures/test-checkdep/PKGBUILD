@@ -3,7 +3,7 @@
 pkgname=test-checkdep
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: checkdepends on AUR pkg'
+pkgdesc='aurox test fixture: checkdepends on AUR pkg'
 arch=('any')
 license=('MIT')
 checkdepends=('test-make-chain-c')

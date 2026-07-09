@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# `gaur -Qu --devel` MUST list every installed VCS pkgbase
+# `aurox -Qu --devel` MUST list every installed VCS pkgbase
 # (`-git`/`-svn`/`-hg`/`-bzr`) regardless of vercmp. With --devel the
-# user has explicitly asked gitaur to treat VCS pkgs as
+# user has explicitly asked aurox to treat VCS pkgs as
 # always-outdated — `pkgver()` only refreshes when makepkg runs, so the
 # current pkgver is presumed stale until proven otherwise by a
 # rebuild. Companion to smoke 41 (which pins the no-devel skip).
@@ -10,13 +10,13 @@
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
-gaur -Sy
+aurox -Sy
 
-gaur -S --noconfirm test-vcs-git
+aurox -S --noconfirm test-vcs-git
 assert_exit 0
 assert_pkg_installed test-vcs-git
 
-gaur -Qu --devel
+aurox -Qu --devel
 assert_exit 0
 
 # upgrade_table writes the rows to stderr. With --devel, test-vcs-git

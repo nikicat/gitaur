@@ -15,7 +15,7 @@
 pkgname=test-syu-split-foreign-cli
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: foreign-installed sibling of a split pkgbase, seed for smoke/44'
+pkgdesc='aurox test fixture: foreign-installed sibling of a split pkgbase, seed for smoke/44'
 arch=('any')
 license=('MIT')
 

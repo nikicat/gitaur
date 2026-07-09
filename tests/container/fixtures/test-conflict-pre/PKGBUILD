@@ -6,7 +6,7 @@
 pkgname=test-conflict-pre
 pkgver=1.0
 pkgrel=1
-pkgdesc='gitaur test fixture: pre-installed pkg that triggers a conflict'
+pkgdesc='aurox test fixture: pre-installed pkg that triggers a conflict'
 arch=('any')
 license=('MIT')
 

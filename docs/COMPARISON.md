@@ -1,6 +1,6 @@
-# gitaur vs. other Arch package managers
+# aurox vs. other Arch package managers
 
-How gitaur relates to `pacman`, `yay`, and `paru` — what's the same, what's
+How aurox relates to `pacman`, `yay`, and `paru` — what's the same, what's
 deliberately different, and a few questions still open for design discussion.
 
 This isn't a feature-matrix marketing comparison; it's an engineering doc
@@ -9,7 +9,7 @@ the reasoning behind them.
 
 ## Quick orientation
 
-| | pacman | yay | paru | gitaur |
+| | pacman | yay | paru | aurox |
 |---|---|---|---|---|
 | Language | C | Go | Rust | Rust |
 | Repo packages | itself | wraps pacman | wraps pacman | wraps pacman |
@@ -20,14 +20,14 @@ the reasoning behind them.
 | Sudo prompts per `-S` | per call | per AUR pkg | per AUR pkg | one batched `pacman -U` at end |
 | Missing PGP keys | — | proposes auto-import | proposes auto-import | left to user's keyring (build fails loudly) |
 | Fetch PKGBUILD to CWD | `pkgctl repo clone` (separate tool) | `-G` clones AUR repo into CWD | `-G` / `-Gp` (print) | no `-G` — full mirror already on disk (see below) |
-| Configuration | `pacman.conf` | `~/.config/yay/config.json` | `~/.config/paru/paru.conf` | `~/.config/gitaur/config.toml` |
+| Configuration | `pacman.conf` | `~/.config/yay/config.json` | `~/.config/paru/paru.conf` | `~/.config/aurox/config.toml` |
 
 Read on for the parts that aren't obvious from the matrix.
 
-## What gitaur does the same as yay/paru
+## What aurox does the same as yay/paru
 
 - **Drives pacman for repo work.** AUR helpers don't reinvent dependency
-  solving for the sync DBs; gitaur shells out to `pacman -S --needed
+  solving for the sync DBs; aurox shells out to `pacman -S --needed
   --noconfirm` for the repo half of a transaction, same as the others.
 - **Makepkg for building.** AUR pkgs build via the user's own `makepkg`
   invocation with the user's config.
@@ -38,13 +38,13 @@ Read on for the parts that aren't obvious from the matrix.
 - **PKGBUILD review before build.** All three pause for human eyeballs
   between fetch and build.
 
-## Where gitaur diverges
+## Where aurox diverges
 
 ### AUR data source: full mirror clone instead of RPC
 
 yay and paru hit `aur.archlinux.org`'s RPC for both search and dep
-resolution. gitaur instead clones the entire AUR mirror
-(`github.com/archlinux/aur.git`) into `~/.local/state/gitaur/aur` and
+resolution. aurox instead clones the entire AUR mirror
+(`github.com/archlinux/aur.git`) into `~/.local/state/aurox/aur` and
 builds a local rkyv index over every pkgbase's `.SRCINFO`.
 
 Why:
@@ -66,7 +66,7 @@ run); ongoing `-Sy` is `git fetch` plus a re-index of changed pkgbases
 
 paru's code passes names as `String` / `&str` throughout, disambiguating
 "is this a pkgname or a pkgbase?" by variable name and `match` arm.
-That's also what yay does. gitaur lifts the distinction into the type
+That's also what yay does. aurox lifts the distinction into the type
 system — see [`src/names.rs`](../src/names.rs) for the four newtypes and
 the rationale.
 
@@ -77,13 +77,13 @@ What this catches at compile time:
   `pkgname_collision_with_another_pkgbase_does_not_leak_into_plan` test)
 - Mixing `provides=` virtuals with real pkgnames at API boundaries
 
-This is the part of gitaur with the most invasive refactor relative to
+This is the part of aurox with the most invasive refactor relative to
 prior art. The four-type split has no equivalent in yay or paru.
 
 ### Typed versions with `vercmp`-by-default
 
 paru wraps `alpm::Version` at compare sites but stores raw `String` in
-its own structs. gitaur defines its own `Version` / `Ver` pair (in
+its own structs. aurox defines its own `Version` / `Ver` pair (in
 [`src/version.rs`](../src/version.rs)) and pipes them through `IndexEntry`,
 `PkgUpgrade`, `PacmanIndex.installed`, `InstalledCounterpart`, etc. — so
 `<` and `==` on a version field always invoke vercmp, never lexical
@@ -102,7 +102,7 @@ When an AUR pkgbase upgrade lands, the review screen needs to answer
 can label the screen (`install` / `reinstall` / `upgrade`), pick a diff
 base, and write a sensible fallback note when no diff is found.
 
-yay/paru answer this implicitly by checking the pkgname match. gitaur
+yay/paru answer this implicitly by checking the pkgname match. aurox
 makes the answer explicit via `PacmanIndex::counterpart_with_hint`,
 which returns an `InstalledCounterpart { pkgname, version, via }` tagged
 with how it matched:
@@ -134,12 +134,12 @@ for the full table.
 ### Stratified build orchestration
 
 yay and paru build AUR pkgs sequentially: build one, install one,
-build next, install next. gitaur builds in *strata* — sets of pkgbases
+build next, install next. aurox builds in *strata* — sets of pkgbases
 whose build-time deps (`makedepends` + `checkdepends`) are all in earlier
 strata.
 
 Why: a single makepkg failure no longer aborts the whole batch.
-gitaur marks the failed pkgbase, auto-skips anything downstream of it in
+aurox marks the failed pkgbase, auto-skips anything downstream of it in
 the makedeps graph (would have failed anyway with missing build deps),
 and keeps building everything else. The final summary lists installed /
 failed / skipped pkgbases so the user knows exactly what happened.
@@ -148,7 +148,7 @@ See `run_aur_pipeline` in [`src/build.rs`](../src/build.rs).
 
 ### Sudo deferred to one batched `pacman -U`
 
-yay/paru prompt for sudo per AUR pkg's install step. gitaur builds
+yay/paru prompt for sudo per AUR pkg's install step. aurox builds
 without sudo, then issues one `pacman -U` per stratum at the end, with
 the sudo timestamp cache (typically 5–15 min) bridging strata. The
 typical AUR session prompts for sudo once.
@@ -156,7 +156,7 @@ typical AUR session prompts for sudo once.
 ### Idempotent build cache via artifact filenames
 
 If a pkgbase has already been built at exactly the AUR index's version,
-its `.pkg.tar.{zst,xz}` files are still present in the worktree. gitaur
+its `.pkg.tar.{zst,xz}` files are still present in the worktree. aurox
 skips re-running makepkg and reuses the on-disk artifacts. No sidecar DB
 — the artifact filename literally encodes `<pkgname>-<version>-<arch>`,
 which is the cache key.
@@ -169,7 +169,7 @@ their `pkgver()` overrides the static field at build time.
 ### Bounded history walk with explicit `BoundExceeded` vs `NotInLineage`
 
 When the review screen wants to diff against the commit that produced
-the installed version, gitaur walks the pkgbase's git history looking
+the installed version, aurox walks the pkgbase's git history looking
 for a commit whose `.SRCINFO::version()` matches `installed_ver`. The
 walk is bounded by `Config::review_history_scan_max` (default 256).
 
@@ -186,12 +186,12 @@ review screen at all).
 
 ## Open design questions
 
-These are decisions where gitaur's current behavior may not be the best
+These are decisions where aurox's current behavior may not be the best
 default; documented here so contributors can pick them up.
 
 ### Provides-based upgrade rows in `-Syu`
 
-**Current gitaur behavior:** if `dotnet-runtime-7.0` is installed
+**Current aurox behavior:** if `dotnet-runtime-7.0` is installed
 (foreign) and AUR pkgbase `dotnet-core-7.0-bin` declares
 `provides=dotnet-runtime-7.0`, the shell's `upgrade` seeds the row as an
 upgrade candidate (typed `Target::hint` = the foreign pkgname). (The explicit
@@ -202,7 +202,7 @@ and does *not* propose an upgrade. Conservative.
 
 **Tradeoffs:**
 
-- gitaur's behavior surfaces real migration paths (genuine pkg renames
+- aurox's behavior surfaces real migration paths (genuine pkg renames
   where `provides=` is the only signal) but conflates them with EOL
   replacements where the version schemes are incompatible (the
   motivating example: Microsoft's `sdk120` numbering vs the AUR
@@ -218,12 +218,12 @@ and does *not* propose an upgrade. Conservative.
    ```
    Foreign pkgs with AUR providers (not auto-proposed):
        dotnet-runtime-7.0  7.0.20.sdk120-2  →  dotnet-core-7.0-bin 7.0.20.sdk410-2  [provides]
-   Run `gaur -S dotnet-core-7.0-bin` to migrate.
+   Run `aurox -S dotnet-core-7.0-bin` to migrate.
    ```
 3. Keep the existing `-S <name>` flow unchanged — explicit naming is
    already an opt-in to the migration.
 
-This gets yay's safety-by-default *and* gitaur's discoverability —
+This gets yay's safety-by-default *and* aurox's discoverability —
 neither has both.
 
 A config knob (`syu_propose_provides_upgrades = false` default) would
@@ -234,7 +234,7 @@ let users opt back into the current behavior.
 This used to be `Config::aur_default_select` — whether AUR rows were
 pre-checked in the interactive `-Syu` multi-select picker. That picker has
 been removed: the explicit `-Syu` flag is now a plain `pacman -Syu`
-passthrough, and AUR upgrades live in the shell (`gaur` → `upgrade`), where
+passthrough, and AUR upgrades live in the shell (`aurox` → `upgrade`), where
 the equivalent "AUR is opt-in" stance is the per-item **approval gate** (repo
 rows auto-approve; AUR rows need `review`/`approve`) rather than a pre-check
 mask. The `aur_default_select` knob was dropped.
@@ -246,7 +246,7 @@ A foreign pkg that's not in any syncdb AND not in AUR is invisible to
 `-Qu` — silently orphaned.
 
 yay's "Packages not in AUR" message in `-Syu` is one way to surface
-this. gitaur could add a `-Qf` (foreign-not-in-AUR list) or fold it
+this. aurox could add a `-Qf` (foreign-not-in-AUR list) or fold it
 into `-Qu`'s output. Open.
 
 ### `-G` (getpkgbuild): copy the package dir for hacking and pushing back
@@ -261,11 +261,11 @@ remote automatically — but it's the default `AURURL`, i.e.
 the user has to rewrite the remote to the SSH form
 (`ssh://aur@aur.archlinux.org/<pkgbase>.git`) by hand first.
 
-**Current gitaur behavior:** there's no `-G` yet. Dispatch only owns the `-S`
+**Current aurox behavior:** there's no `-G` yet. Dispatch only owns the `-S`
 family and bare `-Qu`; everything else is pacman pass-through.
 
-**Why it's nearly free for gitaur:** gitaur already holds the *entire* AUR
-mirror locally (`~/.local/state/gitaur/aur`, see
+**Why it's nearly free for aurox:** aurox already holds the *entire* AUR
+mirror locally (`~/.local/state/aurox/aur`, see
 [AUR data source](#aur-data-source-full-mirror-clone-instead-of-rpc)), and
 each pkgbase is a real git checkout with full history — not a tarball of the
 current files. So `-G` doesn't need a network fetch or any worktree
@@ -298,7 +298,7 @@ wrong-API trap (`pkgver < pkgver` is meaningless).
 
 ## Pointers for further reading
 
-- [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — the design doc for gitaur's
+- [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — the design doc for aurox's
   internals, including the counterpart resolution table, the
   [resolution case matrix](ARCHITECTURE.md#resolution-case-matrix) (every
   installed-state × pkgbase-declares shape with its test pointer), and

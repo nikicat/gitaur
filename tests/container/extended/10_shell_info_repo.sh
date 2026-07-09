@@ -9,14 +9,14 @@ bootstrap; reset_state
 
 # Build the on-disk index so the AUR half has something to answer from (the
 # shell never fetches at startup); the repo half must work regardless.
-gaur -Sy
+aurox -Sy
 assert_exit 0
 
 driver="$EXAMPLES_DIR/shell_info_e2e"
 [[ -x "$driver" ]] || { echo "missing driver example: $driver (run.sh must build it)" >&2; exit 1; }
 
 out="$(mktemp)"
-if ! GITAUR="$GITAUR" "$driver" >"$out" 2>&1; then
+if ! AUROX="$AUROX" "$driver" >"$out" 2>&1; then
     echo "shell info driver failed (repo block / aur block)" >&2
     cat "$out" >&2
     exit 1

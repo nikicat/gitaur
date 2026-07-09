@@ -1,4 +1,4 @@
-//! `gaur <term>...` — yay-style fuzzy search across the sync repos + the AUR.
+//! `aurox <term>...` — yay-style fuzzy search across the sync repos + the AUR.
 //!
 //! Wired up from [`crate::cli::dispatch`] for the no-operation-letter case.
 //! Interactively, dispatch launches the shell REPL seeded with this search
@@ -68,7 +68,7 @@ impl Row<'_> {
 /// `terms` are the freeform regex fragments the user typed, combined as an AND
 /// filter (same semantics as `-Ss`). Sync-repo and AUR matches are merged into
 /// one relevance-ranked list ([`rank_rows`]) and printed best-first — so
-/// `gaur foo | head` surfaces the strongest hits. Nothing is installed:
+/// `aurox foo | head` surfaces the strongest hits. Nothing is installed:
 /// auto-installing every regex hit is too dangerous without a human in the loop.
 #[instrument(skip(cfg))]
 pub fn cmd_search_install(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
@@ -95,7 +95,7 @@ pub fn cmd_search_install(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
     let repo_hits = repo_res?;
     let idx = aur_res?;
     if idx.is_none() {
-        ui::warn("no AUR index; showing repo matches only (run `gaur -Sy` to index the AUR)");
+        ui::warn("no AUR index; showing repo matches only (run `aurox -Sy` to index the AUR)");
     }
 
     let aur_hits: Vec<&IndexEntry> = match idx.as_ref() {

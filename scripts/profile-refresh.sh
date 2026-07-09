@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Record a samply CPU profile of `gaur <args>` and emit a flat self/total
+# Record a samply CPU profile of `aurox <args>` and emit a flat self/total
 # time report. Profile is saved as profile.json.gz alongside a syms sidecar;
 # load it later with `samply load profile.json.gz`.
 #
-# Usage: scripts/profile-refresh.sh [-o OUT] [-- <gaur args>]
-# Defaults to `gaur -Sy` and ./profile.json.gz.
+# Usage: scripts/profile-refresh.sh [-o OUT] [-- <aurox args>]
+# Defaults to `aurox -Sy` and ./profile.json.gz.
 set -euo pipefail
 
 out=profile.json.gz
@@ -32,9 +32,9 @@ bin=$(cargo build --release --message-format=json 2>/dev/null \
 for l in sys.stdin:
   try: m=json.loads(l)
   except: continue
-  if m.get("reason")=="compiler-artifact" and m.get("target",{}).get("name")=="gaur" and m.get("executable"):
+  if m.get("reason")=="compiler-artifact" and m.get("target",{}).get("name")=="aurox" and m.get("executable"):
     print(m["executable"]); break')
-[[ -x "$bin" ]] || { echo "could not locate gaur binary" >&2; exit 1; }
+[[ -x "$bin" ]] || { echo "could not locate aurox binary" >&2; exit 1; }
 
 echo "binary: $bin" >&2
 echo "args:   ${args[*]}" >&2
