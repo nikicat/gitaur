@@ -1,5 +1,5 @@
 # Maintainer: Nikolay Bryskin <nikicat@users.noreply.github.com>
-# Rendered by .github/workflows/aur-publish.yml: @PKGVER@ is replaced with the
+# Rendered by .github/workflows/release.yml: @PKGVER@ is replaced with the
 # release tag and sha256sums is filled by updpkgsums before pushing to the AUR.
 pkgname=aurox
 pkgver=@PKGVER@
