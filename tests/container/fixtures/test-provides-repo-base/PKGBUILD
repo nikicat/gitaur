@@ -1,0 +1,16 @@
+# AUR fixture that PROVIDES a name owned by the local sync repo, at a virtual
+# version far NEWER than the repo package's 1.0-1. The collision tests pin
+# that pacman wins the shared name anyway:
+#   * smoke/11  — `-S repo-base` classifies Source::Repo, never this provider
+#   * extended/10 — the shell's `info repo-base` prints the sync-DB block
+pkgname=test-provides-repo-base
+pkgver=9.0
+pkgrel=1
+pkgdesc='gitaur test fixture: AUR provider shadowing the sync-repo name repo-base'
+arch=('any')
+license=('MIT')
+provides=('repo-base=9.0')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

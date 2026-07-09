@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Shell `info` source routing: a sync-repo name is described from the sync DBs
-# (repo wins — the old code only consulted the AUR index and answered "not in
-# AUR" for repo packages), while an AUR-only name still comes from the index.
-# The shell needs a TTY, so the flow is driven by the shell_info_e2e PTY driver.
+# Shell `info` source routing: a sync-repo name is described from the sync
+# DBs even though the AUR index also resolves it (test-provides-repo-base
+# carries provides=('repo-base=9.0') — repo wins the tie; the old index-only
+# lookup would print the provider's block). An AUR-only name still comes from
+# the index. The shell needs a TTY, so the shell_info_e2e PTY driver runs it.
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
