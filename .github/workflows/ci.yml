@@ -14,7 +14,8 @@ jobs:
     name: fmt + taplo + clippy + build + test
     runs-on: ubuntu-latest
     container:
-      image: archlinux:latest
+      # latest as of 2026-07-06
+      image: archlinux:latest@sha256:681569955d1d17313ef7134acc8b5cd8adcda2fc24709bed472d95e1cf3d71a1
     steps:
       - name: Install system dependencies
         run: |
@@ -22,10 +23,10 @@ jobs:
             base-devel git pkgconf pacman rustup taplo-cli
           # rust-toolchain.toml drives channel + components on first cargo call.
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -67,10 +68,10 @@ jobs:
     # the podman suite inside it, and emits three lcov files (rust / podman /
     # combined) for separate Codecov flag uploads.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Cache test image + cargo state
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           # target/ contains both the instrumented build artifacts and the
           # project-local CARGO_HOME (target/coverage-cargo) used by the
@@ -91,7 +92,7 @@ jobs:
 
       - name: Upload rust coverage to Codecov
         if: always()
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         with:
           files: coverage/lcov-rust.info
           flags: rust
@@ -100,7 +101,7 @@ jobs:
 
       - name: Upload podman coverage to Codecov
         if: always()
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         with:
           files: coverage/lcov-podman.info
           flags: podman
@@ -109,7 +110,7 @@ jobs:
 
       - name: Upload combined coverage to Codecov
         if: always()
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         with:
           files: coverage/lcov-combined.info
           flags: combined

@@ -1,0 +1,83 @@
+name: Publish to AUR
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (e.g. v0.1.0)'
+        required: true
+
+# One publish at a time; a newer release supersedes a queued older one.
+concurrency:
+  group: aur-publish
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build:
+    name: render + test-build PKGBUILD
+    runs-on: ubuntu-latest
+    container:
+      # latest as of 2026-07-06
+      image: archlinux:latest@sha256:681569955d1d17313ef7134acc8b5cd8adcda2fc24709bed472d95e1cf3d71a1
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --noconfirm --needed base-devel rust git
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Check tag matches Cargo.toml version
+        run: |
+          ver="${TAG#v}"
+          cargo_ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$ver" != "$cargo_ver" ]; then
+            echo "tag $TAG (=$ver) does not match Cargo.toml version $cargo_ver" >&2
+            exit 1
+          fi
+
+      - name: Render PKGBUILD
+        run: |
+          mkdir -p /tmp/aur-build
+          sed "s/@PKGVER@/${TAG#v}/" packaging/aur/PKGBUILD.in > /tmp/aur-build/PKGBUILD
+
+      - name: Build the package as an unprivileged user
+        run: |
+          useradd -m builder
+          chown -R builder /tmp/aur-build
+          cd /tmp/aur-build
+          # sha256sums is filled by updpkgsums at deploy time; SKIP is fine for
+          # the test build. --noconfirm because deps are preinstalled above.
+          sudo -u builder makepkg -f --noconfirm
+          sudo -u builder makepkg --printsrcinfo
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pkgbuild
+          path: /tmp/aur-build/PKGBUILD
+
+  publish:
+    name: push to AUR
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pkgbuild
+
+      - name: Publish aurox to the AUR
+        uses: KSXGitHub/github-actions-deploy-aur@da03e160361ce01bf087e790b6ffd196d7dccff7 # v4.1.3
+        with:
+          pkgname: aurox
+          pkgbuild: ./PKGBUILD
+          updpkgsums: true
+          commit_username: Nikolay Bryskin
+          commit_email: nikicat@users.noreply.github.com
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: 'Update to ${{ github.event.release.tag_name || inputs.tag }}'
+          ssh_keyscan_types: ed25519
