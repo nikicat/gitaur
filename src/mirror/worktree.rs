@@ -165,10 +165,10 @@ fn peel_branch(mirror: &MirrorRepo, refname: &str) -> Result<ObjectId> {
     let mut r = mirror
         .repo
         .find_reference(refname)
-        .map_err(|e| Error::Gix(format!("find_reference {refname}: {e}")))?;
+        .map_err(|e| Error::gix(format_args!("find_reference {refname}"), e))?;
     let commit = r
         .peel_to_id()
-        .map_err(|e| Error::Gix(format!("peel {refname}: {e}")))?;
+        .map_err(|e| Error::gix(format_args!("peel {refname}"), e))?;
     Ok(commit.detach())
 }
 

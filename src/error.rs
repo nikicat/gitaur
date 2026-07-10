@@ -81,4 +81,49 @@ impl Error {
     pub fn other(msg: impl Into<String>) -> Self {
         Self::Other(msg.into())
     }
+
+    /// Wrap a gix error as [`Error::Gix`], preserving its full `source()` chain.
+    ///
+    /// gix nests errors deeply and `Display` shows only the outermost layer — a
+    /// curl abort inside a fetch surfaces as just "Failed to consume the pack
+    /// sent by the remote" while the actual cause (e.g. "curl 28: timeout") sits
+    /// several `source()`s down. Use this instead of `Error::Gix(format!(..))`
+    /// whenever a gix error is at hand.
+    pub fn gix(
+        context: impl std::fmt::Display,
+        err: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    ) -> Self {
+        use std::fmt::Write as _;
+        let err = err.into();
+        let mut msg = format!("{context}: {err}");
+        let mut source = err.source();
+        while let Some(cause) = source {
+            write!(msg, ": {cause}").expect("writing to a String never fails");
+            source = cause.source();
+        }
+        Self::Gix(msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("failed to consume the pack")]
+    struct Outer(#[source] Mid);
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("an IO error occurred when reading")]
+    struct Mid(#[source] std::io::Error);
+
+    #[test]
+    fn gix_preserves_the_source_chain() {
+        let err = Outer(Mid(std::io::Error::other("curl 28: Operation too slow")));
+        assert_eq!(
+            Error::gix("fetch_only", err).to_string(),
+            "git: fetch_only: failed to consume the pack: \
+             an IO error occurred when reading: curl 28: Operation too slow"
+        );
+    }
 }

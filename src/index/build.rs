@@ -113,19 +113,17 @@ pub fn full_build(cfg: &Config, mirror: &MirrorRepo) -> Result<IndexFile> {
 }
 
 fn collect_branches(repo: &gix::Repository) -> Result<Vec<(String, ObjectId)>> {
-    let refs = repo
-        .references()
-        .map_err(|e| Error::Gix(format!("references: {e}")))?;
+    let refs = repo.references().map_err(|e| Error::gix("references", e))?;
     let iter = refs
         .prefixed("refs/heads/")
-        .map_err(|e| Error::Gix(format!("prefixed: {e}")))?;
+        .map_err(|e| Error::gix("prefixed", e))?;
     let mut out = Vec::new();
     for r in iter {
-        let mut r = r.map_err(|e| Error::Gix(format!("ref iter: {e}")))?;
+        let mut r = r.map_err(|e| Error::gix("ref iter", e))?;
         let name = r.name().shorten().to_string();
         let oid = r
             .peel_to_id()
-            .map_err(|e| Error::Gix(format!("peel ref: {e}")))?
+            .map_err(|e| Error::gix("peel ref", e))?
             .detach();
         out.push((name, oid));
     }
@@ -135,17 +133,17 @@ fn collect_branches(repo: &gix::Repository) -> Result<Vec<(String, ObjectId)>> {
 fn parse_branch(repo: &gix::Repository, branch: &str, oid: ObjectId) -> Result<IndexEntry> {
     let commit = repo
         .find_commit(oid)
-        .map_err(|e| Error::Gix(format!("find_commit {oid}: {e}")))?;
+        .map_err(|e| Error::gix(format_args!("find_commit {oid}"), e))?;
     let tree = commit
         .tree()
-        .map_err(|e| Error::Gix(format!("tree {oid}: {e}")))?;
+        .map_err(|e| Error::gix(format_args!("tree {oid}"), e))?;
     let entry = tree
         .find_entry(".SRCINFO")
         .ok_or_else(|| Error::SrcInfo(format!("no .SRCINFO on {branch}")))?;
     let blob_oid = entry.oid().to_owned();
     let blob = repo
         .find_object(blob_oid)
-        .map_err(|e| Error::Gix(format!("find_blob {blob_oid}: {e}")))?;
+        .map_err(|e| Error::gix(format_args!("find_blob {blob_oid}"), e))?;
     let text = std::str::from_utf8(blob.data.as_slice())
         .map_err(|e| Error::SrcInfo(format!("{branch}: invalid utf8: {e}")))?;
     let mut entry = srcinfo::parse(text)?;

@@ -75,10 +75,10 @@ fn parse_branch(mirror: &MirrorRepo, branch: &str, oid: ObjectId) -> Result<Inde
     let commit = mirror
         .repo
         .find_commit(oid)
-        .map_err(|e| Error::Gix(format!("find_commit {oid}: {e}")))?;
+        .map_err(|e| Error::gix(format_args!("find_commit {oid}"), e))?;
     let tree = commit
         .tree()
-        .map_err(|e| Error::Gix(format!("tree {oid}: {e}")))?;
+        .map_err(|e| Error::gix(format_args!("tree {oid}"), e))?;
     let te = tree
         .find_entry(".SRCINFO")
         .ok_or_else(|| Error::SrcInfo(format!("{branch}: no .SRCINFO")))?;
@@ -86,7 +86,7 @@ fn parse_branch(mirror: &MirrorRepo, branch: &str, oid: ObjectId) -> Result<Inde
     let blob = mirror
         .repo
         .find_object(blob_oid)
-        .map_err(|e| Error::Gix(format!("find_blob {blob_oid}: {e}")))?;
+        .map_err(|e| Error::gix(format_args!("find_blob {blob_oid}"), e))?;
     let text = std::str::from_utf8(blob.data.as_slice())
         .map_err(|e| Error::SrcInfo(format!("{branch}: utf8: {e}")))?;
     let mut entry = srcinfo::parse(text)?;

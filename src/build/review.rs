@@ -532,21 +532,21 @@ pub fn find_installed_commit(
     let head = mirror
         .repo
         .find_commit(head_oid)
-        .map_err(|e| Error::Gix(format!("find_commit {head_oid}: {e}")))?;
+        .map_err(|e| Error::gix(format_args!("find_commit {head_oid}"), e))?;
     let walk = head
         .ancestors()
         .first_parent_only()
         .all()
-        .map_err(|e| Error::Gix(format!("ancestors {head_oid}: {e}")))?;
+        .map_err(|e| Error::gix(format_args!("ancestors {head_oid}"), e))?;
     let mut walked = 0usize;
     for info in walk.take(history_scan_max) {
         walked += 1;
-        let info = info.map_err(|e| Error::Gix(format!("walk: {e}")))?;
+        let info = info.map_err(|e| Error::gix("walk", e))?;
         let tree = info
             .object()
-            .map_err(|e| Error::Gix(format!("walk object {}: {e}", info.id)))?
+            .map_err(|e| Error::gix(format_args!("walk object {}", info.id), e))?
             .tree()
-            .map_err(|e| Error::Gix(format!("walk tree {}: {e}", info.id)))?;
+            .map_err(|e| Error::gix(format_args!("walk tree {}", info.id), e))?;
         let Some(text) = read_blob(mirror, &tree, ".SRCINFO")? else {
             continue;
         };
@@ -975,7 +975,7 @@ fn read_blob(mirror: &MirrorRepo, tree: &gix::Tree<'_>, name: &str) -> Result<Op
     let blob = mirror
         .repo
         .find_object(oid)
-        .map_err(|e| Error::Gix(format!("find {name} blob: {e}")))?;
+        .map_err(|e| Error::gix(format_args!("find {name} blob"), e))?;
     Ok(Some(
         String::from_utf8_lossy(blob.data.as_slice()).into_owned(),
     ))
