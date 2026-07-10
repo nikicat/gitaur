@@ -75,9 +75,11 @@ path = "src/bin/trace.rs"
 #    from packed-refs when verifying each edit's precondition, skipping the
 #    per-ref loose `open()` — the dominant cost of applying the ref transaction
 #    (the `apply` span). Cuts that resolution on the AUR mirror from ~640ms to
-#    ~240ms (`apply` ~770ms to ~400ms); adds a `ref tx resolve` detail span
-#    (PR #2705).
-gix = { git = "https://github.com/nikicat/gitoxide", rev = "7ce41a485", features = [
+#    ~240ms (`apply` ~770ms to ~400ms); adds a `ref tx resolve` detail span;
+#    locks all edits before resolving any current value to close a CAS race,
+#    with each lock's content written eagerly and its fd closed so a
+#    thousands-of-refs fetch stays within `ulimit -n` (PR #2705).
+gix = { git = "https://github.com/nikicat/gitoxide", rev = "fbbcf79c4", features = [
   # curl-rustls (over reqwest-rust-tls) so gix's low_speed_* / lowSpeedLimit
   # config actually fires — only the curl transport implements it, the
   # reqwest blocking transport silently ignores those fields. Adds libcurl
