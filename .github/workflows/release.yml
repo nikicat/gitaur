@@ -72,7 +72,7 @@ jobs:
       TAG: ${{ needs.release.outputs.tag }}
     steps:
       - name: Install build dependencies
-        run: pacman -Syu --noconfirm --needed base-devel rust git
+        run: pacman -Syu --noconfirm --needed base-devel rust git pacman-contrib
 
       # The triggering commit provides the PKGBUILD template; the *tag*
       # determines what the package builds (it's baked into source=()), so a
@@ -96,13 +96,18 @@ jobs:
           mkdir -p /tmp/aur-build
           sed "s/@PKGVER@/${TAG#v}/" packaging/aur/PKGBUILD.in > /tmp/aur-build/PKGBUILD
 
-      - name: Build the package as an unprivileged user
+      - name: Fill checksums and build the package as an unprivileged user
         run: |
           useradd -m builder
           chown -R builder /tmp/aur-build
           cd /tmp/aur-build
-          # sha256sums is filled by updpkgsums at deploy time; SKIP is fine for
-          # the test build. --noconfirm because deps are preinstalled above.
+          # updpkgsums downloads the source tarball and writes real sha256sums
+          # into the PKGBUILD; makepkg then verifies them, so the PKGBUILD we
+          # publish is exactly what was test-built. Filling checksums in the
+          # deploy action instead would download the tarball into the AUR repo
+          # checkout, where it must never be committed (the AUR caps blobs at
+          # 488 KiB). --noconfirm because deps are preinstalled above.
+          sudo -u builder updpkgsums
           sudo -u builder makepkg -f --noconfirm
           sudo -u builder makepkg --printsrcinfo
 
@@ -125,7 +130,6 @@ jobs:
         with:
           pkgname: aurox
           pkgbuild: ./PKGBUILD
-          updpkgsums: true
           commit_username: Nikolay Bryskin
           commit_email: nikicat@users.noreply.github.com
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
