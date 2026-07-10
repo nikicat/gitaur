@@ -10,11 +10,15 @@ bootstrap
 # Point aurox at the tarpit on loopback, with a tight 3-second idle budget
 # so the test finishes fast. The tarpit accepts TCP and reads the request
 # headers, then stalls — curl's lowSpeedTime is what should bail.
+# reset_state wipes the mirror, so -Sy goes down the bootstrap-clone path,
+# which uses its own bootstrap_idle_timeout_secs window — set both so the
+# tight budget applies regardless of path.
 PORT=18765
 TIMEOUT_SECS=3
 cat > "$CONFIG_DIR/config.toml" <<EOF
 mirror_url = "http://127.0.0.1:$PORT/aur.git"
 mirror_idle_timeout_secs = $TIMEOUT_SECS
+bootstrap_idle_timeout_secs = $TIMEOUT_SECS
 EOF
 reset_state
 
