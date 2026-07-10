@@ -28,20 +28,23 @@ pub mod sideband;
 pub mod worktree;
 
 /// Build the `http::Options` payload gix's curl transport downcasts in its
-/// `configure()` hook. Sets `lowSpeedLimit=1`, `lowSpeedTime=cfg.idle_secs`
-/// so the connection aborts after `idle_secs` of <1 byte/s — i.e., true
-/// silence from the remote, not a total deadline. `download_progress` is the
-/// counter the backend adds each received body chunk to, driving the UI's
-/// `network` throughput row (the only live signal during the otherwise-silent
-/// ls-refs advertisement).
+/// `configure()` hook. Sets `lowSpeedLimit=1`, `lowSpeedTime=idle_timeout_secs`
+/// so the connection aborts after `idle_timeout_secs` of <1 byte/s — i.e., true
+/// silence from the remote, not a total deadline (0 disables the guard).
+/// Callers pick the window per phase: incremental fetches pass
+/// `cfg.mirror_idle_timeout_secs`, the bootstrap clone the far larger
+/// `cfg.bootstrap_idle_timeout_secs` (see its doc for why). `download_progress`
+/// is the counter the backend adds each received body chunk to, driving the
+/// UI's `network` throughput row (the only live signal during the
+/// otherwise-silent ls-refs advertisement).
 pub(crate) fn http_transport_options(
-    cfg: &Config,
+    idle_timeout_secs: u64,
     download_progress: Arc<AtomicU64>,
 ) -> http::Options {
     let mut opts = http::Options::default();
-    if cfg.mirror_idle_timeout_secs > 0 {
+    if idle_timeout_secs > 0 {
         opts.low_speed_limit_bytes_per_second = 1;
-        opts.low_speed_time_seconds = cfg.mirror_idle_timeout_secs;
+        opts.low_speed_time_seconds = idle_timeout_secs;
     }
     opts.download_progress = Some(download_progress);
     opts
@@ -49,10 +52,10 @@ pub(crate) fn http_transport_options(
 
 /// `set_transport_options` wants `Box<dyn Any>`; wrap once at the call site.
 pub(crate) fn boxed_http_options(
-    cfg: &Config,
+    idle_timeout_secs: u64,
     download_progress: Arc<AtomicU64>,
 ) -> Box<dyn Any + Send + Sync> {
-    Box::new(http_transport_options(cfg, download_progress))
+    Box::new(http_transport_options(idle_timeout_secs, download_progress))
 }
 
 /// Handle to the bare AUR mirror on disk.
@@ -67,7 +70,7 @@ impl MirrorRepo {
     /// Open the existing bare clone at `path` without any network access.
     pub fn open(path: &Path) -> Result<Self> {
         let repo =
-            gix::open(path).map_err(|e| Error::Gix(format!("open {}: {e}", path.display())))?;
+            gix::open(path).map_err(|e| Error::gix(format_args!("open {}", path.display()), e))?;
         Ok(Self {
             path: path.to_path_buf(),
             repo,

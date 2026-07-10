@@ -29,9 +29,9 @@ pub fn bootstrap_clone(cfg: &Config, dest: &Path, mp: &MultiProgress) -> Result<
     // (matches `git clone`), but for a bare AUR mirror we want the
     // `git clone --bare` semantics: branches land directly under
     // `refs/heads/*` so collect_branches() / is_bootstrapped() see them.
-    let opts = http_transport_options(cfg, net_counter);
+    let opts = http_transport_options(cfg.bootstrap_idle_timeout_secs, net_counter);
     let mut prep = gix::prepare_clone_bare(cfg.mirror_url.as_str(), dest)
-        .map_err(|e| Error::Gix(format!("prepare_clone_bare: {e}")))?
+        .map_err(|e| Error::gix("prepare_clone_bare", e))?
         .configure_remote(|mut remote| {
             remote.replace_refspecs(["+refs/heads/*:refs/heads/*"], Direction::Fetch)?;
             Ok(remote)
@@ -39,6 +39,8 @@ pub fn bootstrap_clone(cfg: &Config, dest: &Path, mp: &MultiProgress) -> Result<
         .configure_connection(move |connection| {
             // Wire lowSpeed* into the curl transport so the bootstrap fetch
             // bails when the server stops streaming (vs. waiting on TCP retry).
+            // The bootstrap-specific window must outlast GitHub's silent
+            // server-side pack preparation — see `bootstrap_idle_timeout_secs`.
             // `configure_connection` may fire more than once on retry, so
             // we clone our cached `opts` each time.
             connection.set_transport_options(Box::new(opts.clone()));
@@ -46,7 +48,7 @@ pub fn bootstrap_clone(cfg: &Config, dest: &Path, mp: &MultiProgress) -> Result<
         });
     let (_repo, _outcome) = prep
         .fetch_only(&mut progress, &interrupt)
-        .map_err(|e| Error::Gix(format!("fetch_only: {e}")))?;
+        .map_err(|e| Error::gix("fetch_only", e))?;
 
     progress.finish();
     info!("clone complete");

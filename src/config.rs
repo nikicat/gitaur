@@ -17,11 +17,18 @@ pub struct Config {
     pub build_dir: PathBuf,
     /// Git URL of the AUR mirror to clone.
     pub mirror_url: String,
-    /// Abort a clone/fetch if the HTTP transport sees fewer than 1 byte/sec
+    /// Abort a fetch if the HTTP transport sees fewer than 1 byte/sec
     /// for this many seconds. Wired into gix's `http.lowSpeedTime` /
     /// `http.lowSpeedLimit` so the curl backend enforces it at the syscall
     /// level. Set to 0 to disable.
     pub mirror_idle_timeout_secs: u64,
+    /// Same guard for the one-off bootstrap clone, which needs a far larger
+    /// window: GitHub prepares the full ~155k-branch mirror pack server-side
+    /// for minutes without sending a byte (protocol V2 without `sideband-all`
+    /// carries no progress or keepalives before the packfile section), so the
+    /// incremental `mirror_idle_timeout_secs` would misread the wait as a dead
+    /// connection and kill every bootstrap. Set to 0 to disable.
+    pub bootstrap_idle_timeout_secs: u64,
     /// Worker count for parallel index builds.
     pub index_threads: usize,
     /// Re-fetch mirror if `index.bin` is older than this (used by no-arg run).

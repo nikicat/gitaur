@@ -9,6 +9,11 @@ pub fn default_config() -> Config {
         build_dir: paths::state_dir().join("pkgs"),
         mirror_url: "https://github.com/archlinux/aur.git".into(),
         mirror_idle_timeout_secs: 30,
+        // 10 minutes: GitHub's silent pack preparation for the full mirror
+        // took >30s but well under a minute when measured (2026-07); the wide
+        // margin covers slower mirrors without leaving a truly dead bootstrap
+        // hanging forever.
+        bootstrap_idle_timeout_secs: 600,
         index_threads: 4,
         refresh_max_age_secs: 3600,
         color: "auto".into(),

@@ -48,12 +48,15 @@ pub fn incremental_fetch(
             .repo
             .find_default_remote(Direction::Fetch)
             .ok_or_else(|| Error::Gix("no default remote configured".into()))?
-            .map_err(|e| Error::Gix(format!("find_default_remote: {e}")))?;
+            .map_err(|e| Error::gix("find_default_remote", e))?;
 
         let mut connection = remote
             .connect(Direction::Fetch)
-            .map_err(|e| Error::Gix(format!("connect: {e}")))?;
-        connection.set_transport_options(boxed_http_options(cfg, net_counter));
+            .map_err(|e| Error::gix("connect", e))?;
+        connection.set_transport_options(boxed_http_options(
+            cfg.mirror_idle_timeout_secs,
+            net_counter,
+        ));
 
         let prepared = {
             let _span = info_span!("prepare_fetch").entered();
@@ -61,7 +64,7 @@ pub fn incremental_fetch(
             let t_prepare = Instant::now();
             let prepared = connection
                 .prepare_fetch(&mut progress, RefMapOptions::default())
-                .map_err(|e| Error::Gix(format!("prepare_fetch: {e}")))?;
+                .map_err(|e| Error::gix("prepare_fetch", e))?;
             debug!(
                 elapsed_ms = u64::try_from(t_prepare.elapsed().as_millis()).unwrap_or(u64::MAX),
                 "prepare_fetch returned (ref advertisement complete)"
@@ -81,7 +84,7 @@ pub fn incremental_fetch(
         let t_receive = Instant::now();
         let outcome = prepared
             .receive(&mut progress, &interrupt)
-            .map_err(|e| Error::Gix(format!("receive: {e}")))?;
+            .map_err(|e| Error::gix("receive", e))?;
         debug!(
             elapsed_ms = u64::try_from(t_receive.elapsed().as_millis()).unwrap_or(u64::MAX),
             "receive returned (pack written, refs negotiated)"
