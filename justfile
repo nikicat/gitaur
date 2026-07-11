@@ -62,13 +62,16 @@ release bump='patch':
     # Right after the push, CI may not have reported its check yet, and
     # `gh pr checks` treats "no checks" as an error (exit 1) rather than
     # something to wait for — poll until a check exists (0 passed/8 pending),
-    # then let --watch do the real blocking.
+    # then let --watch do the real blocking. --required scopes both calls to
+    # the checks branch protection actually enforces: informational statuses
+    # (codecov project drift) failed spuriously on the v0.1.3 bump PR and
+    # aborted the release mid-flight, even though the merge was allowed.
     for _ in $(seq 20); do
-        rc=0; gh pr checks >/dev/null 2>&1 || rc=$?
+        rc=0; gh pr checks --required >/dev/null 2>&1 || rc=$?
         [ "$rc" = 1 ] || break
         sleep 3
     done
-    gh pr checks --watch --fail-fast
+    gh pr checks --required --watch --fail-fast
     gh pr merge --merge --delete-branch
     git pull --ff-only origin main
     merge_sha=$(gh pr view "$pr_url" --json mergeCommit --jq .mergeCommit.oid)
