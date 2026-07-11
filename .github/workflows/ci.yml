@@ -53,6 +53,44 @@ jobs:
       - name: test
         run: cargo test --all-features --locked
 
+  pkgbuild:
+    name: makepkg from tree (Tier 3)
+    runs-on: ubuntu-latest
+    container:
+      # latest as of 2026-07-06
+      image: archlinux:latest@sha256:681569955d1d17313ef7134acc8b5cd8adcda2fc24709bed472d95e1cf3d71a1
+    # Near-real packaging gate: build the rendered PKGBUILD with makepkg as an
+    # unprivileged user under a PTY — what an interactive `makepkg` on a user's
+    # machine looks like. The release workflow's test-build only runs against a
+    # published tag, so without this job packaging breakage (missing depends,
+    # release-profile-only check() failures — Tier 1/2 test the debug profile —
+    # Cargo.lock drift) surfaces after the release is already cut. makepkg
+    # skips the download when the source file already sits next to the
+    # PKGBUILD, so a `git archive HEAD` tarball stands in for the tag tarball.
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --noconfirm --needed base-devel rust git
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Render PKGBUILD against a tree tarball
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p /tmp/aur-build
+          # sha256sums stays the template's 'SKIP': the tarball is built here,
+          # not downloaded, so there is nothing to verify.
+          sed "/^pkgver=/s/@PKGVER@/$ver/" packaging/aur/PKGBUILD.in > /tmp/aur-build/PKGBUILD
+          git archive --format=tar.gz --prefix="aurox-$ver/" \
+              -o "/tmp/aur-build/aurox-$ver.tar.gz" HEAD
+
+      - name: Build the package as an unprivileged user under a PTY
+        run: |
+          useradd -m builder
+          chown -R builder /tmp/aur-build
+          cd /tmp/aur-build
+          sudo -u builder script -qec "makepkg -f --noconfirm" /dev/null
+
   container:
     name: container tests (Tier 2) + coverage
     runs-on: ubuntu-latest

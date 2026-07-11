@@ -256,7 +256,7 @@ something aurox can actually plan.
 
 ## CI
 
-Both tiers run in GitHub Actions on every push/PR, in two parallel jobs of
+The tiers run in GitHub Actions on every push/PR, in parallel jobs of
 `.github/workflows/ci.yml`:
 
 - **`ci`** — Tier 1: `fmt` + `taplo` + `clippy` + `build` + `cargo test`, on an
@@ -266,7 +266,17 @@ Both tiers run in GitHub Actions on every push/PR, in two parallel jobs of
   `tests/container/run.sh --coverage … all` against an instrumented binary, so
   the same run also produces the rust/podman/combined coverage uploaded to
   Codecov. A container-test failure fails the job. (Coverage is the byproduct;
-  running the tests is the point.)
+  running the tests is the point.) The in-image `cargo test` runs under a PTY
+  (`script(1)`): color autodetection then picks the colored rendering, the
+  condition an interactive `makepkg check()` creates — v0.1.2 shipped a test
+  that only failed there. Tier 1's piped run keeps the plain rendering covered.
+- **`makepkg from tree (Tier 3)`** — the packaging gate. Renders
+  `packaging/aur/PKGBUILD.in` against a `git archive HEAD` tarball (makepkg
+  skips the download when the source file is already present) and runs the full
+  `makepkg` build + `check()` as an unprivileged user under a PTY. Catches what
+  only the release-profile AUR build sees — missing `depends`, `--release`-only
+  `check()` failures, `Cargo.lock` drift — *before* a release is cut; the
+  release workflow's own test-build can only run once the tag exists.
 
 Running the suite instrumented has a higher startup cost (it builds the test
 image and an instrumented binary), which is why it's a job of its own rather

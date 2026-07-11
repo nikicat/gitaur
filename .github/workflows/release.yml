@@ -109,8 +109,11 @@ jobs:
           # deploy action instead would download the tarball into the AUR repo
           # checkout, where it must never be committed (the AUR caps blobs at
           # 488 KiB). --noconfirm because deps are preinstalled above.
+          # makepkg runs under script(1) so check() sees a tty, like it does on
+          # a user's machine — the v0.1.2 test-build passed here precisely
+          # because the runner's piped stdio hid a tty-only test failure.
           sudo -u builder updpkgsums
-          sudo -u builder makepkg -f --noconfirm
+          sudo -u builder script -qec "makepkg -f --noconfirm" /dev/null
           sudo -u builder sh -c 'makepkg --printsrcinfo > .SRCINFO'
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
