@@ -94,7 +94,9 @@ jobs:
       - name: Render PKGBUILD
         run: |
           mkdir -p /tmp/aur-build
-          sed "s/@PKGVER@/${TAG#v}/" packaging/aur/PKGBUILD.in > /tmp/aur-build/PKGBUILD
+          # Scoped to the pkgver= line so the template's own comment about
+          # @PKGVER@ survives rendering intact.
+          sed "/^pkgver=/s/@PKGVER@/${TAG#v}/" packaging/aur/PKGBUILD.in > /tmp/aur-build/PKGBUILD
 
       - name: Fill checksums and build the package as an unprivileged user
         run: |
@@ -109,29 +111,69 @@ jobs:
           # 488 KiB). --noconfirm because deps are preinstalled above.
           sudo -u builder updpkgsums
           sudo -u builder makepkg -f --noconfirm
-          sudo -u builder makepkg --printsrcinfo
+          sudo -u builder sh -c 'makepkg --printsrcinfo > .SRCINFO'
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pkgbuild
-          path: /tmp/aur-build/PKGBUILD
+          # .SRCINFO counts as hidden and is silently dropped without the flag.
+          include-hidden-files: true
+          path: |
+            /tmp/aur-build/PKGBUILD
+            /tmp/aur-build/.SRCINFO
 
   publish:
     name: push to AUR
     needs: [release, build]
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.release.outputs.tag }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: pkgbuild
 
-      - name: Publish aurox to the AUR
-        uses: KSXGitHub/github-actions-deploy-aur@da03e160361ce01bf087e790b6ffd196d7dccff7 # v4.1.3
-        with:
-          pkgname: aurox
-          pkgbuild: ./PKGBUILD
-          commit_username: Nikolay Bryskin
-          commit_email: nikicat@users.noreply.github.com
-          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-          commit_message: 'Update to ${{ needs.release.outputs.tag }}'
-          ssh_keyscan_types: ed25519
+      - name: Commit and push to the AUR (with retries)
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -eu
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          # Host key pinned rather than ssh-keyscan'd at run time — a scan
+          # from a compromised network would happily pin an attacker's key.
+          # Verified 2026-07-11 against a successful push from a trusted box.
+          echo 'aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN' \
+            > ~/.ssh/aur_known_hosts
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o UserKnownHostsFile=$HOME/.ssh/aur_known_hosts -o IdentitiesOnly=yes"
+
+          # Read over HTTPS — cloning over SSH would burn a connection against
+          # the same rate limit the push has to get through.
+          git clone https://aur.archlinux.org/aurox.git aur-repo
+          cp PKGBUILD .SRCINFO aur-repo/
+          cd aur-repo
+          git config user.name 'Nikolay Bryskin'
+          git config user.email 'nikicat@users.noreply.github.com'
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "AUR already carries $TAG — nothing to push"
+            exit 0
+          fi
+          git commit -m "Update to $TAG"
+
+          # aur.archlinux.org's sshd intermittently drops connections from
+          # shared GitHub-runner IPs before auth ("Connection closed by …
+          # port 22") — fail2ban-style rate limiting, seen twice for v0.1.2.
+          # Back off up to ~15 min total to outlast a typical ban window.
+          tries=0
+          until git push ssh://aur@aur.archlinux.org/aurox.git master; do
+            tries=$((tries + 1))
+            if [ "$tries" -ge 6 ]; then
+              echo "push failed after $tries attempts" >&2
+              exit 1
+            fi
+            delay=$((30 << (tries - 1)))
+            echo "push attempt $tries failed; retrying in ${delay}s" >&2
+            sleep "$delay"
+          done

@@ -23,7 +23,9 @@ test:
 # commit, creates the GitHub release, test-builds the PKGBUILD, and publishes
 # to the AUR). Nothing is pushed to main directly, so this works with a
 # protected main; the PR's CI run gates the merge, and a failed run leaves
-# the branch + PR in place to inspect. `bump` is patch|minor|major or an
+# the branch + PR in place to inspect. After the merge the recipe watches the
+# Release run through the AUR push and confirms the AUR serves the new
+# version. `bump` is patch|minor|major or an
 # explicit version like 0.2.0. Cargo.lock must carry the new version too:
 # the PKGBUILD builds with --frozen, so a stale lock fails the release build.
 release bump='patch':
@@ -54,8 +56,9 @@ release bump='patch':
     git add Cargo.toml Cargo.lock
     git commit -m "Bump version to $new"
     git push -u origin "release-v$new"
-    gh pr create --base main --title "Bump version to $new" \
-        --body "Merging this PR releases v$new: release.yml tags the merge commit, creates the GitHub release, and publishes to the AUR."
+    pr_url=$(gh pr create --base main --title "Bump version to $new" \
+        --body "Merging this PR releases v$new: release.yml tags the merge commit, creates the GitHub release, and publishes to the AUR.")
+    echo "$pr_url"
     # Right after the push, CI may not have reported its check yet, and
     # `gh pr checks` treats "no checks" as an error (exit 1) rather than
     # something to wait for — poll until a check exists (0 passed/8 pending),
@@ -68,13 +71,49 @@ release bump='patch':
     gh pr checks --watch --fail-fast
     gh pr merge --merge --delete-branch
     git pull --ff-only origin main
-    echo "merged — release.yml takes it from here:"
-    echo "https://github.com/nikicat/aurox/actions/workflows/release.yml"
+    merge_sha=$(gh pr view "$pr_url" --json mergeCommit --jq .mergeCommit.oid)
+    just _watch-release "v$new" "$merge_sha"
 
 # Republish an existing release tag to the AUR with the current PKGBUILD.in
-# (e.g. after a template fix) — creates no new tag or GitHub release.
-republish tag:
-    gh workflow run release.yml --field tag={{tag}}
+# (e.g. after a template fix) — creates no new tag or GitHub release — then
+# watch the run and confirm the AUR picked the version up.
+publish tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    git fetch origin main
+    gh workflow run release.yml --field tag='{{tag}}'
+    # The dispatched run executes on main's head; filtering the run lookup by
+    # that sha (plus the event) keeps the watcher off older dispatch runs.
+    just _watch-release '{{tag}}' "$(git rev-parse origin/main)" workflow_dispatch
+
+# Find the Release run for a commit (and optionally trigger event), watch it
+# to completion, then poll the AUR until it serves the released version.
+# cgit reflects the push immediately; the RPC endpoint lags a minute or two.
+_watch-release tag commit event='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sel=(--workflow=release.yml --commit '{{commit}}' --limit 1)
+    [ -z '{{event}}' ] || sel+=(--event '{{event}}')
+    echo 'waiting for the Release run to appear…'
+    run_id=
+    for _ in $(seq 30); do
+        run_id=$(gh run list "${sel[@]}" --json databaseId --jq '.[0].databaseId // empty')
+        [ -n "$run_id" ] && break
+        sleep 5
+    done
+    [ -n "$run_id" ] || { echo 'no Release run appeared after 150s' >&2; exit 1; }
+    gh run watch "$run_id" --exit-status \
+        || { echo "Release run failed — inspect: gh run view $run_id --log-failed" >&2; exit 1; }
+    ver='{{tag}}'; ver="${ver#v}"
+    echo "run succeeded — waiting for the AUR to serve aurox $ver…"
+    for _ in $(seq 30); do
+        aur=$(curl -sf 'https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=aurox' \
+            | sed -n 's/^[[:space:]]*pkgver = //p' || true)
+        [ "$aur" = "$ver" ] && { echo "AUR serves aurox $aur — release complete"; exit 0; }
+        sleep 10
+    done
+    echo "AUR still serves '${aur:-?}' after 5 min; expected $ver" >&2
+    exit 1
 
 # Coverage summary in the terminal.
 coverage:
