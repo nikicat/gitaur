@@ -1,6 +1,6 @@
 name: Release
 
-# Merging a Cargo.toml version bump to master IS the release: the `release`
+# Merging a Cargo.toml version bump to main IS the release: the `release`
 # job tags the merge commit, creates the GitHub release, and the build/publish
 # jobs push the package to the AUR. Everything lives in one workflow because
 # tags and releases created with the default GITHUB_TOKEN deliberately do not
@@ -11,7 +11,7 @@ name: Release
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths: [Cargo.toml]
   workflow_dispatch:
     inputs:
@@ -76,7 +76,7 @@ jobs:
 
       # The triggering commit provides the PKGBUILD template; the *tag*
       # determines what the package builds (it's baked into source=()), so a
-      # dispatch from a newer master can republish an old release with a
+      # dispatch from a newer main can republish an old release with a
       # fixed template.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
