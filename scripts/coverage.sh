@@ -52,10 +52,18 @@ COV_TARGET="$REPO_ROOT/target/coverage-build"
 # component cargo-llvm-cov normally looks for is absent. Arch keeps `rust` and
 # `llvm` on the same major LLVM release, so the formats are compatible.
 in_image() {
+    # CARGO_INCREMENTAL=0: incremental codegen partitions CGUs differently
+    # than a clean build, so an instrumented rebuild on top of restored cache
+    # state shifts the coverage-region layout — every Cargo.lock-changing
+    # commit (version/pin bumps) measured 1–3% below the clean baseline and
+    # tripped the codecov project status. Whole-crate codegen makes the
+    # measurement independent of cache state; per-crate artifact reuse (the
+    # actual warm-build win) is unaffected.
     "$CONTAINER" run --rm --user 0:0 \
         -v "$REPO_ROOT:/work:rw" \
         -e CARGO_HOME=/work/target/coverage-cargo \
         -e CARGO_TARGET_DIR=/work/target/coverage-build \
+        -e CARGO_INCREMENTAL=0 \
         -e LLVM_COV=/usr/sbin/llvm-cov \
         -e LLVM_PROFDATA=/usr/sbin/llvm-profdata \
         -w /work \
