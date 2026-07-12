@@ -530,6 +530,7 @@ fn batch_time_total(times: impl IntoIterator<Item = TimeEst>) -> TimeTotal {
 mod tests {
     use super::*;
     use crate::{assert_contains, assert_not_contains, assert_regex};
+    use console::strip_ansi_codes;
 
     fn root(repo: &str, name: &str, old: Option<&str>, new: Option<&str>) -> TxnRoot {
         TxnRoot {
@@ -803,6 +804,53 @@ mod tests {
         let total = table.lines().last().unwrap();
         assert_regex!(total, r"^-> total  \S");
         assert_not_contains!(total, "build", "pure-repo total has no build term");
+    }
+
+    /// The colored rendering strips back to the plain one: color lives in ANSI
+    /// codes (when the terminal grants them) plus the arrow glyph, while the
+    /// text content and the column padding — computed on *visible* width —
+    /// stay identical. One cart exercises every `Paint::Colored` arm: the
+    /// verdiff-split upgrade row, the green fresh install, the dimmed
+    /// marker/age cells, and the red removals.
+    #[test]
+    fn transaction_table_colored_strips_to_plain() {
+        let mut pac = PacmanIndex::default();
+        pac.sync_download_size
+            .insert("glibc".into(), 12 * 1024 * 1024);
+        pac.sync_download_size
+            .insert("gcc13".into(), 50 * 1024 * 1024);
+        pac.installed_size
+            .insert("cuda".into(), 3 * 1024 * 1024 * 1024);
+        let mut roots = vec![
+            root("core", "glibc", Some("2.40-1"), Some("2.41-1")),
+            root("aur", "cuda", Some("12.6-1"), Some("12.8-1")),
+            root("extra", "newpkg", None, Some("1.0-1")), // fresh install
+        ];
+        // `root()` leaves age unset; give the AUR row one so the dimmed
+        // `(Xd ago)` cell renders too.
+        roots[1].age = Some(dur(3 * 24 * 3600));
+        let repo_deps = vec![PkgName::from("gcc13")];
+        let aur_deps = vec![PkgBase::from("nvidia-utils")];
+        let removals = vec![PkgName::from("old-cuda")];
+        let metrics = PreviewMetrics::empty();
+        let render = |paint| {
+            transaction_table(
+                &roots, &repo_deps, &aur_deps, &removals, &pac, &metrics, paint,
+            )
+        };
+
+        let (plain, colored) = (render(Paint::Plain), render(Paint::Colored));
+
+        // The arrow glyph is the one textual difference between the paints.
+        assert_contains!(colored.lines()[0], "→");
+        assert_not_contains!(colored.lines()[0], "->");
+        assert_contains!(plain.lines()[0], "->");
+
+        assert_eq!(colored.lines().len(), plain.lines().len());
+        for (c, p) in colored.lines().iter().zip(plain.lines()) {
+            let stripped = strip_ansi_codes(c).replace('→', "->");
+            assert_eq!(&stripped, p, "colored line must strip to the plain one");
+        }
     }
 
     /// The one-line summary lists counts + size, omits the deps/remove/build
