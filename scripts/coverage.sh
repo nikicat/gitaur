@@ -87,7 +87,7 @@ in_image '
     # interactive `makepkg check()` creates. v0.1.2 shipped a test that passed
     # on tty-less CI but failed on every interactive host: color autodetection
     # (`color_on()` asks "is stderr a tty") flipped the rendering under test.
-    # The Tier-1 job keeps the piped, plain-rendering condition covered.
+    # The `ci` job keeps the piped, plain-rendering condition covered.
     LLVM_PROFILE_FILE="$DIR/profraw/rust/%p-%m.profraw" \
         script -qec "cargo test --all-features --locked --no-fail-fast" /dev/null
     # Build aurox plus the PTY/HTTP driver examples the extended tier shells out
@@ -104,8 +104,9 @@ set -e
 # tests/container/run.sh to bind-mount $PROFRAW_PODMAN into each test container
 # and set LLVM_PROFILE_FILE; we set AUROX so the suite invokes the instrumented
 # binary rather than the default target/debug/aurox path (and lib.sh resolves the
-# example drivers next to it). This is the CI Tier-2 gate — a failure here fails
-# the job (overall_status below), so both tiers gate merges.
+# example drivers next to it). This is the container-suite CI gate — a failure
+# here fails the job (overall_status below), so it gates merges alongside the
+# `ci` job's cargo tests.
 set +e
 AUROX="/work/target/coverage-build/debug/aurox" \
     bash tests/container/run.sh --coverage "$PROFRAW_PODMAN" all

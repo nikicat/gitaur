@@ -1,8 +1,8 @@
 # Testing aurox
 
-Two tiers. Both are required to pass before merging.
+Two layers. Both are required to pass before merging.
 
-## Tier 1 — Cargo unit + integration tests
+## Cargo unit + integration tests
 
 Pure Rust. Run anywhere with a working `cargo`. Fast (sub-second once
 the workspace is built).
@@ -25,14 +25,15 @@ binary that links the aurox lib. `tests/testing.rs` (re-exported via
 `git` CLI for fixture setup, since gix doesn't expose every plumbing
 operation we need.
 
-**When to add a Tier-1 test:**
+**When to add a cargo test:**
 - The function is pure data → put the test in the same file under
   `#[cfg(test)] mod tests`.
 - The function needs disk state (a real bare repo, a tempdir, etc.) but
   doesn't shell out to `pacman` / `makepkg` → put it under `tests/`.
-- Anything that needs an `alpm` handle or a real `pacman` → Tier 2.
+- Anything that needs an `alpm` handle or a real `pacman` → the container
+  suite.
 
-## Tier 2 — Container integration suite
+## Container integration suite
 
 Real Arch userspace. Runs every aurox command path against real
 `makepkg`, real `pacman -S/-U/-D`, and real `alpm` — but with fixture
@@ -256,12 +257,12 @@ something aurox can actually plan.
 
 ## CI
 
-The tiers run in GitHub Actions on every push/PR, in parallel jobs of
+Both layers run in GitHub Actions on every push/PR, in parallel jobs of
 `.github/workflows/ci.yml`:
 
-- **`ci`** — Tier 1: `fmt` + `taplo` + `clippy` + `build` + `cargo test`, on an
+- **`ci`** — `fmt` + `taplo` + `clippy` + `build` + `cargo test`, on an
   `archlinux:latest` container.
-- **`container tests (Tier 2) + coverage`** — the Tier-2 gate. Runs the whole
+- **`container tests + coverage`** — the container-suite gate. Runs the whole
   container suite (`smoke` + `extended`) via `scripts/coverage.sh` →
   `tests/container/run.sh --coverage … all` against an instrumented binary, so
   the same run also produces the rust/podman/combined coverage uploaded to
@@ -269,8 +270,9 @@ The tiers run in GitHub Actions on every push/PR, in parallel jobs of
   running the tests is the point.) The in-image `cargo test` runs under a PTY
   (`script(1)`): color autodetection then picks the colored rendering, the
   condition an interactive `makepkg check()` creates — v0.1.2 shipped a test
-  that only failed there. Tier 1's piped run keeps the plain rendering covered.
-- **`makepkg from tree (Tier 3)`** — the packaging gate. Renders
+  that only failed there. The `ci` job's piped run keeps the plain rendering
+  covered.
+- **`makepkg from tree`** — the packaging gate. Renders
   `packaging/aur/PKGBUILD.in` against a `git archive HEAD` tarball (makepkg
   skips the download when the source file is already present) and runs the full
   `makepkg` build + `check()` as an unprivileged user under a PTY. Catches what
@@ -312,7 +314,7 @@ Per project rule (`memory/feedback_*`):
   real aurox bugs surfacing for the first time, not test setup issues.
   Don't assume the test is wrong before checking the binary's behaviour.
 
-## Future work for tier 2
+## Future work for the container suite
 
 The `extended/` tier is mostly empty stubs in `.scope`. The next ones
 worth adding (in roughly priority order):

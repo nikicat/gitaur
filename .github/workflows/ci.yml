@@ -54,7 +54,7 @@ jobs:
         run: cargo test --all-features --locked
 
   pkgbuild:
-    name: makepkg from tree (Tier 3)
+    name: makepkg from tree
     runs-on: ubuntu-latest
     container:
       # latest as of 2026-07-06
@@ -63,7 +63,7 @@ jobs:
     # unprivileged user under a PTY — what an interactive `makepkg` on a user's
     # machine looks like. The release workflow's test-build only runs against a
     # published tag, so without this job packaging breakage (missing depends,
-    # release-profile-only check() failures — Tier 1/2 test the debug profile —
+    # release-profile-only check() failures — the other jobs test the debug profile —
     # Cargo.lock drift) surfaces after the release is already cut. makepkg
     # skips the download when the source file already sits next to the
     # PKGBUILD, so a `git archive HEAD` tarball stands in for the tag tarball.
@@ -92,13 +92,14 @@ jobs:
           sudo -u builder script -qec "makepkg -f --noconfirm" /dev/null
 
   container:
-    name: container tests (Tier 2) + coverage
+    name: container tests + coverage
     runs-on: ubuntu-latest
-    # The Tier-2 gate. Runs the black-box container suite (tests/container,
-    # smoke + extended) end-to-end against real pacman/makepkg, in parallel to
-    # the `ci` (Tier 1) job. A container-test failure fails this job — that is
-    # what puts Tier 2 in CI. Coverage is a byproduct: the suite runs against an
-    # instrumented binary, so the same run also yields line coverage.
+    # The container-suite gate. Runs the black-box container suite
+    # (tests/container, smoke + extended) end-to-end against real
+    # pacman/makepkg, in parallel to the `ci` job. A container-test failure
+    # fails this job — that is what puts the suite in CI. Coverage is a
+    # byproduct: the suite runs against an instrumented binary, so the same
+    # run also yields line coverage.
     #
     # Everything happens inside the test image (tests/container/Dockerfile), so
     # the runner only needs podman — preinstalled on ubuntu-latest. The
@@ -120,8 +121,8 @@ jobs:
           key: ${{ runner.os }}-coverage-${{ hashFiles('**/Cargo.lock', 'tests/container/Dockerfile') }}
           restore-keys: ${{ runner.os }}-coverage-
 
-      - name: Run container suite (Tier 2) + coverage
-        # Runs Tier 1 (cargo test) + Tier 2 (podman smoke + extended) against an
+      - name: Run container suite + coverage
+        # Runs cargo test + the podman suite (smoke + extended) against an
         # instrumented binary and produces coverage/lcov-{rust,podman,combined}.info.
         # Exits non-zero — failing this job — if any container test fails. The
         # upload steps below use `if: always()` so partial coverage still reaches
