@@ -18,7 +18,7 @@
 //! order given.
 
 use super::cost::{PreviewMetrics, RowCost, SizeEst, cost_of, size_of, time_col};
-use super::tables::{ARROW, Cell, Paint, Table, Width, version_block};
+use super::tables::{Cell, Paint, Table, Width, version_block};
 use super::{color_on, dim, repo as repo_style};
 use crate::names::{PkgName, RepoName};
 use crate::pacman::alpm_db::PacmanIndex;
@@ -188,11 +188,11 @@ fn version_cell(
     if old.is_some() {
         return version_block(old, new, old_w, new_w, paint);
     }
-    let full = old_w + ARROW + new_w;
+    let full = old_w + paint.arrow() + new_w;
     let Some(v) = new else {
         return full.blanks();
     };
-    let lead = (old_w + ARROW).blanks();
+    let lead = (old_w + paint.arrow()).blanks();
     let pad = new_w.gap(Width::of(v.as_str()));
     let shown = if paint.colored() && !em.installed() {
         dim(v.as_str()).to_string()

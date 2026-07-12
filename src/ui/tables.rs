@@ -144,7 +144,7 @@ impl Table {
 /// the change-set preview can render a plain form (for width measurement) and a
 /// colored form from the same code path — and so tests can pin [`Paint::Plain`]
 /// instead of inheriting whatever the ambient terminal supports.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Paint {
     Plain,
     Colored,
@@ -158,6 +158,20 @@ impl Paint {
     /// The ambient paint for the process's terminal ([`color_on`]).
     pub fn detect() -> Self {
         Self::from(color_on())
+    }
+
+    /// The visible width of the version separator this paint renders: the
+    /// arrow glyph flanked by one space each side. Paint-dependent because
+    /// the glyph is — colored draws the one-column `→`, plain falls back to
+    /// the two-column ASCII `->` (piped / `NO_COLOR` output stays ASCII). A
+    /// method rather than a const so the blank-gap math on arrowless rows is
+    /// derived from the same paint as the rendered separator and the two
+    /// can't drift apart.
+    pub(super) const fn arrow(self) -> Width {
+        match self {
+            Self::Plain => Width(4),
+            Self::Colored => Width(3),
+        }
     }
 }
 
@@ -362,14 +376,9 @@ fn paint_suffix(s: &str, kind: BumpKind) -> console::StyledObject<&str> {
     }
 }
 
-/// The display width of the ` → ` separator (arrow glyph flanked by two spaces):
-/// one column for the glyph plus one each side. A typed [`Width`] so the
-/// version-block padding math and the rendered separator can't drift.
-pub(super) const ARROW: Width = Width(3);
-
 /// Render one transaction row's version block, padded to a fixed
-/// `old_w + ARROW + new_w` visible width so the column after it aligns across
-/// install and upgrade rows.
+/// `old_w + paint.arrow() + new_w` visible width so the column after it
+/// aligns across install and upgrade rows.
 ///
 /// - **Upgrade** (`old` present): verdiff coloring — common prefix dimmed, the
 ///   diverging suffix colored by [`BumpKind`], joined by a dimmed ` → `. Shares
@@ -387,14 +396,14 @@ pub(super) fn version_block(
     paint: Paint,
 ) -> String {
     let Some(new) = new else {
-        return (old_w + ARROW + new_w).blanks();
+        return (old_w + paint.arrow() + new_w).blanks();
     };
     let new_str = new.as_str();
     let new_pad = new_w.gap(Width::of(new_str));
 
     let Some(old) = old else {
         // Fresh install: blank old slot + blank arrow gap, then green `new`.
-        let lead = (old_w + ARROW).blanks();
+        let lead = (old_w + paint.arrow()).blanks();
         let shown = if paint.colored() {
             style(new_str).green().to_string()
         } else {

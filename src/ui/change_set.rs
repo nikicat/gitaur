@@ -548,6 +548,15 @@ mod tests {
         Duration::from_secs(secs)
     }
 
+    /// Byte sizes for fixtures, readable at the call site (Rust has no `**`
+    /// operator, so `n * 1024 * 1024` chains were the alternative).
+    const fn mib(n: u64) -> u64 {
+        n << 20
+    }
+    const fn gib(n: u64) -> u64 {
+        n << 30
+    }
+
     /// Each `SizeEst` variant renders its expected cell (no `~` prefix — an
     /// estimate reads the same as an exact figure; unknown is a bare `?`).
     #[test]
@@ -563,18 +572,16 @@ mod tests {
     #[test]
     fn size_of_picks_source_by_repo() {
         let mut pac = PacmanIndex::default();
-        pac.installed_size
-            .insert("paru-bin".into(), 9 * 1024 * 1024);
-        pac.sync_download_size
-            .insert("glibc".into(), 12 * 1024 * 1024);
+        pac.installed_size.insert("paru-bin".into(), mib(9));
+        pac.sync_download_size.insert("glibc".into(), mib(12));
 
         assert_eq!(
             size_of(&"aur".into(), &"paru-bin".into(), &pac),
-            SizeEst::Estimate(9 * 1024 * 1024)
+            SizeEst::Estimate(mib(9))
         );
         assert_eq!(
             size_of(&"core".into(), &"glibc".into(), &pac),
-            SizeEst::Exact(12 * 1024 * 1024)
+            SizeEst::Exact(mib(12))
         );
         // AUR row with no localdb size (manually built / never installed).
         assert_eq!(
@@ -723,8 +730,7 @@ mod tests {
     #[test]
     fn cost_summary_never_built_shows_unknown_not_zero() {
         let mut pac = PacmanIndex::default();
-        pac.installed_size
-            .insert("newthing".into(), 85 * 1024 * 1024);
+        pac.installed_size.insert("newthing".into(), mib(85));
         let roots = vec![root("aur", "newthing", None, Some("1.0-1"))];
         let s = cost_summary(&roots, &[], &[], &[], &pac, &PreviewMetrics::empty());
         assert_contains!(s, "? build", "never-built build time is unknown");
@@ -740,12 +746,9 @@ mod tests {
     #[test]
     fn transaction_table_renders_rows_deps_and_total() {
         let mut pac = PacmanIndex::default();
-        pac.sync_download_size
-            .insert("glibc".into(), 12 * 1024 * 1024);
-        pac.sync_download_size
-            .insert("gcc13".into(), 50 * 1024 * 1024);
-        pac.installed_size
-            .insert("cuda".into(), 3 * 1024 * 1024 * 1024);
+        pac.sync_download_size.insert("glibc".into(), mib(12));
+        pac.sync_download_size.insert("gcc13".into(), mib(50));
+        pac.installed_size.insert("cuda".into(), gib(3));
 
         let roots = vec![
             root("core", "glibc", Some("2.40-1"), Some("2.41-1")),
@@ -806,21 +809,20 @@ mod tests {
         assert_not_contains!(total, "build", "pure-repo total has no build term");
     }
 
-    /// The colored rendering strips back to the plain one: color lives in ANSI
-    /// codes (when the terminal grants them) plus the arrow glyph, while the
-    /// text content and the column padding — computed on *visible* width —
-    /// stay identical. One cart exercises every `Paint::Colored` arm: the
+    /// Both paints render the same *content*: stripping ANSI codes from the
+    /// colored table and reading token-by-token must reproduce the plain one,
+    /// with the arrow glyph (`→` colored, `->` plain) as the single mapped
+    /// token. Spacing is deliberately not compared — the arrow widths differ
+    /// per paint ([`Paint::arrow`]) and column alignment has its own test
+    /// below. One cart exercises every `Paint::Colored` arm: the
     /// verdiff-split upgrade row, the green fresh install, the dimmed
     /// marker/age cells, and the red removals.
     #[test]
     fn transaction_table_colored_strips_to_plain() {
         let mut pac = PacmanIndex::default();
-        pac.sync_download_size
-            .insert("glibc".into(), 12 * 1024 * 1024);
-        pac.sync_download_size
-            .insert("gcc13".into(), 50 * 1024 * 1024);
-        pac.installed_size
-            .insert("cuda".into(), 3 * 1024 * 1024 * 1024);
+        pac.sync_download_size.insert("glibc".into(), mib(12));
+        pac.sync_download_size.insert("gcc13".into(), mib(50));
+        pac.installed_size.insert("cuda".into(), gib(3));
         let mut roots = vec![
             root("core", "glibc", Some("2.40-1"), Some("2.41-1")),
             root("aur", "cuda", Some("12.6-1"), Some("12.8-1")),
@@ -848,8 +850,55 @@ mod tests {
 
         assert_eq!(colored.lines().len(), plain.lines().len());
         for (c, p) in colored.lines().iter().zip(plain.lines()) {
-            let stripped = strip_ansi_codes(c).replace('→', "->");
-            assert_eq!(&stripped, p, "colored line must strip to the plain one");
+            let stripped = strip_ansi_codes(c);
+            let colored_tokens: Vec<&str> = stripped
+                .split_whitespace()
+                .map(|t| if t == "→" { "->" } else { t })
+                .collect();
+            let plain_tokens: Vec<&str> = p.split_whitespace().collect();
+            assert_eq!(
+                colored_tokens, plain_tokens,
+                "both paints must carry the same text content"
+            );
+        }
+    }
+
+    /// Every root row's size figure ends at the same visible column, in both
+    /// paints — the version block must occupy one fixed width whether the row
+    /// is an upgrade (with an arrow) or a fresh install (blank gap).
+    /// Regression: the plain ` -> ` separator is four columns but the blank
+    /// gap was sized by the colored arrow's three (the old `ARROW` const), so
+    /// plain-mode carts mixing upgrades and fresh installs had every column
+    /// after the version block off by one cell between rows.
+    #[test]
+    fn transaction_table_size_column_aligns_across_rows() {
+        let mut pac = PacmanIndex::default();
+        pac.sync_download_size.insert("glibc".into(), mib(12));
+        pac.sync_download_size.insert("newpkg".into(), mib(5));
+        pac.installed_size.insert("cuda".into(), gib(3));
+        let roots = vec![
+            root("core", "glibc", Some("2.40-1"), Some("2.41-1")),
+            root("aur", "cuda", Some("12.6-1"), Some("12.8-1")),
+            root("extra", "newpkg", None, Some("1.0-1")), // fresh: no arrow
+        ];
+        let size_re = regex::Regex::new(r"\d[\d.]* [KMGT]iB").unwrap();
+        for paint in [Paint::Plain, Paint::Colored] {
+            let table =
+                transaction_table(&roots, &[], &[], &[], &pac, &PreviewMetrics::empty(), paint);
+            let end_columns: Vec<usize> = table.lines()[..3]
+                .iter()
+                .map(|line| {
+                    let stripped = strip_ansi_codes(line);
+                    let m = size_re
+                        .find(&stripped)
+                        .unwrap_or_else(|| panic!("no size figure in {stripped:?}"));
+                    stripped[..m.end()].chars().count()
+                })
+                .collect();
+            assert!(
+                end_columns.windows(2).all(|w| w[0] == w[1]),
+                "size column drifts across rows under {paint:?}: {end_columns:?}"
+            );
         }
     }
 
