@@ -514,10 +514,13 @@ impl State {
     /// resolve against the active list + universe; pacman validates names at
     /// apply time.
     ///
-    /// A selector that lands on a *staged install* is rejected with a pointer to
-    /// `drop`: `remove` uninstalls an already-installed package, so staging a
-    /// `-R` for something the transaction is about to install is a contradiction
-    /// — the user almost certainly means "take it out of the cart" (`drop`).
+    /// A selector that lands on a staged *fresh install* is rejected with a
+    /// pointer to `drop`: the package isn't installed, so staging a `-R` for
+    /// something the transaction is about to install is a contradiction — the
+    /// user almost certainly means "take it out of the cart" (`drop`). A staged
+    /// *upgrade* row is the opposite case: the package IS installed, so `remove`
+    /// wins over the pending upgrade — the row leaves the cart and the removal
+    /// is staged in its place.
     fn remove<E: ShellEnv>(&mut self, args: &[String], env: &mut E) {
         if args.is_empty() {
             env.print("usage: remove <pkg|number|range|glob>…");
@@ -537,15 +540,35 @@ impl State {
         let before = self.cart.clone();
         let mut changed = false;
         for t in targets {
-            // A row already staged for *install* isn't installed — you can't
-            // uninstall it. Point at `drop`, which is what "get rid of this cart
-            // row" means, and stage nothing.
-            if self.cart.item(&t).is_some() {
-                env.print(&format!(
-                    "{name} is staged for install, not installed — `drop {name}` to unstage it",
-                    name = t.as_str()
-                ));
-                continue;
+            // `Some(is_upgrade)` when the target is a staged install row.
+            match self.cart.item(&t).map(|i| i.upgrade.is_some()) {
+                // A fresh-install row isn't installed — you can't uninstall
+                // it. Point at `drop`, which is what "get rid of this cart
+                // row" means, and stage nothing.
+                Some(false) => {
+                    env.print(&format!(
+                        "{name} is staged for install, not installed — `drop {name}` to unstage it",
+                        name = t.as_str()
+                    ));
+                    continue;
+                }
+                // An upgrade row is an installed package: removing it wins
+                // over upgrading it, so the row makes way for the removal.
+                Some(true) => {
+                    self.cart.unstage(&t);
+                    changed = true;
+                    let name = PkgName::from(t.into_inner());
+                    match self.cart.stage_remove(name.clone()) {
+                        StageResult::Staged => env.print(&format!(
+                            "{name} was staged for upgrade — staged removal instead"
+                        )),
+                        StageResult::AlreadyStaged => env.print(&format!(
+                            "{name}: dropped the staged upgrade; already staged for removal"
+                        )),
+                    }
+                    continue;
+                }
+                None => {}
             }
             let name = PkgName::from(t.into_inner());
             match self.cart.stage_remove(name.clone()) {
@@ -3026,12 +3049,12 @@ mod tests {
     // --- unified numbering: a bare number follows the last-shown list ---
 
     #[test]
-    fn remove_by_number_rejects_a_staged_install_and_points_at_drop() {
-        // The reported bug: after `upgrade` puts the cart on screen, `remove 1`
-        // used to consult the (empty) search list and error "run search first".
-        // Now numbers follow the shown cart — and `remove` on a staged install
-        // refuses (you can't uninstall what isn't installed yet) and points at
-        // `drop`, which is what "take this cart row out" means.
+    fn remove_by_number_on_an_upgrade_row_stages_the_removal_instead() {
+        // The reported bug: an upgrade row IS an installed package, but
+        // `remove 1` on it used to refuse with "staged for install, not
+        // installed" — wrong on both counts, and no path to actually
+        // uninstalling it. Removing wins over upgrading: the upgrade row
+        // leaves the cart and the removal is staged in its place.
         let mut env = FakeEnv {
             upgrade_candidates: vec![up("aur", "bar"), up("aur", "foo")],
             ..FakeEnv::default()
@@ -3040,10 +3063,51 @@ mod tests {
         state.dispatch(&command::parse("upgrade"), &mut env); // view = cart: [bar, foo]
         env.lines.clear();
         state.dispatch(&command::parse("remove 1"), &mut env);
+        assert_eq!(state.cart.removals(), &[PkgName::from("bar")]);
+        assert_eq!(
+            cart_specs(&state),
+            vec!["foo"],
+            "the converted upgrade row must leave the cart"
+        );
+        assert!(
+            env.lines
+                .contains("bar was staged for upgrade — staged removal instead"),
+            "should report the conversion: {:?}",
+            env.lines
+        );
+    }
+
+    #[test]
+    fn remove_undo_restores_the_converted_upgrade_row() {
+        // The upgrade→removal conversion is one cart change: `undo` brings the
+        // upgrade row back and unstages the removal.
+        let mut env = FakeEnv {
+            upgrade_candidates: vec![up("aur", "bar")],
+            ..FakeEnv::default()
+        };
+        let mut state = State::default();
+        state.dispatch(&command::parse("upgrade"), &mut env);
+        state.dispatch(&command::parse("remove bar"), &mut env);
+        state.dispatch(&command::parse("undo"), &mut env);
+        assert!(state.cart.removals().is_empty());
+        assert_eq!(cart_specs(&state), vec!["bar"]);
+    }
+
+    #[test]
+    fn remove_rejects_a_staged_fresh_install_and_points_at_drop() {
+        // A fresh `add` row (not an upgrade) isn't installed — `remove` on it
+        // refuses (you can't uninstall what isn't installed yet) and points at
+        // `drop`, which is what "take this cart row out" means.
+        let mut env = env_with(&[("bar", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add bar"), &mut env);
+        env.lines.clear();
+        state.dispatch(&command::parse("remove bar"), &mut env);
         assert!(
             state.cart.removals().is_empty(),
-            "a staged install must not be staged for removal"
+            "a staged fresh install must not be staged for removal"
         );
+        assert_eq!(cart_specs(&state), vec!["bar"], "the install row stays");
         assert!(
             env.lines.any(|l| l.contains("drop bar")),
             "should point at `drop`: {:?}",
