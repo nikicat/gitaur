@@ -2,17 +2,20 @@ name: CI
 
 on:
   push:
-    branches: ['**']
+    # main only: PR branches are covered by the pull_request event, and a
+    # both-events trigger runs everything twice per push — worse, the
+    # concurrency group's cancelled twin leaves CANCELLED check runs with
+    # the required-check names on the sha, which blocks the merge under
+    # the branch protection policy.
+    branches: [main]
   pull_request:
 
 concurrency:
-  # A push to a PR'd branch fires both `push` and `pull_request` for the
-  # same commit — two full workflows and a doubled set of codecov uploads.
-  # head_ref (set only on pull_request events) and ref_name (plain pushes)
-  # both resolve to the branch name, so the two runs share a group and the
-  # earlier one is cancelled. main is exempt from cancellation: every merge
-  # commit's run must finish to upload the codecov baseline the next PR
-  # compares against.
+  # Rapid successive pushes to a PR branch cancel the outdated in-progress
+  # run (head_ref is set on pull_request events; ref_name covers main
+  # pushes). main is exempt from cancellation: every merge commit's run
+  # must finish to upload the codecov baseline the next PR compares
+  # against.
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 
