@@ -1255,7 +1255,7 @@ pub fn run(cfg: &Config, devel: DevelPolicy, initial_search: &[SearchTerm]) -> R
 
     env.print("aurox shell — type `help` for commands, `quit` to leave");
     if env.session.is_none() {
-        env.print("no AUR index yet — run `aurox -Sy` to enable AUR search/info");
+        env.print("no AUR index yet — run `refresh` to enable AUR search/info");
     }
 
     // Seed the session with the launch-time search (`aurox <term>…`): run it once
