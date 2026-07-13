@@ -116,6 +116,10 @@ jobs:
           # project-local CARGO_HOME (target/coverage-cargo) used by the
           # in-image cargo invocations. Caching it makes incremental coverage
           # runs cheap; cold runs still take a full cargo build + test.
+          # Safe to restore across commits only because scripts/coverage.sh
+          # purges ghost workspace binaries before building — a restored cache
+          # can carry stale-generation executables whose embedded coverage
+          # maps would otherwise pollute every report (see step 1 there).
           path: |
             target
           key: ${{ runner.os }}-coverage-${{ hashFiles('**/Cargo.lock', 'tests/container/Dockerfile') }}

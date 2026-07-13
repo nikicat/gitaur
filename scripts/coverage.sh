@@ -52,13 +52,11 @@ COV_TARGET="$REPO_ROOT/target/coverage-build"
 # component cargo-llvm-cov normally looks for is absent. Arch keeps `rust` and
 # `llvm` on the same major LLVM release, so the formats are compatible.
 in_image() {
-    # CARGO_INCREMENTAL=0: incremental codegen partitions CGUs differently
-    # than a clean build, so an instrumented rebuild on top of restored cache
-    # state shifts the coverage-region layout — every Cargo.lock-changing
-    # commit (version/pin bumps) measured 1–3% below the clean baseline and
-    # tripped the codecov project status. Whole-crate codegen makes the
-    # measurement independent of cache state; per-crate artifact reuse (the
-    # actual warm-build win) is unaffected.
+    # CARGO_INCREMENTAL=0: whole-crate codegen keeps the coverage-region
+    # layout independent of incremental cache state; per-crate artifact reuse
+    # (the actual warm-build win) is unaffected. Kept as measurement hygiene —
+    # the historical coverage drift it was first deployed against turned out
+    # to be the ghost-binary problem step 1 purges (see the comment there).
     "$CONTAINER" run --rm --user 0:0 \
         -v "$REPO_ROOT:/work:rw" \
         -e CARGO_HOME=/work/target/coverage-cargo \
@@ -79,15 +77,33 @@ PROFRAW_PODMAN="$COV_TARGET/profraw/podman"
 
 overall_status=0
 
-# Step 1 — wipe stale profraw/profdata (don't trust `cargo llvm-cov clean`,
-# which leaves loose *.profraw behind), then build instrumented test + bin
-# artifacts and run cargo tests with profraw routed into profraw/rust/. Build
-# artifacts are kept for incremental rebuilds — only this container ever writes
-# to COV_TARGET, so they stay path-consistent.
+# Step 1 — purge ghost workspace binaries and stale profraw, then build
+# instrumented test + bin artifacts and run cargo tests with profraw routed
+# into profraw/rust/.
+#
+# The ghost purge is the coverage-drift fix. `cargo llvm-cov report` collects
+# *every* executable in the target dir (report.rs `object_files()` — a plain
+# WalkDir with no freshness check), and each executable embeds the coverage
+# map for the whole lib as its source looked at *its* build time. Cargo only
+# overwrites a binary when the filename's metadata hash matches; any change to
+# that hash (a version bump is enough — the v0.1.3→v0.1.4 release did it)
+# strands the previous generation in deps/ forever. A restored CI cache then
+# feeds those ghosts to every report: the union of old+new coverage maps
+# invents "coverable" lines at the old source's positions, which no fresh
+# profraw can ever hit — phantom misses (PR #27 measured resolver.rs at 671
+# lines vs the true 567: exactly base ∪ head). `cargo llvm-cov clean
+# --workspace` (cargo clean -p per workspace member under the hood) removes
+# every generation of *workspace* artifacts while keeping dependency rlibs —
+# the rebuild it forces is workspace-crate-only (~10 s warm), which CI pays
+# anyway on every commit.
+#
+# The profraw wipe stays ours: clean only globs the target root, not our
+# profraw/{rust,podman}/ staging dirs.
 set +e
 in_image '
     eval "$(cargo llvm-cov show-env --export-prefix)"
     DIR="$CARGO_LLVM_COV_TARGET_DIR"
+    cargo llvm-cov clean --workspace
     rm -rf "$DIR/profraw"
     find "$DIR" -maxdepth 1 \( -name "*.profraw" -o -name "*.profdata" \) -delete 2>/dev/null || true
     mkdir -p "$DIR/profraw/rust" "$DIR/profraw/podman"
