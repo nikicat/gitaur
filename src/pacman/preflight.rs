@@ -355,4 +355,14 @@ mod tests {
             "package foo does not have a valid architecture"
         );
     }
+
+    /// The unstructured fallback carries libalpm's message verbatim — no
+    /// rephrasing that could hide what alpm actually said.
+    #[test]
+    fn other_passes_the_message_through() {
+        let other = Issue::Other {
+            message: "transaction not prepared".to_owned(),
+        };
+        assert_eq!(other.to_string(), "transaction not prepared");
+    }
 }

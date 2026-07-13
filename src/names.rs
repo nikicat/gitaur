@@ -661,4 +661,14 @@ mod tests {
         assert!(!PkgBase::from("neovim").is_vcs());
         assert!(!PkgBase::from("git-lfs").is_vcs());
     }
+
+    /// `Arch` exposes the label via `as_str` and a padding-aware `Display`
+    /// (diagnostics align it in columns like the name wrappers).
+    #[test]
+    fn arch_round_trips_and_pads() {
+        let arch = Arch::new("x86_64");
+        assert_eq!(arch.as_str(), "x86_64");
+        assert_eq!(arch.to_string(), "x86_64");
+        assert_eq!(format!("{arch:>8}"), "  x86_64");
+    }
 }

@@ -496,6 +496,12 @@ mod tests {
             Some(vec![PkgName::new("baz")])
         );
         assert_eq!(sysupgrade_ignores(&argv(&["-Syyu"])), Some(vec![]));
+        // A trailing value-less `--ignore` pins nothing rather than erroring —
+        // pacman itself rejects the argv later.
+        assert_eq!(
+            sysupgrade_ignores(&argv(&["-Syu", "--ignore"])),
+            Some(vec![])
+        );
     }
 
     #[test]
