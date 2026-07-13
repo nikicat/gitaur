@@ -350,6 +350,10 @@ fn leaf_label(name: &str) -> &str {
 ///
 /// ETAs are calibrated for `github.com/archlinux/aur` (~155 k refs, ~2 GiB
 /// pack) on a residential connection; smaller repos finish faster.
+///
+/// gix also names a "receiving pack" phase, deliberately unmapped: it's set on
+/// the fetch node the instant the server announces a pack, and the "read pack"
+/// child overwrites the summary immediately after — it never renders.
 fn phase_hint(name: &str) -> Option<&'static str> {
     let lower = name.to_ascii_lowercase();
     if lower.starts_with("handshake") {
@@ -360,10 +364,8 @@ fn phase_hint(name: &str) -> Option<&'static str> {
         Some("downloading ref list (~20 s)")
     } else if lower.starts_with("negotiate") {
         Some("sending wants/haves to server")
-    } else if lower == "receiving pack" {
-        Some("server is packing objects, then streaming to us (~5–8 min)")
     } else if lower == "read pack" {
-        Some("silent until server finishes packing (~3–5 min server-side, ~2–3 min stream)")
+        Some("silent until server finishes packing (~7–8 min)")
     } else if lower == "remote" {
         Some("server-side progress (counting / compressing objects)")
     } else if lower == "indexing" || lower == "resolving deltas" || lower == "resolving" {
