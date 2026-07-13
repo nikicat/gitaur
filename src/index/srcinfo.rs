@@ -7,7 +7,7 @@
 
 use crate::error::{Error, Result};
 use crate::index::schema::{IndexEntry, Pkgname};
-use crate::names::{OptDep, PkgTarget};
+use crate::names::{Arch, OptDep, PkgTarget, Url};
 use tracing::trace;
 
 /// Array-valued keys that may carry an arch suffix (`<key>_<arch>`).
@@ -75,7 +75,13 @@ pub fn parse(text: &str) -> Result<IndexEntry> {
                 Some(i) => e.pkgnames[i].pkgdesc = Some(v.into()),
             },
 
-            "arch" => e.arch.push(v.into()),
+            // Pkgbase-level `url` wins (the header precedes every pkgname
+            // section, so it lands first and later pkgname overrides are
+            // skipped); a split package that only declares per-pkgname URLs
+            // still gets one — the first — rather than none.
+            "url" if e.url.is_none() => e.url = Some(Url::new(v)),
+
+            "arch" => e.arch.push(Arch::new(v)),
             // `provides` gets attribution: pkgbase-level vs pkgname-scoped.
             // Every other dep array stays pkgbase-flat — per-pkgname sections
             // fold into the pkgbase vec, since nothing needs pkgname-level
@@ -231,7 +237,48 @@ pkgname = bisq-daemon
         assert!(e.provides.contains(&PkgTarget::new("cower")));
         assert!(e.pkgnames[0].provides.is_empty());
         assert!(e.conflicts.contains(&PkgTarget::new("cower-git")));
-        assert!(e.arch.contains(&"x86_64".to_owned()));
+        assert!(e.arch.contains(&Arch::new("x86_64")));
+        assert_eq!(e.url, Some(Url::new("https://github.com/falconindy/cower")));
+    }
+
+    #[test]
+    fn url_pkgbase_level_wins_over_pkgname_overrides() {
+        // The header's url lands first; a per-pkgname override must not
+        // replace it (the info block shows one URL per pkgbase).
+        let e = parse(
+            "
+pkgbase = foo
+	pkgver = 1
+	pkgrel = 1
+	url = https://base.example
+
+pkgname = foo
+	url = https://member.example
+",
+        )
+        .unwrap();
+        assert_eq!(e.url, Some(Url::new("https://base.example")));
+    }
+
+    #[test]
+    fn url_falls_back_to_first_pkgname_scoped_value() {
+        // Split package with no pkgbase-level url: keep the first member's
+        // rather than none.
+        let e = parse(
+            "
+pkgbase = foo
+	pkgver = 1
+	pkgrel = 1
+
+pkgname = foo-a
+	url = https://a.example
+
+pkgname = foo-b
+	url = https://b.example
+",
+        )
+        .unwrap();
+        assert_eq!(e.url, Some(Url::new("https://a.example")));
     }
 
     #[test]

@@ -6,6 +6,7 @@ use crate::index::srcinfo;
 use crate::mirror::MirrorRepo;
 use crate::mirror::fetch::RefUpdate;
 use crate::names::PkgBase;
+use crate::units::UnixTime;
 use gix::ObjectId;
 use std::collections::HashMap;
 use tracing::{debug, info, instrument, warn};
@@ -92,6 +93,10 @@ fn parse_branch(mirror: &MirrorRepo, branch: &str, oid: ObjectId) -> Result<Inde
     let mut entry = srcinfo::parse(text)?;
     entry.commit_oid = oid_bytes(oid);
     entry.srcinfo_blob_oid = oid_bytes(blob_oid);
+    // Same stamp as the full build's `parse_branch` — an omission here left
+    // incrementally-updated entries at the `0` sentinel, so a freshly-pushed
+    // package sorted *oldest* in the picker until the next full rebuild.
+    entry.commit_time = UnixTime::new(commit.time().map(|t| t.seconds).unwrap_or_default());
     Ok(entry)
 }
 

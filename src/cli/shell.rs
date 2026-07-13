@@ -49,7 +49,7 @@ use rustyline::history::DefaultHistory;
 use rustyline::{ColorMode as RlColorMode, Config as RlConfig, Editor};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 use tracing::{debug, info, instrument};
 
 pub mod cart;
@@ -1418,6 +1418,10 @@ impl ShellEnv for RealEnv<'_> {
         // extra/cef, not the same-named AUR pkgbase). Targets are handled in
         // the order given so multi-target output matches pacman's.
         let mut alpm = None;
+        // Lazy like `alpm`: opened at the first AUR target, reused for the
+        // rest of the command (mirror + localdb handles behind the AUR
+        // block's maintainer / first-submitted / installed-size fields).
+        let mut aur_sources = None;
         let mut missing: Vec<&PkgTarget> = Vec::new();
         for t in targets {
             if self.caches.sync.contains_key(t.bare()) {
@@ -1434,7 +1438,12 @@ impl ShellEnv for RealEnv<'_> {
                 // `pacman -Sy` ran since) — fall through to the AUR lookup.
             }
             if let Some(session) = &self.session
-                && index::print_aur_info(session.index(), session.secondary(), t)
+                && index::print_aur_info(
+                    session.index(),
+                    session.secondary(),
+                    t,
+                    aur_sources.get_or_insert_with(index::info::InfoSources::open),
+                )
             {
                 continue;
             }
@@ -2077,18 +2086,14 @@ fn row_versions(
 
 /// The AUR pkgbase's "last modified" age (its branch-tip commit time vs `now`),
 /// for the table's age column. `None` for repo rows, when there's no matching
-/// index entry, or when the commit time is unrecorded (`0` in
-/// pre-`commit_time_unix` archives).
+/// index entry, or when the commit time is unrecorded (the
+/// [`crate::units::UnixTime`] sentinel in archives predating the field).
 fn aur_age(it: &CartItem, session: &UpgradeSession, now: SystemTime) -> Option<Duration> {
     if it.source != Source::Aur {
         return None;
     }
     let entry = session.secondary().lookup(session.index(), it.spec())?;
-    let secs = u64::try_from(entry.commit_time_unix)
-        .ok()
-        .filter(|&s| s > 0)?;
-    let modified = UNIX_EPOCH + Duration::from_secs(secs);
-    now.duration_since(modified).ok()
+    now.duration_since(entry.commit_time.system_time()?).ok()
 }
 
 /// The graceful-degradation rendering for `show` when the resolve behind the

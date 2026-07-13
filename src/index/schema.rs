@@ -1,6 +1,7 @@
 //! On-disk index schema. Persisted via `rkyv 0.8` zero-copy archive.
 
-use crate::names::{OptDep, PkgBase, PkgName, PkgTarget};
+use crate::names::{Arch, OptDep, PkgBase, PkgName, PkgTarget, Url};
+use crate::units::UnixTime;
 use crate::version::Version;
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -51,6 +52,11 @@ pub struct IndexEntry {
     /// Use [`IndexEntry::display_desc`] for the headline shown in the picker
     /// and `-Ss`, which falls back to the per-pkgname value.
     pub pkgdesc: Option<String>,
+    /// Upstream homepage (`url` field). Pkgbase-level; when only pkgname
+    /// sections declare one, the first such value is kept (see
+    /// [`crate::index::srcinfo`]) — the `-Si` block doesn't attribute URLs
+    /// per split member.
+    pub url: Option<Url>,
     /// Runtime dependencies — dep-specs (possibly version-suffixed, e.g.
     /// `glibc>=2.38`), so typed [`PkgTarget`] like `provides`/`conflicts`.
     pub depends: Vec<PkgTarget>,
@@ -72,17 +78,17 @@ pub struct IndexEntry {
     /// `replaces` declarations.
     pub replaces: Vec<PkgTarget>,
     /// Supported `arch` list.
-    pub arch: Vec<String>,
+    pub arch: Vec<Arch>,
     /// Commit OID of the branch tip that produced this entry.
     pub commit_oid: [u8; 20],
     /// Blob OID of the `.SRCINFO` file inside that commit's tree.
     pub srcinfo_blob_oid: [u8; 20],
-    /// Committer timestamp (seconds since the Unix epoch) of the branch tip
-    /// that produced this entry. Drives the "freshest first" ordering of the
-    /// `aurox <term>` picker — recently-pushed AUR packages float to the top.
-    /// `0` for entries built before this field existed or whose commit time
-    /// couldn't be read.
-    pub commit_time_unix: i64,
+    /// Committer timestamp of the branch tip that produced this entry.
+    /// Drives the "freshest first" ordering of the `aurox <term>` picker —
+    /// recently-pushed AUR packages float to the top — and the `-Si` block's
+    /// "Last Updated". [`UnixTime`]'s `0` sentinel for entries built before
+    /// this field existed or whose commit time couldn't be read.
+    pub commit_time: UnixTime,
 }
 
 /// Top-level archive: header metadata + entries sorted by `pkgbase`.
@@ -172,8 +178,10 @@ impl IndexFile {
     /// bytes match, and a new field shifts the layout, so loading an older
     /// file with newer types would silently mis-shape the deserialized
     /// struct without the version gate. Older archives must be rebuilt via
-    /// `aurox -Sy`.
-    pub const FORMAT_VERSION: u32 = 7;
+    /// `aurox -Sy`. **7 → 8** when [`IndexEntry::url`] was added (the `-Si`
+    /// block's URL field), `arch` switched `Vec<String>` → `Vec<Arch>`, and
+    /// `commit_time_unix: i64` became the typed [`UnixTime`] `commit_time`.
+    pub const FORMAT_VERSION: u32 = 8;
 
     /// Empty in-memory index. Used when no on-disk file exists yet.
     pub const fn empty() -> Self {

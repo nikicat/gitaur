@@ -7,6 +7,7 @@ use crate::index::schema::{IndexEntry, IndexFile};
 use crate::index::srcinfo;
 use crate::mirror::MirrorRepo;
 use crate::ui;
+use crate::units::UnixTime;
 use gix::ObjectId;
 use rayon::prelude::*;
 use std::sync::Mutex;
@@ -152,7 +153,7 @@ fn parse_branch(repo: &gix::Repository, branch: &str, oid: ObjectId) -> Result<I
     // Committer time of the branch tip — what `aurox <term>` sorts the AUR
     // hits on. A branch whose commit time can't be decoded keeps the `0`
     // default (sorts oldest), rather than failing the whole branch parse.
-    entry.commit_time_unix = commit.time().map(|t| t.seconds).unwrap_or_default();
+    entry.commit_time = UnixTime::new(commit.time().map(|t| t.seconds).unwrap_or_default());
     Ok(entry)
 }
 

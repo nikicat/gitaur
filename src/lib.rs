@@ -19,6 +19,7 @@ pub mod rotate;
 pub mod runopts;
 pub mod trace;
 pub mod ui;
+pub mod units;
 pub mod version;
 
 #[doc(hidden)]

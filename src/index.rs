@@ -6,7 +6,7 @@
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::mirror;
-use crate::names::{PkgTarget, SearchTerm};
+use crate::names::SearchTerm;
 use crate::paths;
 use crate::runopts;
 use crate::ui;
@@ -15,11 +15,14 @@ use std::path::Path;
 use tracing::{debug, info, instrument};
 
 pub mod build;
+pub mod info;
 pub mod schema;
 pub mod secondary;
 pub mod srcinfo;
 pub mod update;
 
+pub use info::cmd_info;
+pub(crate) use info::print_aur_info;
 pub use schema::{IndexEntry, IndexFile};
 
 /// Load the on-disk index. Returns an empty index if the file is missing.
@@ -139,89 +142,6 @@ fn write_search_result<W: std::io::Write>(out: &mut W, entry: &IndexEntry) -> st
         writeln!(out, "    {desc}")?;
     }
     Ok(())
-}
-
-/// `-Si` info for one or more targets (AUR-only by design — repo packages are
-/// `pacman -Si`'s job on this path; the interactive shell merges the two).
-pub fn cmd_info(cfg: &Config, targets: &[PkgTarget]) -> Result<u8> {
-    let idx = load_or_resync(cfg, &paths::index_path())?;
-    let by = secondary::Secondary::build(&idx);
-    let missing: Vec<&PkgTarget> = targets
-        .iter()
-        .filter(|t| !print_aur_info(&idx, &by, t))
-        .collect();
-    if !missing.is_empty() {
-        ui::warn(&format!(
-            "not in AUR: {}",
-            missing
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    // Pacman-style exit code: non-zero when a requested target wasn't in the AUR.
-    Ok(u8::from(!missing.is_empty()))
-}
-
-/// Look up one target (pkgname / provides / pkgbase, via [`secondary`]) against
-/// an already-loaded index and print its `-Si`-style block. `false` ⇒ not in
-/// the AUR — the caller decides how to report the miss ([`cmd_info`] warns
-/// "not in AUR"; the shell first tries the sync repos and words it
-/// accordingly). Shared so both surfaces resolve a name identically.
-pub(crate) fn print_aur_info(
-    idx: &IndexFile,
-    by: &secondary::Secondary,
-    target: &PkgTarget,
-) -> bool {
-    match by.lookup(idx, target.as_str()) {
-        Some(entry) => {
-            print_info(entry);
-            true
-        }
-        None => false,
-    }
-}
-
-fn print_info(e: &IndexEntry) {
-    println!("Repository      : aur");
-    println!("Name            : {}", e.pkgbase);
-    // Show the split-pkg list whenever the entry actually has more than one
-    // pkgname (or the single pkgname differs from pkgbase). Cheap join over
-    // names only — provides aren't part of the `-Si` summary.
-    let trivial = e.pkgnames.len() == 1 && e.pkgbase.matches_pkgname(&e.pkgnames[0].name);
-    if !e.pkgnames.is_empty() && !trivial {
-        // Render via `Display` directly — no Vec<&str> staging area. Avoids
-        // routing each pkgname through `as_str()` just to feed `join(" ")`.
-        print!("Split pkgs      :");
-        for p in &e.pkgnames {
-            print!(" {}", p.name);
-        }
-        println!();
-    }
-    println!(
-        "Version         : {}",
-        version_string(e.epoch.as_ref(), &e.pkgver, &e.pkgrel)
-    );
-    if let Some(d) = e.display_desc() {
-        println!("Description     : {d}");
-    }
-    if !e.depends.is_empty() {
-        let deps: Vec<String> = e.depends.iter().map(ToString::to_string).collect();
-        println!("Depends On      : {}", deps.join(" "));
-    }
-    if !e.makedepends.is_empty() {
-        let deps: Vec<String> = e.makedepends.iter().map(ToString::to_string).collect();
-        println!("Make Deps       : {}", deps.join(" "));
-    }
-    // Union of pkgbase-level and pkgname-scoped provides — `-Si` users
-    // want to see every virtual name the pkgbase makes available, not the
-    // attribution.
-    let provides: Vec<String> = e.all_provides().map(ToString::to_string).collect();
-    if !provides.is_empty() {
-        println!("Provides        : {}", provides.join(" "));
-    }
-    println!();
 }
 
 fn version_string(epoch: Option<&String>, ver: &str, rel: &str) -> String {
