@@ -458,8 +458,9 @@ sync-repo adds (`-S name`) with local-file adds (`-U file`).
 (`trans_add_pkg`, for syncdb packages *and* `pkg_load`'ed `.pkg.tar` files) and
 removals (`trans_remove_pkg`) before one `trans_prepare` + `trans_commit`. This
 is precisely the API aurox **already drives read-only** in
-`pacman::invoke::preflight_dash_u_inner` (`trans_init(NO_LOCK)` → `pkg_load` →
-`trans_add_pkg` → `trans_prepare` → `trans_release`). The only missing pieces for
+`pacman::preflight` (`trans_init(NO_LOCK)` → `pkg_load`/`sync_sysupgrade` →
+`trans_add_pkg` → `trans_prepare` → `trans_release` — the `-U` and `-Su`
+simulations behind the sysupgrade gate). The only missing pieces for
 a real commit: take the DB lock instead of `NO_LOCK`, add the `trans_remove_pkg`
 calls, `trans_commit` — and do it **with privilege**. This is also the direction
 memory `feedback_native_libalpm_over_pacman` points ("`alpm` crate for DB
@@ -733,6 +734,7 @@ Mirrors the existing two-tier philosophy (`docs/TESTING.md`) and the loop's seam
 | `src/ui/change_set.rs` | `change_set_table`, `batch_size_total`/`batch_time_total` | grows into the **one** unified transaction renderer (phase 5a); totals feed `apply`'s summary line |
 | `src/ui/tables.rs` | `render_row`, `col_widths`, `sort_for_display` | shared verdiff version-rendering primitive both tables call; unchanged for the `-Qu`/`-Syu` flag path |
 | `src/ui/tables.rs` | `select_upgrades` | **flag path only** — the shell never calls it |
-| `src/pacman/invoke.rs` | `preflight_dash_u_inner`, `exec_pacman`, `confirm_escalation` | native-txn template for `__commit-txn`; "will remove" preview |
+| `src/pacman/preflight.rs` | `files`, `sysupgrade`, `Issue` | read-only trans_prepare simulations — native-txn template for `__commit-txn`; "will remove" preview; the sysupgrade gate + preview warnings in `apply`/`show` |
+| `src/pacman/invoke.rs` | `exec_pacman`, `confirm_escalation`, `preflight_pacman` | pacman spawn + the log-only preflight on `-U`/`-S…u` argv |
 | `src/error.rs` | `Interrupted`, `UserAbort` | apply bail-to-prompt + decline |
 | `src/config.rs` | `review_default` | default AUR approval (→ `aur_approval`) |

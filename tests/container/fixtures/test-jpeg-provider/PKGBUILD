@@ -1,0 +1,15 @@
+# Official-repo fixture for the sysupgrade-preflight e2e (extended/11) — the
+# libjpeg-turbo shape. Baked into the local sync DB at 2.0 *without* any
+# `provides`; the test seeds a locally-built 1.0 that adds
+# `provides=('test-libjpeg')`, so upgrading to 2.0 breaks whatever depends on
+# that virtual (the foreign `test-breaks-dep` seed).
+pkgname=test-jpeg-provider
+pkgver=2.0
+pkgrel=1
+pkgdesc='aurox test fixture: a repo lib whose 2.0 drops the test-libjpeg provides'
+arch=('any')
+license=('MIT')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

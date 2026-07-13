@@ -1,0 +1,18 @@
+# AUR fixture for the sysupgrade-preflight e2e (extended/11): the current
+# PKGBUILD of the foreign-installed `test-breaks-dep` (seeded from
+# `test-breaks-dep-old/`). Its deps moved on from the `test-libjpeg` virtual
+# to the concrete provider package, so a rebuild resolves the dependency
+# breakage the repo upgrade would otherwise hit — the remediation the
+# preflight's `add test-breaks-dep` hint (and the staged-rebuild blocker
+# ordering) is about.
+pkgname=test-breaks-dep
+pkgver=2.0
+pkgrel=1
+pkgdesc='aurox test fixture: rebuild that drops the broken virtual dep'
+arch=('any')
+license=('MIT')
+depends=('test-jpeg-provider')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker-2.0"
+}

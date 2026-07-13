@@ -75,6 +75,7 @@ src/
 ├── pacman/
 │   ├── alpm_db.rs      open Alpm + PacmanIndex snapshot (sync DBs, size maps)
 │   ├── invoke.rs       spawn `pacman` (with sudo escalation)
+│   ├── preflight.rs    read-only trans_prepare simulations (`-U` files, `-Su` sysupgrade)
 │   ├── sync.rs         rootless refresh of the official sync DBs (checkupdates-style)
 │   └── verdiff.rs      structural parse + display-diff of Arch versions
 │

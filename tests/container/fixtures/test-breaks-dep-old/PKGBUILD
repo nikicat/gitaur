@@ -1,0 +1,21 @@
+# Foreign artifact for the sysupgrade-preflight e2e (extended/11) — the
+# installed ioquake3-git shape. Staged (not repo-registered, not mirrored) so
+# the test can `pacman -U` it after seeding test-jpeg-provider 1.0 (which
+# provides `test-libjpeg`). Once installed, upgrading test-jpeg-provider to
+# 2.0 breaks this package's dependency — the exact "installing X breaks
+# dependency 'd' required by Y" pacman refusal the preflight must catch.
+#
+# The dir is named `-old` because the *current* AUR fixture for the same
+# pkgname lives in `test-breaks-dep/` (its rebuild no longer needs the
+# virtual); setup-fixtures keys destinations by directory.
+pkgname=test-breaks-dep
+pkgver=1.0
+pkgrel=1
+pkgdesc='aurox test fixture: foreign install whose dep a repo upgrade breaks'
+arch=('any')
+license=('MIT')
+depends=('test-libjpeg')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker-1.0"
+}

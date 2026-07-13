@@ -16,16 +16,28 @@
 
 use pty_harness::Pty;
 
+/// Whitespace-insensitive containment: the version columns pad to the widest
+/// staged row and long lines wrap on the 100-col vt100 grid, so a literal
+/// `1.0-1 → 2.0-1` match breaks whenever the container image carries real
+/// pending upgrades with long version strings. Compacting both sides makes
+/// the match immune to padding and wrap position.
+fn has(screen: &str, needle: &str) -> bool {
+    let compact = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace()).collect() };
+    compact(screen).contains(&compact(needle))
+}
+
 fn main() {
     let mut pty = Pty::spawn_aurox();
     pty.expect("shell banner", |s| s.contains("aurox shell"));
 
-    // Refresh + seed the pending upgrades; the repo row auto-approves and shows
-    // its old → new transition.
-    pty.send(b"upgrade\r");
-    pty.expect("repo upgrade staged", |s| {
-        s.contains("loop-repo") && s.contains("1.0-1 → 2.0-1")
-    });
+    // Refresh + seed the pending upgrade — only the fixture row. A bare
+    // `upgrade` would also stage whatever real core/extra upgrades the image
+    // happens to carry, turning apply into a multi-hundred-MiB real download;
+    // the unstaged candidates land in `--ignore` instead, keeping the
+    // `pacman -Syu` local to the fixture repo. The repo row auto-approves and
+    // shows its old → new transition.
+    pty.send(b"upgrade loop-repo\r");
+    pty.expect("repo upgrade staged", |s| has(s, "loop-repo 1.0-1 → 2.0-1"));
 
     // Apply gates on the one-line cost summary + a transaction confirm (phase
     // 5a folded the old apply-time change-set table into `show`/`upgrade`, so the
