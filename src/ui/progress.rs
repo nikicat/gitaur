@@ -47,9 +47,34 @@ pub fn promote_byte_bar(pb: &ProgressBar, total: u64) {
     }
 }
 
+/// Park a streaming byte bar (`bar_bytes_streaming`) in its idle form,
+/// replacing the rate field with a static `(idle)` tag.
+///
+/// Once the wire goes quiet the windowed rate no longer measures anything —
+/// indicatif keeps re-weighting the estimate by elapsed time, so the shown
+/// speed *decays* toward zero over ~15 s, which reads as the transfer
+/// regressing. Callers that can detect the lull should park the bar here;
+/// [`resume_byte_bar`] restores the live style.
+pub(super) fn idle_byte_bar(pb: &ProgressBar) {
+    pb.set_style(bytes_idle_style());
+}
+
+/// Undo [`idle_byte_bar`]: restore the live streaming style (rate visible).
+pub(super) fn resume_byte_bar(pb: &ProgressBar) {
+    pb.set_style(bytes_pending_style());
+}
+
 fn bytes_pending_style() -> ProgressStyle {
     ProgressStyle::with_template(
         "{prefix:>14.cyan.bold} {spinner} [{elapsed:>4}] {bytes:>10} ({binary_bytes_per_sec})",
+    )
+    .unwrap()
+    .tick_chars(SPIN_TICKS)
+}
+
+fn bytes_idle_style() -> ProgressStyle {
+    ProgressStyle::with_template(
+        "{prefix:>14.cyan.bold} {spinner} [{elapsed:>4}] {bytes:>10} (idle)",
     )
     .unwrap()
     .tick_chars(SPIN_TICKS)

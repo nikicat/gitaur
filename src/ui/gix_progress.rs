@@ -9,7 +9,8 @@
 
 use super::dim;
 use super::progress::{
-    bar_bytes_streaming, bar_count, bar_sideband, promote_byte_bar, promote_count_bar, tick,
+    bar_bytes_streaming, bar_count, bar_sideband, idle_byte_bar, promote_byte_bar,
+    promote_count_bar, resume_byte_bar, tick,
 };
 use crate::context;
 
@@ -20,7 +21,7 @@ use indicatif::{MultiProgress, ProgressBar};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Adapter implementing [`gix::Progress`] / [`gix::NestedProgress`] on top of
 /// our indicatif bars.
@@ -71,9 +72,63 @@ struct NetMeter {
     handle: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// How long the wire must stay byte-for-byte silent before the `network` row
+/// is parked in its idle style. Long enough that an ordinary TCP stall
+/// mid-stream doesn't flap the style; short compared to the minutes-long
+/// silent stretches it exists for (server-side packing, post-pack local work).
+const NET_IDLE_AFTER: Duration = Duration::from_secs(2);
+
+/// Whether bytes are currently flowing on the wire, as judged by [`IdleTracker`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WireState {
+    Active,
+    Idle,
+}
+
+/// Wire-silence detector for the [`NetMeter`] pump.
+///
+/// indicatif's rate field keeps re-weighting its estimate by elapsed time, so
+/// when bytes stop flowing the shown speed doesn't drop to zero — it *decays*
+/// there over ~15 s, which reads as the download regressing. The tracker
+/// watches the raw counter instead: [`NET_IDLE_AFTER`] without a new byte
+/// flips it to [`WireState::Idle`] (the pump swaps in the rate-less idle
+/// style) and the first new byte flips it straight back.
+struct IdleTracker {
+    last_pos: u64,
+    last_change: Instant,
+    idle: bool,
+}
+
+impl IdleTracker {
+    const fn new(now: Instant) -> Self {
+        Self {
+            last_pos: 0,
+            last_change: now,
+            idle: false,
+        }
+    }
+
+    /// Digest one pump sample; returns the new state when it flipped.
+    fn observe(&mut self, pos: u64, now: Instant) -> Option<WireState> {
+        if pos != self.last_pos {
+            self.last_pos = pos;
+            self.last_change = now;
+            if self.idle {
+                self.idle = false;
+                return Some(WireState::Active);
+            }
+        } else if !self.idle && now.duration_since(self.last_change) >= NET_IDLE_AFTER {
+            self.idle = true;
+            return Some(WireState::Idle);
+        }
+        None
+    }
+}
+
 impl NetMeter {
     /// Add the `network` row to `multi` and spawn the pump that mirrors
-    /// `counter` into it every ~120 ms.
+    /// `counter` into it every ~120 ms, parking the row in its idle style
+    /// whenever the wire goes quiet (see [`IdleTracker`]).
     fn spawn(multi: &MultiProgress) -> Self {
         let counter = Arc::new(AtomicU64::new(0));
         let bar = multi.add(bar_bytes_streaming("network"));
@@ -84,8 +139,15 @@ impl NetMeter {
             let bar = bar.clone();
             let stop = Arc::clone(&stop);
             move || {
+                let mut wire = IdleTracker::new(Instant::now());
                 while !stop.load(Ordering::Relaxed) {
-                    bar.set_position(counter.load(Ordering::Relaxed));
+                    let pos = counter.load(Ordering::Relaxed);
+                    match wire.observe(pos, Instant::now()) {
+                        Some(WireState::Idle) => idle_byte_bar(&bar),
+                        Some(WireState::Active) => resume_byte_bar(&bar),
+                        None => {}
+                    }
+                    bar.set_position(pos);
                     std::thread::sleep(Duration::from_millis(120));
                 }
             }
@@ -442,6 +504,11 @@ impl GixProgressTrait for GixProgress {
                 target: "gix_progress",
                 "post-pack phase begins: updating refs and writing pack manifest (silent in gix)"
             );
+            // The wire is done for good once the pack is fully read — what
+            // remains (ref updates, pack manifest) is local. Drop the
+            // `network` row now rather than leaving it parked on `(idle)`
+            // for the ~15 s – 2 min tail.
+            self.shared.net.stop_and_clear();
         }
     }
 }
@@ -503,6 +570,63 @@ mod tests {
             "pump handle should be taken+joined"
         );
         meter.stop_and_clear(); // second call must not panic / double-join
+    }
+
+    /// The rate field lies once the wire goes quiet (indicatif decays it to
+    /// zero instead of dropping it), so the tracker must flip to `Idle` after
+    /// the silence threshold and back to `Active` on the first new byte —
+    /// firing each transition exactly once.
+    #[test]
+    fn idle_tracker_flips_on_silence_and_back_on_bytes() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut wire = IdleTracker::new(t0);
+        assert_eq!(
+            wire.observe(100, ms(120)),
+            None,
+            "first bytes: already active"
+        );
+        assert_eq!(wire.observe(100, ms(1_000)), None, "quiet, under threshold");
+        assert_eq!(
+            wire.observe(100, ms(120) + NET_IDLE_AFTER),
+            Some(WireState::Idle),
+            "threshold reached"
+        );
+        assert_eq!(wire.observe(100, ms(60_000)), None, "idle fires only once");
+        assert_eq!(
+            wire.observe(101, ms(61_000)),
+            Some(WireState::Active),
+            "bytes resumed"
+        );
+        assert_eq!(
+            wire.observe(102, ms(61_100)),
+            None,
+            "active fires only once"
+        );
+    }
+
+    /// Before the first byte (DNS/TLS/handshake) the counter sits at zero;
+    /// that's silence too, and the row should park rather than show a rate.
+    #[test]
+    fn idle_tracker_parks_before_first_byte() {
+        let t0 = Instant::now();
+        let mut wire = IdleTracker::new(t0);
+        assert_eq!(wire.observe(0, t0 + NET_IDLE_AFTER), Some(WireState::Idle));
+    }
+
+    /// gix's "read pack … done" message is the last wire event of a fetch —
+    /// everything after it is local. The network row must come down right
+    /// there, not linger (with a decaying rate) through the ref-update tail.
+    #[test]
+    fn read_pack_done_clears_the_network_row() {
+        let mut root = GixProgress::new("test");
+        let child = root.add_child("read pack");
+        child.message(MessageLevel::Info, "done. 2.0GiB received".into());
+        assert!(
+            root.shared.net.handle.lock().unwrap().is_none(),
+            "pump should be stopped once the pack is fully read"
+        );
+        root.finish();
     }
 
     #[test]
