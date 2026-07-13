@@ -7,7 +7,7 @@
 
 use crate::error::{Error, Result};
 use crate::index::schema::{IndexEntry, Pkgname};
-use crate::names::PkgTarget;
+use crate::names::{OptDep, PkgTarget};
 use tracing::trace;
 
 /// Array-valued keys that may carry an arch suffix (`<key>_<arch>`).
@@ -77,20 +77,21 @@ pub fn parse(text: &str) -> Result<IndexEntry> {
 
             "arch" => e.arch.push(v.into()),
             // `provides` gets attribution: pkgbase-level vs pkgname-scoped.
-            // Every other array key stays pkgbase-flat — we don't (yet) need
-            // pkgname-level depends/conflicts/replaces for resolution.
+            // Every other dep array stays pkgbase-flat — per-pkgname sections
+            // fold into the pkgbase vec, since nothing needs pkgname-level
+            // attribution for them (yet).
             "provides" => match current_pkgname {
                 None => e.provides.push(PkgTarget::new(v)),
                 Some(i) => e.pkgnames[i].provides.push(PkgTarget::new(v)),
             },
-            // `conflicts` / `replaces` are typed dep-specs (versioned-name);
-            // routed separately from depends/makedepends/checkdepends/optdepends
-            // which remain raw `String` until / unless they get typed too.
+            // The dep arrays are typed dep-specs (versioned-name); `optdepends`
+            // is the composite dep-spec + `: reason` pair.
             "conflicts" => e.conflicts.push(PkgTarget::new(v)),
             "replaces" => e.replaces.push(PkgTarget::new(v)),
-            list_key if ARRAY_KEYS.contains(&list_key) => {
-                list_field_mut(&mut e, list_key).push(v.into());
-            }
+            "depends" => e.depends.push(PkgTarget::new(v)),
+            "makedepends" => e.makedepends.push(PkgTarget::new(v)),
+            "checkdepends" => e.checkdepends.push(PkgTarget::new(v)),
+            "optdepends" => e.optdepends.push(OptDep::from(v)),
 
             _ => trace!(key = k, "ignored .SRCINFO key"),
         }
@@ -117,14 +118,14 @@ pub fn parse(text: &str) -> Result<IndexEntry> {
         &mut e.depends,
         &mut e.makedepends,
         &mut e.checkdepends,
-        &mut e.optdepends,
-        &mut e.arch,
+        &mut e.provides,
+        &mut e.conflicts,
+        &mut e.replaces,
     ] {
         dedup(v);
     }
-    dedup(&mut e.provides);
-    dedup(&mut e.conflicts);
-    dedup(&mut e.replaces);
+    dedup(&mut e.optdepends);
+    dedup(&mut e.arch);
     // Dedupe per-pkgname provides; also collapse duplicate pkgname entries
     // (rare malformed .SRCINFOs ship the same `pkgname = X` twice).
     for p in &mut e.pkgnames {
@@ -148,20 +149,6 @@ fn canonical(k: &str) -> &str {
         }
     }
     k
-}
-
-/// Lookup the `&mut Vec<String>` for the still-raw array-valued keys.
-/// `provides` / `conflicts` / `replaces` are typed `Vec<PkgTarget>` and
-/// handled in the match above (they route by section / type, not by this
-/// String table), so they are intentionally absent here.
-fn list_field_mut<'a>(e: &'a mut IndexEntry, key: &str) -> &'a mut Vec<String> {
-    match key {
-        "depends" => &mut e.depends,
-        "makedepends" => &mut e.makedepends,
-        "checkdepends" => &mut e.checkdepends,
-        "optdepends" => &mut e.optdepends,
-        _ => unreachable!("ARRAY_KEYS membership and provides routing checked before call"),
-    }
 }
 
 fn dedup<T: Eq + std::hash::Hash + Clone>(v: &mut Vec<T>) {
@@ -238,8 +225,8 @@ pkgname = bisq-daemon
         assert_eq!(e.pkgver, "17");
         assert_eq!(e.pkgrel, "2");
         assert_eq!(names(&e), vec!["cower"]);
-        assert!(e.depends.contains(&"pacman".to_owned()));
-        assert!(e.depends.contains(&"curl".to_owned()));
+        assert!(e.depends.contains(&PkgTarget::new("pacman")));
+        assert!(e.depends.contains(&PkgTarget::new("curl")));
         // Pkgbase-level provides land on the entry, not on the pkgname.
         assert!(e.provides.contains(&PkgTarget::new("cower")));
         assert!(e.pkgnames[0].provides.is_empty());
@@ -260,8 +247,8 @@ pkgname = bisq-daemon
             ]
         );
         // Pkgbase-level + pkgname-level depends are both collected.
-        assert!(e.depends.contains(&"mingw-w64-crt".to_owned()));
-        assert!(e.depends.contains(&"mingw-w64-winpthreads".to_owned()));
+        assert!(e.depends.contains(&PkgTarget::new("mingw-w64-crt")));
+        assert!(e.depends.contains(&PkgTarget::new("mingw-w64-winpthreads")));
         // `pkgdesc` declared inside a `pkgname` section lands on that pkgname,
         // not on the pkgbase (which has no desc here).
         assert!(e.pkgdesc.is_none());
@@ -311,7 +298,7 @@ pkgname = bisq-daemon
         // arch-folding bypassed the per-section routing.
         let s = "pkgbase = foo\npkgver = 1\npkgrel = 1\npkgname = foo\ndepends_x86_64 = libfoo\nprovides_aarch64 = bar\n";
         let e = parse(s).unwrap();
-        assert!(e.depends.contains(&"libfoo".to_owned()));
+        assert!(e.depends.contains(&PkgTarget::new("libfoo")));
         assert_eq!(e.pkgnames[0].provides, vec![PkgTarget::new("bar")]);
         assert!(e.provides.is_empty());
     }

@@ -338,6 +338,82 @@ impl fmt::Display for PkgDesc {
     }
 }
 
+/// A machine architecture label (`x86_64`, `aarch64`, `any`) as pacman
+/// declares it in a package's `arch` field.
+///
+/// Not a package name, so like [`PkgDesc`] it deliberately skips
+/// [`impl_name_wrapper`]: an arch never keys a map, lands in a path, or equals
+/// a CLI token here. It exists so diagnostics carry a typed field instead of a
+/// bare `String` that could be cross-passed with a name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Arch(String);
+
+impl Arch {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// Borrow the wrapped label as a string slice — the sanctioned escape
+    /// hatch for `&str`-typed APIs, kept explicit for the same reason as the
+    /// name wrappers' `as_str`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Arch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(&self.0)
+    }
+}
+
+/// One `optdepends = <dep>[: <reason>]` line: the dep-spec plus the freeform
+/// human reason the dependency is optional.
+///
+/// A composite, not a name wrapper: the dep half is a real [`PkgTarget`]
+/// (resolvable like any other dep-spec) while the reason is display-only
+/// prose. Parsing happens once at construction — libalpm's own convention,
+/// splitting at the first `": "` — so no consumer re-splits strings.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone, Hash, PartialEq, Eq)]
+pub struct OptDep {
+    dep: PkgTarget,
+    reason: Option<String>,
+}
+
+impl OptDep {
+    /// The dep-spec half — the thing that could be resolved/installed.
+    pub const fn dep(&self) -> &PkgTarget {
+        &self.dep
+    }
+}
+
+impl From<&str> for OptDep {
+    fn from(line: &str) -> Self {
+        // Split at the first `": "` like libalpm does — a bare `:` can
+        // legitimately appear inside the dep half as an epoch (`foo>=1:2.0`),
+        // so the colon alone is not the separator.
+        match line.split_once(": ") {
+            Some((dep, reason)) => Self {
+                dep: PkgTarget::new(dep.trim()),
+                reason: Some(reason.trim().to_owned()),
+            },
+            None => Self {
+                dep: PkgTarget::new(line.trim().trim_end_matches(':')),
+                reason: None,
+            },
+        }
+    }
+}
+
+impl fmt::Display for OptDep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.reason {
+            Some(r) => write!(f, "{}: {r}", self.dep),
+            None => self.dep.fmt(f),
+        }
+    }
+}
+
 /// Sort/display rank of a [`RepoName`]'s column position.
 ///
 /// Variant declaration order *is* the sort order (derived `Ord` compares by
@@ -508,6 +584,27 @@ impl PkgBase {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// An optdepends line splits at the first `": "` — not at a bare `:`,
+    /// which can appear inside the dep half as an epoch constraint. `Display`
+    /// round-trips the line.
+    #[test]
+    fn optdep_parses_dep_and_reason() {
+        let od = OptDep::from("cups: printing support");
+        assert_eq!(od.dep(), &PkgTarget::new("cups"));
+        assert_eq!(od.to_string(), "cups: printing support");
+
+        // Epoch colon inside the dep-spec is not the separator.
+        let epoch = OptDep::from("libfoo>=1:2.0: frobnication");
+        assert_eq!(epoch.dep(), &PkgTarget::new("libfoo>=1:2.0"));
+        assert_eq!(epoch.dep().bare(), "libfoo");
+
+        // No reason at all (with or without a stray trailing colon).
+        let bare = OptDep::from("cups");
+        assert_eq!(bare.dep(), &PkgTarget::new("cups"));
+        assert_eq!(bare.to_string(), "cups");
+        assert_eq!(OptDep::from("cups:").dep(), &PkgTarget::new("cups"));
+    }
 
     /// `Borrow<str>` is the load-bearing impl for HashMap-key
     /// interoperability — `map.get("foo")` must work on `HashMap<PkgBase, V>`

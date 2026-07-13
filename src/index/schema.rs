@@ -1,6 +1,6 @@
 //! On-disk index schema. Persisted via `rkyv 0.8` zero-copy archive.
 
-use crate::names::{PkgBase, PkgName, PkgTarget};
+use crate::names::{OptDep, PkgBase, PkgName, PkgTarget};
 use crate::version::Version;
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -51,14 +51,16 @@ pub struct IndexEntry {
     /// Use [`IndexEntry::display_desc`] for the headline shown in the picker
     /// and `-Ss`, which falls back to the per-pkgname value.
     pub pkgdesc: Option<String>,
-    /// Runtime dependencies.
-    pub depends: Vec<String>,
-    /// Build-time dependencies.
-    pub makedepends: Vec<String>,
-    /// Test/check dependencies.
-    pub checkdepends: Vec<String>,
-    /// Optional runtime dependencies (with `: reason` suffixes preserved).
-    pub optdepends: Vec<String>,
+    /// Runtime dependencies — dep-specs (possibly version-suffixed, e.g.
+    /// `glibc>=2.38`), so typed [`PkgTarget`] like `provides`/`conflicts`.
+    pub depends: Vec<PkgTarget>,
+    /// Build-time dependencies (dep-specs).
+    pub makedepends: Vec<PkgTarget>,
+    /// Test/check dependencies (dep-specs).
+    pub checkdepends: Vec<PkgTarget>,
+    /// Optional runtime dependencies — each line's dep-spec + `: reason`
+    /// suffix parsed into the composite [`OptDep`] at the `.SRCINFO` boundary.
+    pub optdepends: Vec<OptDep>,
     /// Pkgbase-level `provides` (declared *before* any `pkgname = …` line in
     /// `.SRCINFO` — they apply to every pkgname). Pkgname-scoped provides
     /// live on [`Pkgname::provides`] inside `pkgnames`. Callers that don't
@@ -163,12 +165,15 @@ impl IndexFile {
     /// newtypes. **5 → 6** when `provides` / `conflicts` / `replaces` switched
     /// from `Vec<String>` to `Vec<PkgTarget>` — same bytes, distinct rkyv
     /// archive type, so the version gate forces a rebuild via `aurox -Sy`.
+    /// **6 → 7** when `depends` / `makedepends` / `checkdepends` followed the
+    /// same `Vec<String>` → `Vec<PkgTarget>` migration and `optdepends`
+    /// became `Vec<OptDep>` (dep-spec + `: reason`, parsed at the boundary).
     /// rkyv archives are distinct per Rust type even when the underlying
     /// bytes match, and a new field shifts the layout, so loading an older
     /// file with newer types would silently mis-shape the deserialized
     /// struct without the version gate. Older archives must be rebuilt via
     /// `aurox -Sy`.
-    pub const FORMAT_VERSION: u32 = 6;
+    pub const FORMAT_VERSION: u32 = 7;
 
     /// Empty in-memory index. Used when no on-disk file exists yet.
     pub const fn empty() -> Self {

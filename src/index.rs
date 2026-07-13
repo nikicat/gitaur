@@ -207,10 +207,12 @@ fn print_info(e: &IndexEntry) {
         println!("Description     : {d}");
     }
     if !e.depends.is_empty() {
-        println!("Depends On      : {}", e.depends.join(" "));
+        let deps: Vec<String> = e.depends.iter().map(ToString::to_string).collect();
+        println!("Depends On      : {}", deps.join(" "));
     }
     if !e.makedepends.is_empty() {
-        println!("Make Deps       : {}", e.makedepends.join(" "));
+        let deps: Vec<String> = e.makedepends.iter().map(ToString::to_string).collect();
+        println!("Make Deps       : {}", deps.join(" "));
     }
     // Union of pkgbase-level and pkgname-scoped provides — `-Si` users
     // want to see every virtual name the pkgbase makes available, not the

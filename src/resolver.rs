@@ -308,12 +308,11 @@ fn enqueue_repo_deps(pac: &PacmanIndex, concrete: &PkgName, queue: &mut Vec<(Pkg
 /// Split an AUR entry's dependency arrays into the two dep-reference lists
 /// the BFS needs: `(all, build_time)`. `all` = runtime `depends` + build-time
 /// (`makedepends` + `checkdepends`); `build_time` is that build-time subset
-/// alone. The raw `.SRCINFO` strings widen into [`PkgTarget`] with version
-/// constraints stripped (so the bare name indexes the graph directly), and
-/// empties are dropped.
+/// alone. Version constraints are stripped off the dep-specs (so the bare
+/// name indexes the graph directly), and empties are dropped.
 fn entry_dep_exprs(entry: &IndexEntry) -> (Vec<PkgTarget>, Vec<PkgTarget>) {
-    let widen = |d: &String| {
-        let bare = secondary::strip_version_constraint(d);
+    let widen = |d: &PkgTarget| {
+        let bare = d.bare();
         (!bare.is_empty()).then(|| PkgTarget::from(bare))
     };
     let build_time: Vec<PkgTarget> = entry

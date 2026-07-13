@@ -398,11 +398,7 @@ fn sibling_runtime_deps(entry: &IndexEntry, pkgname: &PkgName) -> Vec<PkgName> {
     entry
         .depends
         .iter()
-        .filter_map(|d| {
-            siblings
-                .get(secondary::strip_version_constraint(d))
-                .cloned()
-        })
+        .filter_map(|d| siblings.get(d.bare()).cloned())
         .collect()
 }
 
