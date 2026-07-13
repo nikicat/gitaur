@@ -29,6 +29,18 @@ impl ByteSize {
     pub const fn new(bytes: u64) -> Self {
         Self(bytes)
     }
+
+    /// The raw byte count, for arithmetic at typed boundaries (e.g. summing
+    /// report rows). Human rendering goes through `Display`, not this.
+    pub const fn bytes(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::iter::Sum for ByteSize {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        Self(iter.map(|b| b.0).sum())
+    }
 }
 
 impl fmt::Display for ByteSize {

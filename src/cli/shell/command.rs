@@ -33,6 +33,7 @@ pub enum Verb {
     Redo,
     Clear,
     Refresh,
+    System,
     Help,
     Quit,
 }
@@ -55,6 +56,7 @@ impl Verb {
         Self::Redo,
         Self::Clear,
         Self::Refresh,
+        Self::System,
         Self::Help,
         Self::Quit,
     ];
@@ -77,9 +79,40 @@ impl Verb {
             Self::Redo => "redo",
             Self::Clear => "clear",
             Self::Refresh => "refresh",
+            Self::System => "system",
             Self::Help => "help",
             Self::Quit => "quit",
         }
+    }
+}
+
+/// `system <action>` — the maintenance sub-verbs.
+///
+/// A deliberate two-word group: `prune` deletes multi-GiB caches, so it hides
+/// behind the `system` prefix where a mistyped single word can't reach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemAction {
+    /// `system show` — disk usage of every state category.
+    Show,
+    /// `system prune` — delete the re-derivable caches.
+    Prune,
+}
+
+impl SystemAction {
+    /// Both actions, in help order — drives completion after `system`.
+    pub const ALL: &'static [Self] = &[Self::Show, Self::Prune];
+
+    /// The word the user types.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Show => "show",
+            Self::Prune => "prune",
+        }
+    }
+
+    /// Match one (already-lowercased) word against the actions.
+    fn parse(word: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|a| a.name() == word)
     }
 }
 
@@ -117,6 +150,9 @@ pub enum Command {
     Clear,
     /// `refresh` — re-fetch the AUR mirror + index.
     Refresh,
+    /// `system <show|prune>` — state disk usage / cache pruning. `None` when
+    /// the action is missing or unrecognized (dispatch prints the usage line).
+    System(Option<SystemAction>),
     /// `help [command]` — command list (optional per-command topic).
     Help(Option<String>),
     /// `quit` / `exit` / Ctrl-D — leave the shell.
@@ -150,6 +186,7 @@ impl Command {
             Self::Redo => Some(Verb::Redo),
             Self::Clear => Some(Verb::Clear),
             Self::Refresh => Some(Verb::Refresh),
+            Self::System(_) => Some(Verb::System),
             Self::Help(_) => Some(Verb::Help),
             Self::Quit => Some(Verb::Quit),
             Self::Empty | Self::Unknown(_) | Self::Syntax(_) => None,
@@ -187,6 +224,10 @@ pub fn parse(line: &str) -> Command {
         "redo" => Command::Redo,
         "clear" => Command::Clear,
         "refresh" => Command::Refresh,
+        "system" => Command::System(
+            args.first()
+                .and_then(|a| SystemAction::parse(&a.to_ascii_lowercase())),
+        ),
         "help" | "?" => Command::Help(args.into_iter().next()),
         "quit" | "exit" | "q" => Command::Quit,
         _ => Command::Unknown(verb.clone()),
@@ -282,6 +323,27 @@ mod tests {
                 "`{name}` doesn't round-trip"
             );
         }
+    }
+
+    #[test]
+    fn system_actions_round_trip_and_are_case_insensitive() {
+        for action in SystemAction::ALL {
+            let line = format!("system {}", action.name());
+            assert_eq!(parse(&line), Command::System(Some(*action)), "`{line}`");
+        }
+        assert_eq!(
+            parse("SYSTEM Prune"),
+            Command::System(Some(SystemAction::Prune))
+        );
+    }
+
+    #[test]
+    fn system_without_or_with_unknown_action_parses_to_none() {
+        // Dispatch turns the `None` into a usage line; the important part is
+        // that neither form is `Unknown` (the verb itself was recognized) and
+        // a typo'd action can never reach `prune`.
+        assert_eq!(parse("system"), Command::System(None));
+        assert_eq!(parse("system wat"), Command::System(None));
     }
 
     #[test]
