@@ -30,6 +30,7 @@ pub use prompts::{confirm, confirm_default_no, select_pkgnames};
 pub use search_table::{InstallState, SearchRow, search_table};
 pub use tables::{Paint, Table, UpgradeSelection, install_table, pkg_list, upgrade_table};
 
+use crate::units::ByteSize;
 use console::{Term, style};
 use std::sync::OnceLock;
 
@@ -180,26 +181,11 @@ pub fn repo(name: impl AsRef<str>) -> console::StyledObject<String> {
 
 /// Format a byte count in IEC binary units (`512 B`, `1.00 KiB`, `3.42 GiB`).
 ///
-/// Two decimals at KiB and above (matching pacman's own `humanize_size`), bare
-/// integer for plain bytes. Used by the upgrade loop's change-set preview to
-/// show per-row sizes and the batch total.
-// The `f64` cast loses precision only above 2^52 bytes (4 PiB); package sizes
-// never approach that, and the result is display-rounded to two decimals
-// regardless — same trade-off as `trace::fmt_duration`.
-#[allow(clippy::cast_precision_loss)]
+/// Thin wrapper over [`ByteSize`]'s `Display` (where the formatting rules
+/// are documented), for call sites that carry a raw `u64` from an untyped
+/// boundary. Code holding a [`ByteSize`] should just display it.
 pub fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{size:.2} {}", UNITS[unit])
-    }
+    ByteSize::new(bytes).to_string()
 }
 
 /// Format a build [`Duration`](std::time::Duration) as the change-set preview
@@ -263,17 +249,11 @@ mod tests {
         assert_eq!(age(3 * 86_400 + 5 * 3_600), "3d");
     }
 
-    /// Unit boundaries and rounding: bare bytes stay integer, the 1024 cliff
-    /// rolls over to the next unit, and KiB+ carry two decimals (pacman parity).
     #[test]
-    fn human_bytes_picks_unit_and_precision() {
-        assert_eq!(human_bytes(0), "0 B");
-        assert_eq!(human_bytes(512), "512 B");
-        assert_eq!(human_bytes(1023), "1023 B");
-        assert_eq!(human_bytes(1024), "1.00 KiB");
+    fn human_bytes_delegates_to_byte_size() {
+        // The unit/precision matrix is pinned in `units::tests`; this only
+        // guards the wrapper's plumbing.
         assert_eq!(human_bytes(1536), "1.50 KiB");
-        assert_eq!(human_bytes(12 * 1024 * 1024), "12.00 MiB");
-        assert_eq!(human_bytes(3 * 1024 * 1024 * 1024), "3.00 GiB");
     }
 
     /// The upgrade-table header is auxiliary information — it must render in

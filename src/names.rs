@@ -344,8 +344,10 @@ impl fmt::Display for PkgDesc {
 /// Not a package name, so like [`PkgDesc`] it deliberately skips
 /// [`impl_name_wrapper`]: an arch never keys a map, lands in a path, or equals
 /// a CLI token here. It exists so diagnostics carry a typed field instead of a
-/// bare `String` that could be cross-passed with a name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// bare `String` that could be cross-passed with a name. rkyv-derived (plus
+/// `Hash` for dedup) because it's archived in the on-disk index
+/// (`IndexEntry::arch`).
+#[derive(Archive, Serialize, Deserialize, Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Arch(String);
 
 impl Arch {
@@ -362,6 +364,58 @@ impl Arch {
 }
 
 impl fmt::Display for Arch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(&self.0)
+    }
+}
+
+/// An upstream homepage (`url` field) as a PKGBUILD declares it.
+///
+/// Display-only prose like [`PkgDesc`] — it never keys a map, lands in a
+/// path, or equals a CLI token, so it too skips [`impl_name_wrapper`]. No
+/// parsing or validation: makepkg accepts any text here, and aurox only ever
+/// prints it back. rkyv-derived because it's archived in the on-disk index
+/// (`IndexEntry::url`).
+#[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Url(String);
+
+impl Url {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// Borrow the wrapped text as a string slice — the sanctioned escape
+    /// hatch for `&str`-typed APIs, kept explicit for the same reason as the
+    /// name wrappers' `as_str`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Url {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(&self.0)
+    }
+}
+
+/// A person attribution line, conventionally `Name <email>`: an AUR
+/// PKGBUILD's `# Maintainer:` comment, or alpm's `packager()` on a repo
+/// package.
+///
+/// Display-only prose like [`PkgDesc`] — never keys a map or equals a CLI
+/// token, so it skips [`impl_name_wrapper`]. Not archived (the maintainer
+/// comment is read live from the mirror's PKGBUILD blob, not indexed), so
+/// no rkyv derives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Maintainer(String);
+
+impl Maintainer {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+}
+
+impl fmt::Display for Maintainer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad(&self.0)
     }

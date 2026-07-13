@@ -7,8 +7,12 @@
 
 use super::sync;
 use crate::error::{Error, Result};
+use crate::index::info::{Label, field, list_field, multiline_field};
 use crate::index::schema::IndexEntry;
-use crate::names::{PkgDesc, PkgName, PkgTarget, RepoName, SearchTerm};
+use crate::names::{
+    Arch, Maintainer, OptDep, PkgDesc, PkgName, PkgTarget, RepoName, SearchTerm, Url,
+};
+use crate::units::{ByteSize, UnixTime};
 use crate::version::{Ver, Version};
 use alpm::Alpm;
 use std::collections::{HashMap, HashSet};
@@ -122,19 +126,33 @@ pub fn search_sync(terms: &[SearchTerm]) -> Result<Vec<RepoHit>> {
 ///
 /// Extracted from the borrowed alpm `Package` into owned, typed data so the
 /// block can be rendered — and its byte layout unit-tested — without an open
-/// handle. Mirrors the field set of the AUR block ([`crate::index`]'s
-/// `print_info`), so the shell's `info` reads the same for repo and AUR
-/// packages.
+/// handle. Rendered through [`crate::index::info`]'s shared layout helpers
+/// and [`Label`] vocabulary, so the shell's `info` reads the same for repo
+/// and AUR packages.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SyncInfo {
     pub repo: RepoName,
     pub name: PkgName,
     pub version: Version,
     pub desc: Option<PkgDesc>,
+    pub arch: Option<Arch>,
+    pub url: Option<Url>,
     /// Dep specs as alpm renders them (`name>=ver`), same shape as the
     /// schema's `provides` — the constraint stays part of the spec.
     pub depends: Vec<PkgTarget>,
     pub provides: Vec<PkgTarget>,
+    pub optdepends: Vec<OptDep>,
+    pub conflicts: Vec<PkgTarget>,
+    pub replaces: Vec<PkgTarget>,
+    /// [`ByteSize::ZERO`] when the pkg file is already in the pacman cache —
+    /// rendered as absent, like every other empty field.
+    pub download_size: ByteSize,
+    pub installed_size: ByteSize,
+    /// The repo-side sibling of the AUR block's Maintainer: who built and
+    /// signed the package.
+    pub packager: Option<Maintainer>,
+    /// The repo-side sibling of the AUR block's Last Updated.
+    pub build_date: UnixTime,
 }
 
 impl SyncInfo {
@@ -151,8 +169,24 @@ impl SyncInfo {
                 name: PkgName::new(p.name()),
                 version: Version::from(p.version()),
                 desc: p.desc().map(PkgDesc::new),
+                arch: p.arch().map(Arch::new),
+                url: p.url().map(Url::new),
                 depends: p.depends().iter().map(dep_spec).collect(),
                 provides: p.provides().iter().map(dep_spec).collect(),
+                // alpm's `Dep` Display renders an optdep as the full
+                // `spec: reason` line; `OptDep::from` re-splits it the same
+                // way libalpm joined it.
+                optdepends: p
+                    .optdepends()
+                    .iter()
+                    .map(|d| OptDep::from(d.to_string().as_str()))
+                    .collect(),
+                conflicts: p.conflicts().iter().map(dep_spec).collect(),
+                replaces: p.replaces().iter().map(dep_spec).collect(),
+                download_size: ByteSize::new(u64::try_from(p.download_size()).unwrap_or(0)),
+                installed_size: ByteSize::new(u64::try_from(p.isize()).unwrap_or(0)),
+                packager: p.packager().map(Maintainer::new),
+                build_date: UnixTime::new(p.build_date()),
             });
         }
         None
@@ -164,17 +198,35 @@ impl SyncInfo {
     /// `write_search_result`: the exact byte layout is testable without
     /// capturing a process's stdout.
     pub fn write_to<W: std::io::Write>(&self, out: &mut W) -> std::io::Result<()> {
-        writeln!(out, "Repository      : {}", self.repo)?;
-        writeln!(out, "Name            : {}", self.name)?;
-        writeln!(out, "Version         : {}", self.version)?;
+        field(out, Label::Repository, &self.repo)?;
+        field(out, Label::Name, &self.name)?;
+        field(out, Label::Version, &self.version)?;
         if let Some(d) = &self.desc {
-            writeln!(out, "Description     : {d}")?;
+            field(out, Label::Description, d)?;
         }
-        if !self.depends.is_empty() {
-            writeln!(out, "Depends On      : {}", join_specs(&self.depends))?;
+        if let Some(a) = &self.arch {
+            field(out, Label::Architecture, a)?;
         }
-        if !self.provides.is_empty() {
-            writeln!(out, "Provides        : {}", join_specs(&self.provides))?;
+        if let Some(u) = &self.url {
+            field(out, Label::Url, u)?;
+        }
+        list_field(out, Label::Provides, &self.provides)?;
+        list_field(out, Label::DependsOn, &self.depends)?;
+        let optdeps: Vec<String> = self.optdepends.iter().map(ToString::to_string).collect();
+        multiline_field(out, Label::OptionalDeps, &optdeps)?;
+        list_field(out, Label::ConflictsWith, &self.conflicts)?;
+        list_field(out, Label::Replaces, &self.replaces)?;
+        if self.download_size != ByteSize::ZERO {
+            field(out, Label::DownloadSize, self.download_size)?;
+        }
+        if self.installed_size != ByteSize::ZERO {
+            field(out, Label::InstalledSize, self.installed_size)?;
+        }
+        if let Some(p) = &self.packager {
+            field(out, Label::Packager, p)?;
+        }
+        if let Some(t) = self.build_date.render() {
+            field(out, Label::BuildDate, t)?;
         }
         writeln!(out)
     }
@@ -193,15 +245,6 @@ impl SyncInfo {
 /// classify on the bare [`Dep::name`], an info block shows the full spec.
 fn dep_spec(d: &alpm::Dep) -> PkgTarget {
     PkgTarget::new(d.to_string())
-}
-
-/// Space-join dep specs for a one-line info field.
-fn join_specs(specs: &[PkgTarget]) -> String {
-    specs
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Open the system alpm DB with sync repos registered from `pacman.conf`.
@@ -689,49 +732,91 @@ mod tests {
         String::from_utf8(buf).unwrap()
     }
 
+    /// A minimal block — only the always-present header fields; everything
+    /// optional absent/empty. Tests fill in what they exercise.
+    fn sync_info(repo: &str, name: &str, version: &str) -> SyncInfo {
+        SyncInfo {
+            repo: RepoName::from(repo),
+            name: PkgName::new(name),
+            version: Version::from(version),
+            desc: None,
+            arch: None,
+            url: None,
+            depends: Vec::new(),
+            provides: Vec::new(),
+            optdepends: Vec::new(),
+            conflicts: Vec::new(),
+            replaces: Vec::new(),
+            download_size: ByteSize::ZERO,
+            installed_size: ByteSize::ZERO,
+            packager: None,
+            build_date: UnixTime::new(0),
+        }
+    }
+
     #[test]
     fn sync_info_block_matches_aur_field_layout() {
-        // The column layout must match `index`'s AUR block byte-for-byte
+        // The column layout must match `index::info`'s AUR block byte-for-byte
         // (16-char field name, then `: `), so a shell session mixing repo and
-        // AUR `info` output reads as one aligned format.
-        let info = SyncInfo {
-            repo: RepoName::from("extra"),
-            name: PkgName::new("cef"),
-            version: Version::from("138.0.1-1"),
-            desc: Some(PkgDesc::new("Chromium Embedded Framework")),
-            depends: vec![PkgTarget::from("nss"), PkgTarget::from("libxcb>=1.17")],
-            provides: vec![PkgTarget::from("cef-minimal")],
-        };
+        // AUR `info` output reads as one aligned format. `build_date` stays
+        // at the unknown sentinel here: its rendering is system-timezone
+        // dependent, and `sync_info_block_renders_build_date` covers it.
+        let mut info = sync_info("extra", "cef", "138.0.1-1");
+        info.desc = Some(PkgDesc::new("Chromium Embedded Framework"));
+        info.arch = Some(Arch::new("x86_64"));
+        info.url = Some(Url::new("https://bitbucket.org/chromiumembedded/cef"));
+        info.depends = vec![PkgTarget::from("nss"), PkgTarget::from("libxcb>=1.17")];
+        info.provides = vec![PkgTarget::from("cef-minimal")];
+        info.optdepends = vec![OptDep::from("pipewire: audio capture")];
+        info.conflicts = vec![PkgTarget::from("cef-minimal")];
+        info.replaces = vec![PkgTarget::from("cef3")];
+        info.download_size = ByteSize::new(78 * 1024 * 1024);
+        info.installed_size = ByteSize::new(256 * 1024 * 1024);
+        info.packager = Some(Maintainer::new(
+            "Evangelos Foutras <evangelos@foutrelis.com>",
+        ));
         assert_eq!(
             render(&info),
             "Repository      : extra\n\
              Name            : cef\n\
              Version         : 138.0.1-1\n\
              Description     : Chromium Embedded Framework\n\
-             Depends On      : nss libxcb>=1.17\n\
+             Architecture    : x86_64\n\
+             URL             : https://bitbucket.org/chromiumembedded/cef\n\
              Provides        : cef-minimal\n\
+             Depends On      : nss libxcb>=1.17\n\
+             Optional Deps   : pipewire: audio capture\n\
+             Conflicts With  : cef-minimal\n\
+             Replaces        : cef3\n\
+             Download Size   : 78.00 MiB\n\
+             Installed Size  : 256.00 MiB\n\
+             Packager        : Evangelos Foutras <evangelos@foutrelis.com>\n\
              \n"
         );
     }
 
     #[test]
     fn sync_info_block_omits_absent_fields() {
-        // No desc / deps / provides ⇒ no empty lines for them, same as the
-        // AUR block — only the always-present header fields remain.
-        let info = SyncInfo {
-            repo: RepoName::from("core"),
-            name: PkgName::new("filesystem"),
-            version: Version::from("2025.05.01-1"),
-            desc: None,
-            depends: Vec::new(),
-            provides: Vec::new(),
-        };
+        // Nothing optional set ⇒ no empty lines, same as the AUR block —
+        // only the always-present header fields remain. Zero sizes are the
+        // "already cached" / unknown answers and stay hidden too.
         assert_eq!(
-            render(&info),
+            render(&sync_info("core", "filesystem", "2025.05.01-1")),
             "Repository      : core\n\
              Name            : filesystem\n\
              Version         : 2025.05.01-1\n\
              \n"
+        );
+    }
+
+    #[test]
+    fn sync_info_block_renders_build_date() {
+        // Timezone-dependent text, so pin presence and prefix only.
+        let mut info = sync_info("core", "filesystem", "2025.05.01-1");
+        info.build_date = UnixTime::new(1_700_000_000);
+        crate::assert_regex!(
+            render(&info),
+            r"(?m)^Build Date      : \w{3} \d{2} \w{3} 2023"
         );
     }
 

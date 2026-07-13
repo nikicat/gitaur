@@ -18,6 +18,7 @@ use crate::pacman::alpm_db::{self, PacmanIndex, RepoHit};
 use crate::pacman::invoke::REPO_AUR;
 use crate::paths;
 use crate::ui;
+use crate::units::UnixTime;
 use crate::version::Version;
 
 use std::cmp::Ordering;
@@ -208,16 +209,16 @@ struct RankKey {
 
 /// A row's freshness for ranking: its AUR branch-tip commit time, ordered so
 /// **fresher sorts first** — a later commit is the better tie-break. Wrapping
-/// the raw [`IndexEntry::commit_time_unix`] keeps that "fresher wins" polarity
-/// in one place (an `impl Ord`) instead of scattering a bare `Reverse<i64>`
-/// through the sort key.
+/// [`IndexEntry::commit_time`] keeps that "fresher wins" polarity in one
+/// place (an `impl Ord`) instead of scattering a bare `Reverse<_>` through
+/// the sort key.
 #[derive(PartialEq, Eq)]
-struct Freshness(i64);
+struct Freshness(UnixTime);
 
 impl Freshness {
     /// Rows with no commit of their own (repo packages) — older than any real
     /// AUR commit, so they never win a freshness tie-break.
-    const STALE: Self = Self(i64::MIN);
+    const STALE: Self = Self(UnixTime::MIN);
 }
 
 impl Ord for Freshness {
@@ -260,7 +261,7 @@ fn rank_key(row: &Row<'_>, regexes: &[regex::Regex]) -> RankKey {
     let name = row.picked();
     let (source, freshness) = match row {
         Row::Repo(_) => (SourceRank::Repo, Freshness::STALE),
-        Row::Aur(e) => (SourceRank::Aur, Freshness(e.commit_time_unix)),
+        Row::Aur(e) => (SourceRank::Aur, Freshness(e.commit_time)),
     };
     RankKey {
         tier: match_tier(row, regexes),
@@ -421,8 +422,8 @@ mod tests {
     /// sorts *before* an older one, and repo rows' `STALE` sorts last.
     #[test]
     fn freshness_orders_newer_before_older() {
-        assert!(Freshness(900) < Freshness(100));
-        assert!(Freshness(100) < Freshness::STALE);
+        assert!(Freshness(UnixTime::new(900)) < Freshness(UnixTime::new(100)));
+        assert!(Freshness(UnixTime::new(100)) < Freshness::STALE);
     }
 
     /// End to end, that tie-break beats the lexical fallback (`aaa-` would
@@ -430,9 +431,9 @@ mod tests {
     #[test]
     fn rank_breaks_aur_ties_by_freshest_commit() {
         let mut old = mk("aaa-claude", None, None);
-        old.commit_time_unix = 100;
+        old.commit_time = UnixTime::new(100);
         let mut fresh = mk("zzz-claude", None, None);
-        fresh.commit_time_unix = 900;
+        fresh.commit_time = UnixTime::new(900);
         let rows = vec![Row::Aur(&old), Row::Aur(&fresh)];
         assert_eq!(
             ranked(rows, &[SearchTerm::new("claude")]),
