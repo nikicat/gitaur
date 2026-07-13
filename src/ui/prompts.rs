@@ -14,21 +14,42 @@ pub fn confirm(prompt: &str, noconfirm: bool) -> std::io::Result<bool> {
     if noconfirm {
         return Ok(true);
     }
+    interact(prompt, true)
+}
+
+/// y/N confirmation prompt with `N` default — for "are you sure you want to
+/// override the safety check?" gates, where walking away must mean *no*.
+///
+/// Deliberately no `noconfirm` parameter: an auto-answer would either bypass
+/// the safety (`true`) or dead-end a scripted run (`false`), so the caller
+/// decides what a non-interactive run does *before* prompting.
+pub fn confirm_default_no(prompt: &str) -> std::io::Result<bool> {
+    interact(prompt, false)
+}
+
+/// Shared prompt body: dialoguer on a TTY, a plain `read_line` fallback
+/// otherwise (so tests and pipes can feed an answer). An empty line or EOF
+/// takes `default`; only an explicit y/n overrides it.
+fn interact(prompt: &str, default: bool) -> std::io::Result<bool> {
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
+        let hint = if default { "[Y/n]" } else { "[y/N]" };
         let mut out = std::io::stdout().lock();
-        write!(out, "{prompt} [Y/n] ")?;
+        write!(out, "{prompt} {hint} ")?;
         out.flush()?;
         let mut line = String::new();
         if stdin.lock().read_line(&mut line)? == 0 {
-            return Ok(true);
+            return Ok(default);
         }
-        let answer = line.trim();
-        return Ok(!matches!(answer, "n" | "N" | "no" | "No" | "NO"));
+        return Ok(match line.trim() {
+            "y" | "Y" | "yes" | "Yes" | "YES" => true,
+            "n" | "N" | "no" | "No" | "NO" => false,
+            _ => default,
+        });
     }
     Confirm::new()
         .with_prompt(prompt)
-        .default(true)
+        .default(default)
         .interact()
         .map_err(std::io::Error::other)
 }

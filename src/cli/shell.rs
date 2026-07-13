@@ -33,6 +33,7 @@ use crate::mirror::{self, MirrorRepo};
 use crate::names::{PkgBase, PkgName, PkgTarget, RepoName, RepoRank, SearchTerm};
 use crate::pacman::alpm_db::{self, PacmanIndex, SyncInfo};
 use crate::pacman::invoke::{self, PkgUpgrade, REPO_AUR};
+use crate::pacman::preflight;
 use crate::paths;
 use crate::resolver::Plan;
 use crate::ui::{self, UpgradeSelection};
@@ -1305,6 +1306,11 @@ struct ResolvedTxn {
     repo_deps: Vec<PkgName>,
     aur_deps: Vec<PkgBase>,
     metrics: ui::PreviewMetrics,
+    /// Sysupgrade preflight notes for the staged repo-upgrade lane (empty when
+    /// none is staged or the check couldn't run) — rendered under the table so
+    /// "this upgrade will break X" shows on the screen the user curates the
+    /// cart from, not first at `apply`.
+    preflight: Vec<upgrade::PreflightNote>,
 }
 
 /// A [`ResolvedTxn`] tagged with the cart package set it was resolved for, so
@@ -1541,6 +1547,14 @@ impl ShellEnv for RealEnv<'_> {
                 for line in table.lines() {
                     self.print(line);
                 }
+                // The sysupgrade preflight verdict for the staged repo lane —
+                // "upgrading X breaks Y" plus the shell-native way out —
+                // belongs on this same screen, ahead of any `apply`.
+                if let Some(view) = &self.view {
+                    for note in &view.resolved.preflight {
+                        upgrade::print_preflight_note(note);
+                    }
+                }
             }
             Err(e) => {
                 debug!(error = %e, "show preview resolve failed; flat fallback");
@@ -1564,17 +1578,43 @@ impl ShellEnv for RealEnv<'_> {
         };
         let pac = upgrade::system_pac()?;
 
+        // Preflight the repo-upgrade lane before anything is asked of the user:
+        // re-sync the rootless db (the drift guard — the check should see what
+        // `pacman -Syu`'s own `-Sy` is about to fetch), recompute the
+        // partial-upgrade selection against it, and simulate the `-Su`. Failing
+        // that check ends the apply here — before the cost summary, the
+        // transaction confirm, and the sudo prompt.
+        if !cart.repo_upgrades().is_empty() {
+            upgrade::resync_repo_dbs(self.cfg);
+        }
+        let repo_sel = self.repo_upgrade_selection(session, cart)?;
+        let blockers = if repo_sel.repo.is_empty() {
+            Vec::new()
+        } else {
+            match sysupgrade_gate(session, cart, &repo_sel)? {
+                Some(blockers) => blockers,
+                None => return Ok(ApplyOutcome::Declined),
+            }
+        };
+
         // Resolve the build/install half (AUR + fresh installs); repo *upgrades*
         // take the partial `-Syu` lane below, so they're excluded from the plan.
-        let plan = self.resolve_cart(session, &pac, cart)?;
+        // Sysupgrade blockers — staged rebuilds whose install is what unblocks
+        // that lane — resolve as their own plan so they can run first.
+        let (blocker_targets, main_targets): (Vec<build::Target>, Vec<build::Target>) = cart
+            .install_targets()
+            .into_iter()
+            .partition(|t| blockers.iter().any(|b| b == t.spec.as_str()));
+        let blocker_plan = self.resolve_plan(session, &pac, &blocker_targets)?;
+        let main_plan = self.resolve_plan(session, &pac, &main_targets)?;
 
         // No table redraw — `show` is where the user looked. `apply` gates on the
         // one-line cost summary plus a single confirm (phase 5a).
         let size_pac = upgrade::synced_pac()?;
         let roots = txn_roots(cart, session, &size_pac);
-        let (repo_deps, aur_deps) = upgrade::dep_rows(plan.as_ref());
+        let (repo_deps, aur_deps) = merged_dep_rows(main_plan.as_ref(), blocker_plan.as_ref());
         let removals: Vec<PkgName> = cart.removals().to_vec();
-        let metrics = upgrade::preview_metrics(session, &roots, plan.as_ref());
+        let metrics = upgrade::preview_metrics(session, &roots, main_plan.as_ref());
         ui::info(&ui::cost_summary(
             &roots, &repo_deps, &aur_deps, &removals, &size_pac, &metrics,
         ));
@@ -1584,30 +1624,42 @@ impl ShellEnv for RealEnv<'_> {
             return Ok(ApplyOutcome::Declined);
         }
 
-        // Repo upgrades first (so AUR builds link against the upgraded libs), via
-        // a partial `pacman -Syu` that ignores every repo candidate the user
-        // didn't stage.
-        let repo_sel = self.repo_upgrade_selection(session, cart)?;
-        if !repo_sel.repo.is_empty() {
-            dispatch::run_repo_upgrade(self.cfg, &repo_sel)?;
-        }
-
-        // Build + install the AUR (and any fresh-install) half. Already gated by
-        // the confirm above, so `apply_plan` doesn't re-ask.
         let mut reviewed = cart.reviewed().clone();
         let opts = InstallOpts {
             noconfirm: false,
             asdeps: false,
             gate: ConfirmGate::AlreadyConfirmed,
         };
-        let outcome = match &plan {
-            Some(plan) => {
-                let report =
-                    build::apply_plan(self.cfg, session.index(), &pac, plan, opts, &mut reviewed)?;
-                cart_apply_outcome(&report, cart, session)
+
+        // Blocker rebuilds first — installing them is what unblocks the repo
+        // lane (the rebuilt packages no longer carry the dependency the
+        // sysupgrade would break).
+        let mut report = build::RunReport::default();
+        if let Some(plan) = &blocker_plan {
+            report = build::apply_plan(self.cfg, session.index(), &pac, plan, opts, &mut reviewed)?;
+            if !report.all_landed() {
+                // The blocker didn't land, so the repo lane would fail exactly
+                // as preflighted — stop before it runs. The repo rows haven't
+                // run either, so they stay staged (`repo_landed = false`).
+                return Ok(cart_apply_outcome(&report, cart, session, false));
             }
-            None => ApplyOutcome::Succeeded,
-        };
+        }
+
+        // Repo upgrades next (before the main AUR builds, so those link against
+        // the upgraded libs), via a partial `pacman -Syu` that ignores every
+        // repo candidate the user didn't stage.
+        if !repo_sel.repo.is_empty() {
+            dispatch::run_repo_upgrade(self.cfg, &repo_sel)?;
+        }
+
+        // Build + install the main AUR (and any fresh-install) half. Already
+        // gated by the confirm above, so `apply_plan` doesn't re-ask.
+        if let Some(plan) = &main_plan {
+            let main_report =
+                build::apply_plan(self.cfg, session.index(), &pac, plan, opts, &mut reviewed)?;
+            report.absorb(main_report);
+        }
+        let outcome = cart_apply_outcome(&report, cart, session, true);
         if !matches!(outcome, ApplyOutcome::Succeeded) {
             return Ok(outcome);
         }
@@ -1739,7 +1791,7 @@ impl RealEnv<'_> {
             .as_ref()
             .ok_or_else(|| Error::other("no AUR index loaded"))?;
         let pac = upgrade::system_pac()?;
-        let plan = self.resolve_cart(session, &pac, cart)?;
+        let plan = self.resolve_plan(session, &pac, &cart.install_targets())?;
         // Sizes from the freshly-synced db (the new versions' real download cost).
         let size_pac = upgrade::synced_pac()?;
         let (repo_deps, aur_deps) = upgrade::dep_rows(plan.as_ref());
@@ -1747,25 +1799,58 @@ impl RealEnv<'_> {
         // render re-derives approval-aware roots from the live cart.
         let roots = txn_roots(cart, session, &size_pac);
         let metrics = upgrade::preview_metrics(session, &roots, plan.as_ref());
+        let preflight = self.preview_preflight(session, cart);
         Ok(ResolvedTxn {
             size_pac,
             repo_deps,
             aur_deps,
             metrics,
+            preflight,
         })
     }
 
-    /// Resolve the cart's install/build half into a [`Plan`] — the AUR rows and
-    /// fresh installs (repo *upgrades* take the `-Syu` lane, so they aren't
-    /// targets here). `None` when nothing needs the build pipeline (a
-    /// repo-upgrade-only or removal-only cart).
-    fn resolve_cart(
+    /// The sysupgrade preflight for the `show` preview — no db re-sync (`show`
+    /// must stay instant; the drift guard belongs to `apply`) and no gating,
+    /// just the notes to render under the table. Empty when the cart stages no
+    /// repo upgrades or the check couldn't run (best-effort, like every other
+    /// preflight consumer).
+    fn preview_preflight(
+        &self,
+        session: &UpgradeSession,
+        cart: &Cart,
+    ) -> Vec<upgrade::PreflightNote> {
+        if cart.repo_upgrades().is_empty() {
+            return Vec::new();
+        }
+        let sel = match self.repo_upgrade_selection(session, cart) {
+            Ok(sel) => sel,
+            Err(e) => {
+                debug!(error = %e, "preview preflight skipped (upgrade selection failed)");
+                return Vec::new();
+            }
+        };
+        if sel.repo.is_empty() {
+            return Vec::new();
+        }
+        match preflight::sysupgrade(&sel.repo_skipped) {
+            Ok(issues) => upgrade::preflight_notes(issues, session, cart),
+            Err(e) => {
+                debug!(error = %e, "preview preflight skipped (could not run prepare)");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Resolve `targets` (the cart's install/build half, or a phase-subset of
+    /// it) into a [`Plan`] — the AUR rows and fresh installs (repo *upgrades*
+    /// take the `-Syu` lane, so they are never targets here). `None` when the
+    /// subset is empty (a repo-upgrade-only or removal-only cart / phase).
+    fn resolve_plan(
         &self,
         session: &UpgradeSession,
         pac: &PacmanIndex,
-        cart: &Cart,
+        targets: &[build::Target],
     ) -> Result<Option<Plan>> {
-        let targets = cart.install_targets();
         if targets.is_empty() {
             return Ok(None);
         }
@@ -1774,7 +1859,7 @@ impl RealEnv<'_> {
             session.index(),
             Some(session.secondary()),
             pac,
-            &targets,
+            targets,
             false,
         )?;
         Ok(Some(plan))
@@ -1822,19 +1907,22 @@ impl RealEnv<'_> {
 /// the offenders for a retry (fixing the bug where a partial build left every
 /// package staged even though some installed).
 ///
-/// Which rows landed: every repo row (repo upgrades and fresh `-S` installs both
-/// run to completion *before* the AUR pipeline — a repo failure surfaces as
-/// `Err`, never this outcome), plus each AUR row whose pkgbase built + installed
-/// this run (`report.installed`).
+/// Which rows landed: each AUR row whose pkgbase built + installed this run
+/// (`report.installed`), plus — when `repo_landed` — every repo row. The repo
+/// lanes run to completion before the *main* AUR pipeline (a repo failure
+/// surfaces as `Err`, never this outcome), so `repo_landed` is true there; a
+/// failure in the *blocker* phase stops the apply before any repo lane ran, so
+/// that caller passes false and the repo rows stay staged.
 fn cart_apply_outcome(
     report: &build::RunReport,
     cart: &Cart,
     session: &UpgradeSession,
+    repo_landed: bool,
 ) -> ApplyOutcome {
-    if report.failed.is_empty() && report.skipped_dep.is_empty() && report.interrupted.is_empty() {
+    if report.all_landed() {
         return ApplyOutcome::Succeeded;
     }
-    let installed = landed_install_specs(cart, &report.installed, |it| {
+    let installed = landed_install_specs(cart, &report.installed, repo_landed, |it| {
         session
             .secondary()
             .lookup(session.index(), it.spec())
@@ -1844,23 +1932,95 @@ fn cart_apply_outcome(
 }
 
 /// The staged install specs that landed this run, given the AUR pkgbases that
-/// installed and a resolver from a cart row to its pkgbase. Repo rows always
-/// count as landed on a partial failure (see [`cart_apply_outcome`]); an AUR row
-/// lands iff its pkgbase is in `installed`. Pure (the pkgbase lookup is injected)
-/// so the partition is unit-testable without a live session.
+/// installed and a resolver from a cart row to its pkgbase. Repo rows count as
+/// landed iff the repo lanes ran (`repo_landed` — see [`cart_apply_outcome`]);
+/// an AUR row lands iff its pkgbase is in `installed`. Pure (the pkgbase lookup
+/// is injected) so the partition is unit-testable without a live session.
 fn landed_install_specs(
     cart: &Cart,
     installed: &[PkgBase],
+    repo_landed: bool,
     pkgbase_of: impl Fn(&CartItem) -> Option<PkgBase>,
 ) -> Vec<PkgTarget> {
     cart.items()
         .iter()
         .filter(|it| match it.source {
-            Source::Repo => true,
+            Source::Repo => repo_landed,
             Source::Aur => pkgbase_of(it).is_some_and(|pb| installed.contains(&pb)),
         })
         .map(|it| PkgTarget::new(it.spec()))
         .collect()
+}
+
+/// Run the read-only sysupgrade preflight for the staged repo lane and gate on
+/// what it finds — before the cost summary, the transaction confirm, and the
+/// sudo prompt, so a doomed `pacman -Syu` never gets that far.
+///
+/// `Ok(Some(blockers))` means proceed: `blockers` are the staged AUR rebuilds
+/// that resolve flagged breakage and must install ahead of the repo lane.
+/// `Ok(None)` means the user declined at the override prompt.
+fn sysupgrade_gate(
+    session: &UpgradeSession,
+    cart: &Cart,
+    sel: &UpgradeSelection,
+) -> Result<Option<Vec<PkgName>>> {
+    let issues = match preflight::sysupgrade(&sel.repo_skipped) {
+        Ok(issues) => issues,
+        // Best-effort: if the preflight machinery itself can't run, pacman
+        // remains the authority — proceed exactly as before it existed.
+        Err(e) => {
+            debug!(error = %e, "sysupgrade preflight skipped (could not run prepare)");
+            return Ok(Some(Vec::new()));
+        }
+    };
+    if issues.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    // The same structured events the passthrough lane logs, then the
+    // human-facing notes with remediation.
+    preflight::log_issues(&issues);
+    let notes = upgrade::preflight_notes(issues, session, cart);
+    let mut blockers = Vec::new();
+    let mut blocking = false;
+    for note in &notes {
+        upgrade::print_preflight_note(note);
+        match &note.remedy {
+            upgrade::Remedy::StagedRebuild { target } => blockers.push(target.clone()),
+            _ => blocking = true,
+        }
+    }
+    if !blocking {
+        return Ok(Some(blockers));
+    }
+    // Advisory, not authoritative: the synced snapshot can trail the mirror
+    // pacman is about to fetch from, so offer the override — but walking away
+    // must mean no.
+    if ui::confirm_default_no("Repo upgrade expected to fail — run pacman anyway?")
+        .map_err(|e| Error::other(format!("confirm: {e}")))?
+    {
+        Ok(Some(blockers))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Dep rows for the cost summary when the install half is split into blocker +
+/// main phases: the union of both plans' rows, deduped (a dep shared by the two
+/// plans is built/installed once).
+fn merged_dep_rows(main: Option<&Plan>, blocker: Option<&Plan>) -> (Vec<PkgName>, Vec<PkgBase>) {
+    let (mut repo_deps, mut aur_deps) = upgrade::dep_rows(main);
+    let (blocker_repo, blocker_aur) = upgrade::dep_rows(blocker);
+    for d in blocker_repo {
+        if !repo_deps.contains(&d) {
+            repo_deps.push(d);
+        }
+    }
+    for d in blocker_aur {
+        if !aur_deps.contains(&d) {
+            aur_deps.push(d);
+        }
+    }
+    (repo_deps, aur_deps)
 }
 
 /// Map the cart's [`Approval`] to the renderer's presentation enum — the seam
@@ -2569,12 +2729,22 @@ mod tests {
         // `yay-bin` built + installed; `cuda` did not.
         let installed = [PkgBase::from("yay-bin")];
         // The fixtures use spec == pkgbase, so an identity resolver suffices.
-        let landed = landed_install_specs(&cart, &installed, |it| Some(PkgBase::from(it.spec())));
+        let pkgbase_of = |it: &CartItem| Some(PkgBase::from(it.spec()));
+        let landed = landed_install_specs(&cart, &installed, true, pkgbase_of);
         let specs: Vec<&str> = landed.iter().map(PkgTarget::as_str).collect();
         assert_eq!(
             specs,
             vec!["glibc", "yay-bin"],
             "repo row + installed AUR landed; the failed AUR (`cuda`) did not"
+        );
+        // A blocker-phase failure stops the apply before any repo lane runs —
+        // with `repo_landed = false` the repo row must stay staged.
+        let landed = landed_install_specs(&cart, &installed, false, pkgbase_of);
+        let specs: Vec<&str> = landed.iter().map(PkgTarget::as_str).collect();
+        assert_eq!(
+            specs,
+            vec!["yay-bin"],
+            "without the repo lane having run, only the installed AUR row landed"
         );
     }
 

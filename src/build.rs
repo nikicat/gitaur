@@ -601,6 +601,24 @@ impl RunReport {
     fn had_failures(&self) -> bool {
         !self.failed.is_empty() || !self.skipped_dep.is_empty()
     }
+
+    /// No failure, dep-skip, or interrupt — every pkgbase this phase attempted
+    /// landed. (A user review-skip is a choice, not a failure, so it doesn't
+    /// count against the phase.)
+    pub(super) fn all_landed(&self) -> bool {
+        self.failed.is_empty() && self.skipped_dep.is_empty() && self.interrupted.is_empty()
+    }
+
+    /// Fold another phase's report into this one — used by the shell's apply
+    /// when the run splits into a blocker-rebuild phase (installed ahead of the
+    /// repo lane) and the main phase.
+    pub(super) fn absorb(&mut self, other: Self) {
+        self.installed.extend(other.installed);
+        self.failed.extend(other.failed);
+        self.skipped_user.extend(other.skipped_user);
+        self.skipped_dep.extend(other.skipped_dep);
+        self.interrupted.extend(other.interrupted);
+    }
 }
 
 /// Return the first AUR pkgbase makedep of `pkgbase` that has already failed

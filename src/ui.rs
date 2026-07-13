@@ -26,7 +26,7 @@ pub use progress::{
     TICK_PERIOD, bar_bytes, bar_bytes_streaming, bar_count, bar_sideband, promote_byte_bar,
     promote_count_bar, spinner, tick,
 };
-pub use prompts::{confirm, select_pkgnames};
+pub use prompts::{confirm, confirm_default_no, select_pkgnames};
 pub use search_table::{InstallState, SearchRow, search_table};
 pub use tables::{Paint, Table, UpgradeSelection, install_table, pkg_list, upgrade_table};
 

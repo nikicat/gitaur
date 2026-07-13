@@ -6,17 +6,22 @@
 //! build-time cost overlay. The shell's `show` feeds these into
 //! [`ui::transaction_table`]; `apply` feeds them into [`ui::cost_summary`].
 
+use super::cart::{Cart, Source};
 use crate::build;
 use crate::build::UpgradeSession;
 use crate::build::metrics::MetricsStore;
 use crate::config::Config;
 use crate::error::Result;
+use crate::index::IndexEntry;
 use crate::mirror;
-use crate::names::{PkgBase, PkgName, RepoRank};
+use crate::names::{PkgBase, PkgName, PkgTarget, RepoRank};
 use crate::pacman::alpm_db::{self, PacmanIndex};
+use crate::pacman::{preflight, sync};
 use crate::paths;
 use crate::resolver::Plan;
+use crate::ui;
 use crate::ui::{PreviewMetrics, TxnRoot};
+use indicatif::MultiProgress;
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 use tracing::{debug, warn};
@@ -67,6 +72,177 @@ fn should_fetch(cfg: &Config, policy: FetchPolicy) -> bool {
             None => true,
         },
     }
+}
+
+/// How fresh the rootless sync db must be for an apply-time preflight to skip
+/// its own re-sync. Deliberately tight — just wide enough to dedupe the
+/// common `upgrade` → immediate `apply` flow, where the session synced
+/// seconds ago. Anything longer re-syncs: the guard exists to close the gap
+/// between the last sync and what `pacman -Syu`'s own `-Sy` is about to
+/// fetch, and that gap grows with every minute spent reviewing the cart.
+const APPLY_RESYNC_MAX_AGE: Duration = Duration::from_mins(1);
+
+/// Bring the rootless sync db up to date right before an apply's repo lane, so
+/// the sysupgrade preflight (and the recomputed `--ignore` set) sees close to
+/// the same data the imminent `pacman -Syu` will fetch — the drift guard.
+///
+/// Skipped when [`Config::check_repo_updates`] is off (there is no rootless
+/// store to sync) or when the last refresh is younger than
+/// [`APPLY_RESYNC_MAX_AGE`]. Failures — offline, Ctrl+C on the refresh lock —
+/// degrade to a warning: the preflight then runs on the staler snapshot, which
+/// is still advisory.
+pub(crate) fn resync_repo_dbs(cfg: &Config) {
+    if !cfg.check_repo_updates {
+        return;
+    }
+    if mirror::last_fetch_age().is_some_and(|age| age < APPLY_RESYNC_MAX_AGE) {
+        debug!("repo dbs synced recently; skipping the apply-time re-sync");
+        return;
+    }
+    if let Err(e) = sync::refresh_sync_db(&MultiProgress::new()) {
+        ui::warn(&format!(
+            "repo db re-sync before the upgrade failed: {e} — checking against the last-synced data"
+        ));
+    }
+}
+
+/// A sysupgrade preflight issue paired with the shell-native way out —
+/// computed against the AUR index and the staged cart, rendered under the
+/// `show` preview and ahead of `apply`'s confirm/sudo gates.
+pub(crate) struct PreflightNote {
+    pub(crate) issue: preflight::Issue,
+    pub(crate) remedy: Remedy,
+}
+
+/// The AUR-aware remediation for one sysupgrade preflight issue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Remedy {
+    /// A staged AUR rebuild of `target` drops the broken dependency —
+    /// installing it ahead of the repo lane resolves the issue, so `apply`
+    /// orders it first instead of blocking.
+    StagedRebuild { target: PkgName },
+    /// Rebuilding `target` from its current AUR PKGBUILD would fix it (the
+    /// PKGBUILD's deps have moved on) — suggest `add <target>`.
+    AddRebuild { target: PkgName },
+    /// The AUR PKGBUILD still declares the broken dependency; a rebuild
+    /// wouldn't help. Pin or uninstall are what's left.
+    RebuildWontHelp,
+    /// No AUR-side fix known (not an AUR package, a conflict, …).
+    Unknown,
+}
+
+/// Pair each preflight issue with its remedy, resolved against the AUR index
+/// (does the current PKGBUILD still need the broken dep?) and the cart (is the
+/// fixing rebuild already staged?).
+pub(crate) fn preflight_notes(
+    issues: Vec<preflight::Issue>,
+    session: &UpgradeSession,
+    cart: &Cart,
+) -> Vec<PreflightNote> {
+    issues
+        .into_iter()
+        .map(|issue| {
+            let remedy = match &issue {
+                preflight::Issue::UnsatisfiedDep { target, depend, .. } => {
+                    let entry = session.secondary().lookup(session.index(), target.as_str());
+                    let staged = cart
+                        .item(&PkgTarget::from(target))
+                        .is_some_and(|it| it.source == Source::Aur);
+                    rebuild_remedy(entry, target, depend, staged)
+                }
+                _ => Remedy::Unknown,
+            };
+            PreflightNote { issue, remedy }
+        })
+        .collect()
+}
+
+/// Whether rebuilding `target` from its current AUR PKGBUILD would satisfy the
+/// preflight: the entry's runtime `depends` no longer reference the broken
+/// dep-spec's name. Pure over index data so the verdict table is unit-testable.
+///
+/// `entry.depends` is the pkgbase-flat union (per-pkgname sections fold in —
+/// see `index::srcinfo`), so a split sibling still needing the dep
+/// conservatively reads as "won't help".
+fn rebuild_remedy(
+    entry: Option<&IndexEntry>,
+    target: &PkgName,
+    broken: &PkgTarget,
+    staged: bool,
+) -> Remedy {
+    let Some(entry) = entry else {
+        return Remedy::Unknown;
+    };
+    let still_needs = entry.depends.iter().any(|d| d.bare() == broken.bare());
+    if still_needs {
+        Remedy::RebuildWontHelp
+    } else if staged {
+        Remedy::StagedRebuild {
+            target: target.clone(),
+        }
+    } else {
+        Remedy::AddRebuild {
+            target: target.clone(),
+        }
+    }
+}
+
+/// Print one preflight note: the pacman-parity issue line plus the remediation
+/// hint. Resolved-by-staged-rebuild renders as an informational note, not a
+/// warning — the transaction as staged already handles it.
+pub(crate) fn print_preflight_note(note: &PreflightNote) {
+    match &note.remedy {
+        Remedy::StagedRebuild { target } => {
+            ui::note(&format!(
+                "{} — resolved by the staged rebuild of {target} (built and installed before the repo upgrade)",
+                note.issue
+            ));
+        }
+        Remedy::AddRebuild { target } => {
+            ui::warn(&note.issue.to_string());
+            ui::note(&format!(
+                "`add {target}` stages a rebuild — its AUR package no longer needs the broken dependency"
+            ));
+            if let Some(alt) = pin_hint(&note.issue) {
+                ui::note(&alt);
+            }
+        }
+        Remedy::RebuildWontHelp => {
+            ui::warn(&note.issue.to_string());
+            if let preflight::Issue::UnsatisfiedDep { target, depend, .. } = &note.issue {
+                ui::note(&format!(
+                    "the AUR {target} still depends on '{depend}', so a rebuild won't help"
+                ));
+            }
+            if let Some(alt) = pin_hint(&note.issue) {
+                ui::note(&alt);
+            }
+        }
+        Remedy::Unknown => {
+            ui::warn(&note.issue.to_string());
+            if let Some(alt) = pin_hint(&note.issue) {
+                ui::note(&alt);
+            }
+        }
+    }
+}
+
+/// The pin/uninstall escape hatches for a broken-dep issue: dropping the
+/// breaking package's upgrade row keeps today's state (`--ignore`, a partial
+/// upgrade); removing the dependent clears the constraint entirely.
+fn pin_hint(issue: &preflight::Issue) -> Option<String> {
+    let preflight::Issue::UnsatisfiedDep {
+        target, causing, ..
+    } = issue
+    else {
+        return None;
+    };
+    Some(match causing {
+        Some(c) => format!(
+            "`drop {c}` pins it for now (partial upgrade), or `remove {target}` uninstalls the dependent"
+        ),
+        None => format!("`remove {target}` uninstalls the dependent"),
+    })
 }
 
 /// A system-dbpath pacman snapshot — `pacman -S/-U/-Syu` act against this db, so
@@ -217,12 +393,83 @@ fn pkgbase_built(session: &UpgradeSession, pb: &PkgBase) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{FetchPolicy, should_fetch};
+    use super::{FetchPolicy, Remedy, rebuild_remedy, should_fetch};
     use crate::config::Config;
+    use crate::index::IndexEntry;
+    use crate::names::{PkgName, PkgTarget};
     use crate::paths;
     use crate::testing::ScopedStateRoot;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::TempDir;
+
+    /// An AUR index entry whose runtime `depends` are exactly `deps`.
+    fn entry_with_deps(deps: &[&str]) -> IndexEntry {
+        IndexEntry {
+            pkgbase: "ioquake3-git".into(),
+            depends: deps.iter().map(|d| PkgTarget::new(*d)).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rebuild_remedy_classifies_the_libjpeg_shapes() {
+        let target = PkgName::new("ioquake3-git");
+        let broken = PkgTarget::new("libjpeg");
+
+        // The AUR PKGBUILD moved on (depends on libjpeg-turbo now): a rebuild
+        // fixes it — staged reads as a blocker, unstaged as an `add` hint.
+        let moved_on = entry_with_deps(&["libjpeg-turbo", "sdl2"]);
+        assert_eq!(
+            rebuild_remedy(Some(&moved_on), &target, &broken, false),
+            Remedy::AddRebuild {
+                target: target.clone()
+            }
+        );
+        assert_eq!(
+            rebuild_remedy(Some(&moved_on), &target, &broken, true),
+            Remedy::StagedRebuild {
+                target: target.clone()
+            }
+        );
+
+        // The PKGBUILD still declares the broken dep (with or without a
+        // version constraint): rebuilding won't help.
+        let still_needs = entry_with_deps(&["libjpeg", "sdl2"]);
+        assert_eq!(
+            rebuild_remedy(Some(&still_needs), &target, &broken, true),
+            Remedy::RebuildWontHelp
+        );
+        let versioned = entry_with_deps(&["libjpeg>=8"]);
+        assert_eq!(
+            rebuild_remedy(Some(&versioned), &target, &broken, false),
+            Remedy::RebuildWontHelp
+        );
+
+        // Not in the AUR index at all: no AUR-side fix to suggest.
+        assert_eq!(
+            rebuild_remedy(None, &target, &broken, false),
+            Remedy::Unknown
+        );
+    }
+
+    #[test]
+    fn rebuild_remedy_matches_on_the_bare_dep_name() {
+        // The preflight reports the *dep spec* (`libbar>=2`); the PKGBUILD may
+        // carry its own constraint. The verdict must compare bare names, not
+        // spec strings.
+        let target = PkgName::new("foo");
+        let broken = PkgTarget::new("libbar>=2");
+        let still_needs = entry_with_deps(&["libbar=1.5"]);
+        assert_eq!(
+            rebuild_remedy(Some(&still_needs), &target, &broken, false),
+            Remedy::RebuildWontHelp
+        );
+        let moved_on = entry_with_deps(&["libbar-ng"]);
+        assert_eq!(
+            rebuild_remedy(Some(&moved_on), &target, &broken, false),
+            Remedy::AddRebuild { target }
+        );
+    }
 
     /// Write the AUR fetch stamp `ago` seconds in the past (the format
     /// `mirror::record_fetch_stamp` emits — a Unix-epoch seconds string).
