@@ -91,19 +91,29 @@ overall_status=0
 # feeds those ghosts to every report: the union of old+new coverage maps
 # invents "coverable" lines at the old source's positions, which no fresh
 # profraw can ever hit — phantom misses (PR #27 measured resolver.rs at 671
-# lines vs the true 567: exactly base ∪ head). `cargo llvm-cov clean
-# --workspace` (cargo clean -p per workspace member under the hood) removes
-# every generation of *workspace* artifacts while keeping dependency rlibs —
-# the rebuild it forces is workspace-crate-only (~10 s warm), which CI pays
-# anyway on every commit.
+# lines vs the true 567: exactly base ∪ head).
 #
-# The profraw wipe stays ours: clean only globs the target root, not our
+# The purge deletes every executable in the three dirs the report enumerates
+# (debug root, deps/, examples/) rather than calling `cargo llvm-cov clean
+# --workspace`: its inner `cargo clean` refuses a target dir without a
+# CACHEDIR.TAG — ours never gets one, the `mkdir -p` below creates the dir
+# before cargo ever does — and cargo-llvm-cov downgrades that refusal to a
+# warning, so the clean-based fix silently kept the ghosts on CI. Deleting
+# executables directly is unconditional: any era, any crate rename, any
+# metadata hash. Dependency artifacts (rlibs, proc-macro .so) stay cached;
+# the deleted binaries relink from them in seconds, a cost CI pays anyway on
+# every source change.
+#
+# The profraw wipe stays ours too: clean only globs the target root, not our
 # profraw/{rust,podman}/ staging dirs.
 set +e
 in_image '
     eval "$(cargo llvm-cov show-env --export-prefix)"
     DIR="$CARGO_LLVM_COV_TARGET_DIR"
-    cargo llvm-cov clean --workspace
+    for d in "$DIR/debug" "$DIR/debug/deps" "$DIR/debug/examples"; do
+        [ -d "$d" ] || continue
+        find "$d" -maxdepth 1 -type f -perm /111 ! -name "*.so" -delete
+    done
     rm -rf "$DIR/profraw"
     find "$DIR" -maxdepth 1 \( -name "*.profraw" -o -name "*.profdata" \) -delete 2>/dev/null || true
     mkdir -p "$DIR/profraw/rust" "$DIR/profraw/podman"
