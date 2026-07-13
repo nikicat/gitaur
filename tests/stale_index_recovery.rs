@@ -104,15 +104,22 @@ fn unreadable_index_error_message_is_clean() {
     // Regression: in release builds rkyv's rancor error is an opaque
     // placeholder ("failed without error information; enable debug assertions
     // and the `alloc` feature…"). It must not leak into the user-facing
-    // `IndexIncompatible` reason — the message stays the fixed, readable
-    // "on-disk archive unreadable".
+    // `IndexIncompatible` reason. Bytes without the file header read as a
+    // pre-header (≤ v8) index — the per-case reasons are unit-tested in
+    // `index::tests`; this checks the rendered error end to end.
     let td = TempDir::new().unwrap();
     let idx_path = td.path().join("index.bin");
     std::fs::write(&idx_path, b"this is not a valid rkyv archive at all").unwrap();
 
     let err = index::load(&idx_path).expect_err("garbage bytes must fail to load");
     let msg = format!("{err}");
-    assert_eq!(msg, "index incompatible: on-disk archive unreadable");
+    assert_eq!(
+        msg,
+        format!(
+            "index incompatible: format predates v{}",
+            IndexFile::FORMAT_VERSION
+        )
+    );
     assert!(
         !msg.contains("debug assertions") && !msg.contains("rancor"),
         "rancor placeholder leaked into user-facing message: {msg}",
@@ -128,7 +135,6 @@ fn load_or_resync_rebuilds_and_returns_index() {
 
     let idx = index::load_or_resync(&cfg, &paths::index_path())
         .expect("load_or_resync must rebuild and return the index");
-    assert_eq!(idx.format_version, IndexFile::FORMAT_VERSION);
     let mut bases: Vec<&PkgBase> = idx.entries.iter().map(|e| &e.pkgbase).collect();
     bases.sort_unstable();
     assert_eq!(bases, vec![&PkgBase::from("bisq"), &PkgBase::from("cower")]);
@@ -220,7 +226,6 @@ fn cmd_refresh_rebuilds_when_existing_index_is_unreadable() {
     mirror::cmd_refresh(&cfg, false).expect("cmd_refresh must recover from a bad index");
 
     let idx = index::load(&idx_path).expect("rebuilt index must be loadable");
-    assert_eq!(idx.format_version, IndexFile::FORMAT_VERSION);
     assert_eq!(idx.entries.len(), 2, "both fixture branches indexed");
     let mut bases: Vec<&PkgBase> = idx.entries.iter().map(|e| &e.pkgbase).collect();
     bases.sort_unstable();

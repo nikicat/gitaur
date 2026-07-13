@@ -92,10 +92,13 @@ pub struct IndexEntry {
 }
 
 /// Top-level archive: header metadata + entries sorted by `pkgbase`.
+///
+/// [`FORMAT_VERSION`](Self::FORMAT_VERSION) is deliberately *not* a field:
+/// it lives in the plain-bytes file header ahead of the archive (see
+/// [`crate::index::load`]), where it stays readable even when a schema bump
+/// makes the archive itself unparseable.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, Default)]
 pub struct IndexFile {
-    /// Format version, bumped on incompatible schema changes.
-    pub format_version: u32,
     /// HEAD of the mirror at the time this index was written.
     pub mirror_head_oid: [u8; 20],
     /// Unix timestamp of last index write.
@@ -181,12 +184,15 @@ impl IndexFile {
     /// `aurox -Sy`. **7 → 8** when [`IndexEntry::url`] was added (the `-Si`
     /// block's URL field), `arch` switched `Vec<String>` → `Vec<Arch>`, and
     /// `commit_time_unix: i64` became the typed [`UnixTime`] `commit_time`.
-    pub const FORMAT_VERSION: u32 = 8;
+    /// **8 → 9** when the version moved out of the archive into the
+    /// plain-bytes file header (see [`crate::index::load`]) — before that, a
+    /// bump tripped rkyv's validator first and every mismatch reported as
+    /// "unreadable" instead of a version skew.
+    pub const FORMAT_VERSION: u32 = 9;
 
     /// Empty in-memory index. Used when no on-disk file exists yet.
     pub const fn empty() -> Self {
         Self {
-            format_version: Self::FORMAT_VERSION,
             mirror_head_oid: [0u8; 20],
             built_at_unix: 0,
             entries: Vec::new(),

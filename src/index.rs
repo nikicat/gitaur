@@ -25,10 +25,34 @@ pub use info::cmd_info;
 pub(crate) use info::print_aur_info;
 pub use schema::{IndexEntry, IndexFile};
 
+/// Magic prefix of the plain-bytes header written ahead of the rkyv archive.
+const HEADER_MAGIC: &[u8; 8] = b"AUROXIDX";
+
+/// Header length: magic + LE u32 [`IndexFile::FORMAT_VERSION`] + 4 reserved
+/// bytes. 16 so the archive payload after it keeps the read buffer's
+/// allocator alignment (rkyv validates `&bytes[HEADER_LEN..]` in place).
+const HEADER_LEN: usize = 16;
+
+/// The plain-bytes file header for `version`. Readable without parsing (let
+/// alone validating) the archive behind it, which is the whole point: a
+/// schema bump changes the archive layout, so only an out-of-archive version
+/// lets [`load`] tell "written under another format version" apart from a
+/// genuinely corrupted file.
+fn file_header(version: u32) -> [u8; HEADER_LEN] {
+    let mut h = [0u8; HEADER_LEN];
+    h[..8].copy_from_slice(HEADER_MAGIC);
+    h[8..12].copy_from_slice(&version.to_le_bytes());
+    h
+}
+
 /// Load the on-disk index. Returns an empty index if the file is missing.
 ///
-/// Archives this build can't read — rkyv's validator trips on a changed layout,
-/// or `format_version` predates us — surface as [`Error::IndexIncompatible`].
+/// Files this build can't read surface as [`Error::IndexIncompatible`], with
+/// the reason split three ways off the plain-bytes header: no
+/// [`HEADER_MAGIC`] (written by a pre-v9 aurox), a version mismatch (the
+/// normal case right after an aurox upgrade bumps
+/// [`IndexFile::FORMAT_VERSION`]), or — header intact but rkyv's validator
+/// rejects the archive — genuine corruption.
 /// Callers that want the index to "just work" use [`load_or_resync`], which
 /// catches that variant and rebuilds in place; this low-level entry point is
 /// the one [`mirror::cmd_refresh`] uses, where a failed load must *not*
@@ -40,23 +64,32 @@ pub fn load(path: &Path) -> Result<IndexFile> {
         return Ok(IndexFile::empty());
     }
     let bytes = std::fs::read(path)?;
-    let idx: IndexFile = rkyv::from_bytes::<IndexFile, RkyvError>(&bytes).map_err(|e| {
-        // A schema bump invalidates the on-disk layout, so rkyv's validator
-        // trips before we'd ever see `format_version` — hence the generic
-        // "unreadable" wording rather than a version comparison. The rancor
-        // error carries no detail in release builds ("enable debug assertions
-        // and the `alloc` feature…"), so keep it for traces and surface a
-        // clean reason to the user.
-        debug!(error = %e, "rkyv rejected on-disk index");
-        Error::IndexIncompatible("on-disk archive unreadable".into())
-    })?;
-    if idx.format_version != IndexFile::FORMAT_VERSION {
+    let version = match bytes.get(..HEADER_LEN) {
+        Some(h) if h.starts_with(HEADER_MAGIC) => u32::from_le_bytes([h[8], h[9], h[10], h[11]]),
+        // No header at all: written before the header existed (≤ v8).
+        _ => {
+            return Err(Error::IndexIncompatible(format!(
+                "format predates v{}",
+                IndexFile::FORMAT_VERSION,
+            )));
+        }
+    };
+    if version != IndexFile::FORMAT_VERSION {
         return Err(Error::IndexIncompatible(format!(
-            "index format v{} predates this aurox (v{})",
-            idx.format_version,
+            "format changed (v{version} → v{})",
             IndexFile::FORMAT_VERSION,
         )));
     }
+    let idx: IndexFile =
+        rkyv::from_bytes::<IndexFile, RkyvError>(&bytes[HEADER_LEN..]).map_err(|e| {
+            // The header version matched, so this is not a schema skew — the
+            // archive bytes themselves don't validate. The rancor error
+            // carries no detail in release builds ("enable debug assertions
+            // and the `alloc` feature…"), so keep it for traces and surface
+            // a clean reason to the user.
+            debug!(error = %e, "rkyv rejected on-disk index");
+            Error::IndexIncompatible("on-disk archive corrupted".into())
+        })?;
     info!(entries = idx.entries.len(), "index loaded");
     Ok(idx)
 }
@@ -92,14 +125,18 @@ pub fn load_or_resync(cfg: &Config, path: &Path) -> Result<IndexFile> {
     }
 }
 
-/// Atomically write the index to `path` via `index.bin.tmp` + rename.
+/// Atomically write the index to `path` via `index.bin.tmp` + rename:
+/// the [`file_header`] followed by the rkyv archive.
 #[instrument(skip(idx), fields(entries = idx.entries.len()))]
 pub fn save(idx: &IndexFile, path: &Path) -> Result<()> {
     let bytes = rkyv::to_bytes::<RkyvError>(idx).map_err(|e| Error::Rkyv(e.to_string()))?;
     let tmp = path.with_extension("bin.tmp");
-    std::fs::write(&tmp, &bytes)?;
+    let mut out = Vec::with_capacity(HEADER_LEN + bytes.len());
+    out.extend_from_slice(&file_header(IndexFile::FORMAT_VERSION));
+    out.extend_from_slice(&bytes);
+    std::fs::write(&tmp, &out)?;
     std::fs::rename(&tmp, path)?;
-    info!(path = %path.display(), bytes = bytes.len(), "index saved");
+    info!(path = %path.display(), bytes = out.len(), "index saved");
     Ok(())
 }
 
@@ -218,5 +255,76 @@ mod tests {
         e.epoch = Some(String::new());
         let out = render(&e);
         assert!(out.starts_with("aur/qux 1.0-1\n"), "got: {out:?}");
+    }
+
+    // --- file header: version skew vs corruption, told apart at load ---
+
+    fn incompatible_reason(path: &Path) -> String {
+        match load(path).expect_err("load must fail") {
+            Error::IndexIncompatible(reason) => reason,
+            other => panic!("expected IndexIncompatible, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn save_then_load_round_trips_through_the_header() {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("index.bin");
+        let mut idx = IndexFile::empty();
+        idx.entries.push(mk("foo"));
+        save(&idx, &path).unwrap();
+        let loaded = load(&path).expect("fresh save must load");
+        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.entries[0].pkgbase, "foo");
+    }
+
+    #[test]
+    fn headerless_file_reports_a_pre_header_format() {
+        // Anything without the magic — a pre-v9 index, or garbage — predates
+        // the header. Precise version reporting starts at v9; before that the
+        // archive is opaque, so this coarse reason is the best load can do.
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("index.bin");
+        std::fs::write(&path, b"this is not a valid rkyv archive at all").unwrap();
+        assert_eq!(
+            incompatible_reason(&path),
+            format!("format predates v{}", IndexFile::FORMAT_VERSION),
+        );
+    }
+
+    #[test]
+    fn version_skew_reports_the_format_change_not_corruption() {
+        // The normal post-upgrade case: a valid header from another format
+        // version. The payload never gets validated — the header alone names
+        // the skew, old → new.
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("index.bin");
+        let old = IndexFile::FORMAT_VERSION - 1;
+        let mut bytes = file_header(old).to_vec();
+        bytes.extend_from_slice(b"payload irrelevant");
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            incompatible_reason(&path),
+            format!("format changed (v{old} → v{})", IndexFile::FORMAT_VERSION),
+        );
+    }
+
+    #[test]
+    fn corrupt_payload_reports_corruption_with_a_clean_message() {
+        // Header matches, archive doesn't validate: genuine corruption. The
+        // reason is the fixed readable string — rkyv's rancor error (an opaque
+        // "enable debug assertions…" placeholder in release builds) must not
+        // leak into it.
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("index.bin");
+        let mut bytes = file_header(IndexFile::FORMAT_VERSION).to_vec();
+        bytes.extend_from_slice(b"this is not a valid rkyv archive at all");
+        std::fs::write(&path, &bytes).unwrap();
+        let reason = incompatible_reason(&path);
+        assert_eq!(reason, "on-disk archive corrupted");
+        assert!(
+            !reason.contains("debug assertions") && !reason.contains("rancor"),
+            "rancor placeholder leaked: {reason}",
+        );
     }
 }

@@ -34,10 +34,11 @@ pub enum Error {
     #[error("rkyv: {0}")]
     Rkyv(String),
 
-    /// The on-disk index archive can't be read by this build — either rkyv's
-    /// validator rejected the layout or `format_version` predates us. Carries a
-    /// human-readable reason; the loader recovers by resyncing the database
-    /// rather than surfacing it, so this rarely reaches the user.
+    /// The on-disk index can't be read by this build — its file-header
+    /// format version differs from ours (or predates the header entirely),
+    /// or the archive itself is corrupt. Carries a human-readable reason;
+    /// the loader recovers by resyncing the database rather than surfacing
+    /// it, so this rarely reaches the user.
     #[error("index incompatible: {0}")]
     IndexIncompatible(String),
 

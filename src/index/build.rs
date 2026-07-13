@@ -96,7 +96,6 @@ pub fn full_build(cfg: &Config, mirror: &MirrorRepo) -> Result<IndexFile> {
         [0u8; 20]
     });
     let idx = IndexFile {
-        format_version: IndexFile::FORMAT_VERSION,
         mirror_head_oid: mirror_head,
         built_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
