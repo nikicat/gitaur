@@ -18,6 +18,7 @@ use gix::progress::prodash::progress::Step;
 use gix::progress::{Count as GixCount, Id, MessageLevel, Unit};
 use gix::{NestedProgress, Progress as GixProgressTrait};
 use indicatif::{MultiProgress, ProgressBar};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -72,11 +73,20 @@ struct NetMeter {
     handle: Mutex<Option<JoinHandle<()>>>,
 }
 
-/// How long the wire must stay byte-for-byte silent before the `network` row
-/// is parked in its idle style. Long enough that an ordinary TCP stall
-/// mid-stream doesn't flap the style; short compared to the minutes-long
-/// silent stretches it exists for (server-side packing, post-pack local work).
+/// Trailing window over which wire activity is judged: the `network` row is
+/// parked in its idle style once fewer than [`NET_ACTIVE_BYTES`] arrived
+/// within it. Long enough that an ordinary TCP stall mid-stream doesn't flap
+/// the style; short compared to the minutes-long silent stretches it exists
+/// for (server-side packing, post-pack local work).
 const NET_IDLE_AFTER: Duration = Duration::from_secs(2);
+
+/// Bytes that must arrive within one [`NET_IDLE_AFTER`] window for the wire
+/// to count as active. While the server packs, sideband keep-alives and
+/// `remote: Counting objects…` progress lines trickle in at tens of bytes per
+/// second — judged by "any new byte" they flapped the row between idle and a
+/// stale decaying rate every couple of seconds. Real pack streaming clears
+/// this ~4 KiB/s bar by orders of magnitude; the trickle never comes close.
+const NET_ACTIVE_BYTES: u64 = 8 * 1024;
 
 /// Whether bytes are currently flowing on the wire, as judged by [`IdleTracker`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,43 +95,52 @@ enum WireState {
     Idle,
 }
 
-/// Wire-silence detector for the [`NetMeter`] pump.
+/// Wire-activity detector for the [`NetMeter`] pump.
 ///
 /// indicatif's rate field keeps re-weighting its estimate by elapsed time, so
 /// when bytes stop flowing the shown speed doesn't drop to zero — it *decays*
 /// there over ~15 s, which reads as the download regressing. The tracker
-/// watches the raw counter instead: [`NET_IDLE_AFTER`] without a new byte
-/// flips it to [`WireState::Idle`] (the pump swaps in the rate-less idle
-/// style) and the first new byte flips it straight back.
+/// watches the raw counter instead — but not for *any* byte: the counter also
+/// sees the sideband keep-alives and `remote: …` progress lines the server
+/// trickles while packing, and judged byte-for-byte those flap the row at
+/// their own cadence. The wire counts as [`WireState::Active`] only while at
+/// least [`NET_ACTIVE_BYTES`] arrived within the trailing [`NET_IDLE_AFTER`]
+/// window; each crossing of that line is reported exactly once.
 struct IdleTracker {
-    last_pos: u64,
-    last_change: Instant,
+    /// `(sample instant, cumulative byte count)`, newest at the back. The
+    /// front entry is kept just outside the window as the baseline, so the
+    /// byte delta always spans at least [`NET_IDLE_AFTER`].
+    samples: VecDeque<(Instant, u64)>,
     idle: bool,
 }
 
 impl IdleTracker {
-    const fn new(now: Instant) -> Self {
+    fn new(now: Instant) -> Self {
         Self {
-            last_pos: 0,
-            last_change: now,
+            samples: VecDeque::from([(now, 0)]),
             idle: false,
         }
     }
 
     /// Digest one pump sample; returns the new state when it flipped.
     fn observe(&mut self, pos: u64, now: Instant) -> Option<WireState> {
-        if pos != self.last_pos {
-            self.last_pos = pos;
-            self.last_change = now;
-            if self.idle {
-                self.idle = false;
-                return Some(WireState::Active);
-            }
-        } else if !self.idle && now.duration_since(self.last_change) >= NET_IDLE_AFTER {
-            self.idle = true;
-            return Some(WireState::Idle);
+        self.samples.push_back((now, pos));
+        while self.samples.len() > 1 && now.duration_since(self.samples[1].0) >= NET_IDLE_AFTER {
+            self.samples.pop_front();
         }
-        None
+        let baseline = self.samples[0].1;
+        let active = pos.saturating_sub(baseline) >= NET_ACTIVE_BYTES;
+        match (self.idle, active) {
+            (false, false) => {
+                self.idle = true;
+                Some(WireState::Idle)
+            }
+            (true, true) => {
+                self.idle = false;
+                Some(WireState::Active)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -573,45 +592,103 @@ mod tests {
     }
 
     /// The rate field lies once the wire goes quiet (indicatif decays it to
-    /// zero instead of dropping it), so the tracker must flip to `Idle` after
-    /// the silence threshold and back to `Active` on the first new byte —
-    /// firing each transition exactly once.
+    /// zero instead of dropping it), so the tracker must flip to `Idle` once
+    /// the window drains and back to `Active` on a real byte burst — firing
+    /// each transition exactly once.
     #[test]
     fn idle_tracker_flips_on_silence_and_back_on_bytes() {
         let t0 = Instant::now();
         let ms = |n| t0 + Duration::from_millis(n);
         let mut wire = IdleTracker::new(t0);
         assert_eq!(
-            wire.observe(100, ms(120)),
+            wire.observe(NET_ACTIVE_BYTES, ms(120)),
             None,
-            "first bytes: already active"
+            "streaming: already active"
         );
-        assert_eq!(wire.observe(100, ms(1_000)), None, "quiet, under threshold");
         assert_eq!(
-            wire.observe(100, ms(120) + NET_IDLE_AFTER),
+            wire.observe(NET_ACTIVE_BYTES, ms(1_000)),
+            None,
+            "quiet, but the burst is still inside the window"
+        );
+        assert_eq!(
+            wire.observe(NET_ACTIVE_BYTES, ms(2_200)),
             Some(WireState::Idle),
-            "threshold reached"
+            "burst aged out of the window"
         );
-        assert_eq!(wire.observe(100, ms(60_000)), None, "idle fires only once");
         assert_eq!(
-            wire.observe(101, ms(61_000)),
+            wire.observe(NET_ACTIVE_BYTES, ms(60_000)),
+            None,
+            "idle fires only once"
+        );
+        assert_eq!(
+            wire.observe(2 * NET_ACTIVE_BYTES, ms(60_120)),
             Some(WireState::Active),
-            "bytes resumed"
+            "real transfer resumed"
         );
         assert_eq!(
-            wire.observe(102, ms(61_100)),
+            wire.observe(3 * NET_ACTIVE_BYTES, ms(60_240)),
             None,
             "active fires only once"
         );
     }
 
     /// Before the first byte (DNS/TLS/handshake) the counter sits at zero;
-    /// that's silence too, and the row should park rather than show a rate.
+    /// that's silence too, and the row should park right away rather than
+    /// show a zero rate.
     #[test]
     fn idle_tracker_parks_before_first_byte() {
         let t0 = Instant::now();
         let mut wire = IdleTracker::new(t0);
-        assert_eq!(wire.observe(0, t0 + NET_IDLE_AFTER), Some(WireState::Idle));
+        assert_eq!(
+            wire.observe(0, t0 + Duration::from_millis(120)),
+            Some(WireState::Idle)
+        );
+    }
+
+    /// While the server packs, sideband keep-alives and `remote: …` progress
+    /// lines trickle tens of bytes every second or two. Judged byte-for-byte
+    /// that flapped the row idle↔active at the trickle cadence — each flap
+    /// flashing a stale decaying rate — so the trickle must stay parked, and
+    /// only the real pack stream may un-park the row.
+    #[test]
+    fn idle_tracker_ignores_sideband_trickle() {
+        let t0 = Instant::now();
+        let s = |n| t0 + Duration::from_secs(n);
+        let mut wire = IdleTracker::new(t0);
+        assert_eq!(wire.observe(0, s(2)), Some(WireState::Idle));
+        for i in 1..30 {
+            assert_eq!(
+                wire.observe(i * 60, s(2 + 2 * i)),
+                None,
+                "progress-line trickle must not un-park the row"
+            );
+        }
+        assert_eq!(
+            wire.observe(30 * 60 + NET_ACTIVE_BYTES, s(62)),
+            Some(WireState::Active),
+            "the pack stream proper un-parks it"
+        );
+    }
+
+    /// The converse of the trickle test: a stream that degrades into
+    /// sub-threshold trickle parks even though the counter never stops
+    /// moving (the old any-byte logic would have kept it active forever).
+    #[test]
+    fn idle_tracker_parks_when_stream_degrades_to_trickle() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut wire = IdleTracker::new(t0);
+        assert_eq!(wire.observe(NET_ACTIVE_BYTES, ms(120)), None, "streaming");
+        assert_eq!(
+            wire.observe(NET_ACTIVE_BYTES + 60, ms(1_200)),
+            None,
+            "trickle, but the window still holds the burst"
+        );
+        assert_eq!(
+            wire.observe(NET_ACTIVE_BYTES + 120, ms(2_400)),
+            Some(WireState::Idle),
+            "burst aged out; trickle alone is idle"
+        );
     }
 
     /// gix's "read pack … done" message is the last wire event of a fetch —
