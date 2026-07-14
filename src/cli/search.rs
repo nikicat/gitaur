@@ -9,11 +9,10 @@
 //! ranking, and the [`ui::search_table`] renderer are shared with the shell so
 //! both render matches identically.
 
-use crate::build::UpgradeSession;
 use crate::config::Config;
 use crate::context;
 use crate::error::Result;
-use crate::index::{self, IndexEntry};
+use crate::index::{self, AurIndexData, IndexEntry};
 use crate::names::{NameMatch, PkgName, PkgTarget, RepoName, SearchTerm};
 use crate::pacman::alpm_db::{self, PacmanIndex, RepoHit};
 use crate::pacman::invoke::REPO_AUR;
@@ -80,23 +79,23 @@ pub fn cmd_search_install(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
 
     // Repo + AUR searches are independent I/O — an alpm DB scan vs an index
     // mmap. Run them concurrently and merge below. The AUR side loads *empty*
-    // when not in play (see `UpgradeSession::load`), so the merge below is
+    // when not in play (see `AurIndexData::load`), so the merge below is
     // uniform either way.
-    let (repo_res, session_res) = context::join(
+    let (repo_res, aur_res) = context::join(
         || alpm_db::search_sync(terms),
         // `context::join` propagates the caller's context so `load_or_resync`
         // sees `--noresync` and the right `state_dir()` even on the stolen
         // worker thread.
-        || UpgradeSession::load(cfg),
+        || AurIndexData::load(cfg),
     );
     let repo_hits = repo_res?;
-    let session = session_res?;
+    let aur_data = aur_res?;
     // Pacman-only mode is a standing choice — repo-only results need no nudge.
     if index::AurState::probe(cfg) == index::AurState::NotSetUp {
         ui::warn("no AUR index; showing repo matches only (run `aurox -Sy` to index the AUR)");
     }
 
-    let aur_hits: Vec<&IndexEntry> = session.secondary().search(session.index(), &regexes);
+    let aur_hits: Vec<&IndexEntry> = aur_data.search(&regexes);
 
     // Repo and AUR rows share one relevance-ranked list (unlike yay's fixed
     // "repos on top", `rank_rows` interleaves both sources by match quality).

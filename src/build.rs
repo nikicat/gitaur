@@ -11,8 +11,8 @@
 use crate::config::Config;
 use crate::context;
 use crate::error::{Error, Result};
-use crate::index::secondary::Secondary;
-use crate::index::{self, IndexFile};
+use crate::index::lookup::Lookup;
+use crate::index::{self, AurIndexData, IndexFile};
 use crate::mirror::{self, MirrorRepo};
 use crate::names::{PkgBase, PkgName, PkgTarget, PkgTargetSetExt};
 use crate::pacman::alpm_db::{self, PacmanIndex};
@@ -33,7 +33,7 @@ pub mod print;
 pub mod review;
 pub mod upgrade;
 
-pub use upgrade::{DevelPolicy, UpgradeSession, cmd_query_upgrades, collect_upgrade_plan};
+pub use upgrade::{DevelPolicy, cmd_query_upgrades, collect_upgrade_plan};
 
 /// Read-only mirror of [`prepare_one`]'s idempotency check.
 ///
@@ -150,7 +150,7 @@ pub fn cmd_install(
     already_confirmed: bool,
 ) -> Result<u8> {
     // Probed once: drives only the unknown-target wording below. The data
-    // flow is uniform — an unavailable AUR loads as an empty session.
+    // flow is uniform — an unavailable AUR loads as empty AUR data.
     let aur_state = index::AurState::probe(cfg);
 
     // Pacman snapshot + AUR index loaded concurrently. PacmanIndex iterates
@@ -158,15 +158,15 @@ pub fn cmd_install(
     // AUR mmap + rkyv deserialize is similar. `context::join` hides one behind
     // the other and propagates the caller's context so `load_or_resync` sees
     // `--noresync` and the right `state_dir()` even on the stolen worker.
-    let (pac_res, session_res) = context::join(
+    let (pac_res, aur_res) = context::join(
         || -> Result<PacmanIndex> {
             let alpm = alpm_db::open()?;
             Ok(PacmanIndex::build(&alpm))
         },
-        || UpgradeSession::load(cfg),
+        || AurIndexData::load(cfg),
     );
     let pac = pac_res?;
-    let session = session_res?;
+    let aur_data = aur_res?;
 
     // `-S` has no cross-call review memory, so a fresh per-invocation set. The
     // upgrade loop keeps its own session-scoped set across batches instead.
@@ -182,8 +182,8 @@ pub fn cmd_install(
     };
     let report = match install_with_index(
         cfg,
-        session.index(),
-        session.secondary(),
+        aur_data.index(),
+        aur_data.lookup(),
         &pac,
         targets,
         opts,
@@ -227,14 +227,14 @@ fn unknown_targets_hint(names: String, aur: index::AurState) -> String {
 /// [`RunReport`].
 ///
 /// Split out of [`cmd_install`] so the no-arg upgrade loop can run many
-/// batches against one already-loaded [`IndexFile`]/[`Secondary`] without
+/// batches against one already-loaded [`IndexFile`]/[`Lookup`] without
 /// re-reading the index each iteration, and so the loop can fold the report
 /// into its session state. `reviewed` is the session-scoped set of pkgbases
 /// already approved (see [`prepare_one`]); `-S` passes a fresh empty one.
 pub(crate) fn install_with_index(
     cfg: &Config,
     idx: &IndexFile,
-    by: &Secondary,
+    by: &Lookup,
     pac: &PacmanIndex,
     targets: &[Target],
     opts: InstallOpts,
@@ -256,7 +256,7 @@ pub(crate) fn install_with_index(
 pub(crate) fn resolve_targets(
     cfg: &Config,
     idx: &IndexFile,
-    by: &Secondary,
+    by: &Lookup,
     pac: &PacmanIndex,
     targets: &[Target],
     noconfirm: bool,

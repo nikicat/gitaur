@@ -19,8 +19,8 @@
 use crate::build::Target;
 use crate::error::{Error, Result};
 use crate::index::IndexFile;
+use crate::index::lookup::{self, Lookup};
 use crate::index::schema::IndexEntry;
-use crate::index::secondary::{self, Secondary};
 use crate::names::{PkgBase, PkgName};
 use crate::pacman::alpm_db::PacmanIndex;
 use std::collections::HashMap;
@@ -38,7 +38,7 @@ pub type PkgnameSelector<'a> = dyn FnMut(&PkgBase, &[PkgName]) -> Result<Vec<Pkg
 /// Targets are kept at **pkgbase granularity** wherever the bare user input
 /// matched via the pkgbase or provides path. That avoids the `by_name`
 /// collision trap: an unrelated AUR pkgbase can produce a pkgname that
-/// collides with one we'd expand to, and `Secondary::by_name` only stores
+/// collides with one we'd expand to, and `Lookup::by_name` only stores
 /// one entry per name (`HashMap` insert-order winner). Pinning to a pkgbase
 /// string lets [`super::classify`] route through `by_pkgbase`, which is
 /// unique by construction.
@@ -98,7 +98,7 @@ pub struct ExpandedTargets {
 #[instrument(skip(idx, by, pac, targets, select), fields(targets = targets.len()))]
 pub fn expand_pkgbase_targets(
     idx: &IndexFile,
-    by: &Secondary,
+    by: &Lookup,
     pac: &PacmanIndex,
     targets: &[Target],
     select: &mut PkgnameSelector<'_>,
@@ -109,7 +109,7 @@ pub fn expand_pkgbase_targets(
     };
 
     for t in targets {
-        let bare = secondary::strip_version_constraint(&t.spec);
+        let bare = lookup::strip_version_constraint(&t.spec);
         // Hint recording runs *unconditionally* — the rewrite decision
         // below may short-circuit (pacman wins, passthrough, …), but the
         // resolver still classifies the spec via `resolve_target_source`
@@ -178,7 +178,7 @@ impl TargetDecision {
 /// -U` has no filter and installs every sibling makepkg packaged from the
 /// same PKGBUILD. The bisq-cli regression's twin: that one fired through
 /// the rewrite branch, this one fires through the shortcut.
-fn decide_pacman_wins(idx: &IndexFile, by: &Secondary, t: &Target, bare: &str) -> TargetDecision {
+fn decide_pacman_wins(idx: &IndexFile, by: &Lookup, t: &Target, bare: &str) -> TargetDecision {
     let selection = by.by_name.get(bare).and_then(|&entry_idx| {
         let entry = &idx.entries[entry_idx as usize];
         (entry.pkgnames.len() > 1).then(|| {
@@ -200,7 +200,7 @@ fn decide_pacman_wins(idx: &IndexFile, by: &Secondary, t: &Target, bare: &str) -
 /// `.pkg.tar.zst` files makepkg always produces from a split PKGBUILD (the
 /// bisq-cli regression: `-S bisq-cli` installed bisq-daemon + bisq-desktop
 /// too). Hint recorded earlier by `record_target_hint`.
-fn decide_pkgname(idx: &IndexFile, by: &Secondary, t: &Target, bare: &str) -> TargetDecision {
+fn decide_pkgname(idx: &IndexFile, by: &Lookup, t: &Target, bare: &str) -> TargetDecision {
     let entry_idx = by.by_name[bare] as usize;
     let entry = &idx.entries[entry_idx];
     if entry.pkgnames.len() == 1 {
@@ -231,7 +231,7 @@ fn decide_pkgname(idx: &IndexFile, by: &Secondary, t: &Target, bare: &str) -> Ta
 ///
 /// Selection only when the provides is pkgname-scoped: a pkgbase-level
 /// provides makes every pkgname a provider, leaving no real subset.
-fn decide_virtual(idx: &IndexFile, by: &Secondary, bare: &str) -> TargetDecision {
+fn decide_virtual(idx: &IndexFile, by: &Lookup, bare: &str) -> TargetDecision {
     let (entry_idx, pkgname) = by
         .provider_of(idx, bare)
         .expect("by_provides hit must have a provider_of resolution");
@@ -265,7 +265,7 @@ fn decide_virtual(idx: &IndexFile, by: &Secondary, bare: &str) -> TargetDecision
 /// ends up recorded is an explicit `Target::hint`.
 fn decide_pkgbase(
     idx: &IndexFile,
-    by: &Secondary,
+    by: &Lookup,
     bare: &str,
     select: &mut PkgnameSelector<'_>,
 ) -> Result<TargetDecision> {
@@ -331,7 +331,7 @@ fn record_hint(hints: &mut HashMap<PkgBase, PkgName>, pkgbase: &PkgBase, hint: P
 /// spec without an explicit hint yields no derived hint, because the
 /// pkgbase string isn't a counterpart name.
 fn record_target_hint(
-    by: &Secondary,
+    by: &Lookup,
     idx: &IndexFile,
     target: &Target,
     bare: &str,
@@ -464,7 +464,7 @@ mod tests {
         }
     }
 
-    fn fixture() -> (IndexFile, Secondary, PacmanIndex) {
+    fn fixture() -> (IndexFile, Lookup, PacmanIndex) {
         let idx = IndexFile {
             entries: vec![
                 // Real-world: pkgbase ≠ pkgname (the bisq case, single pkgname).
@@ -485,7 +485,7 @@ mod tests {
             ],
             ..IndexFile::empty()
         };
-        let by = Secondary::build(&idx);
+        let by = Lookup::build(&idx);
         let mut pac = PacmanIndex::default();
         pac.sync_versions.insert("firefox".into(), "110.0-1".into());
         (idx, by, pac)
@@ -680,7 +680,7 @@ mod tests {
             ],
             ..IndexFile::empty()
         };
-        let by = Secondary::build(&idx);
+        let by = Lookup::build(&idx);
         let pac = PacmanIndex::default();
 
         let r =
@@ -752,7 +752,7 @@ mod tests {
             }],
             ..IndexFile::empty()
         };
-        let by = Secondary::build(&idx);
+        let by = Lookup::build(&idx);
         let pac = PacmanIndex::default();
         let r = expand_pkgbase_targets(
             &idx,
@@ -820,11 +820,11 @@ mod tests {
 
     #[test]
     fn no_index_means_passthrough() {
-        // The empty secondary — the loader seam's pacman-only view — must
+        // The empty lookup — the loader seam's pacman-only view — must
         // pass unknown specs through unrewritten.
         let (_idx, _by, pac) = fixture();
         let empty_idx = IndexFile::empty();
-        let empty_by = Secondary::build(&empty_idx);
+        let empty_by = Lookup::build(&empty_idx);
         let r = expand_pkgbase_targets(
             &empty_idx,
             &empty_by,

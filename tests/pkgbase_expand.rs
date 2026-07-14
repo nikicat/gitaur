@@ -18,7 +18,7 @@ use aurox::build::Target;
 use aurox::config::defaults::default_config;
 use aurox::error::Result;
 use aurox::index::build::full_build;
-use aurox::index::secondary::Secondary;
+use aurox::index::lookup::Lookup;
 use aurox::mirror::MirrorRepo;
 use aurox::names::{PkgBase, PkgName, PkgTargetSetExt};
 use aurox::pacman::alpm_db::PacmanIndex;
@@ -73,7 +73,7 @@ fn pkgbase_only_target_expands_with_pkgbase_target_and_direct_pkgnames() {
     let cfg = default_config();
     let mirror = MirrorRepo::open(&bare).unwrap();
     let idx = full_build(&cfg, &mirror).unwrap();
-    let by = Secondary::build(&idx);
+    let by = Lookup::build(&idx);
     let pac = PacmanIndex::default();
 
     let mut select_called = false;
@@ -134,7 +134,7 @@ fn split_pkgbase_partial_selection_constrains_build_pipeline() {
     let cfg = default_config();
     let mirror = MirrorRepo::open(&bare).unwrap();
     let idx = full_build(&cfg, &mirror).unwrap();
-    let by = Secondary::build(&idx);
+    let by = Lookup::build(&idx);
     let pac = PacmanIndex::default();
 
     // User picks only two of the three split pkgnames.
@@ -221,7 +221,7 @@ fn provides_target_rewrites_to_providing_pkgname_with_selection() {
     let cfg = default_config();
     let mirror = MirrorRepo::open(&bare).unwrap();
     let idx = full_build(&cfg, &mirror).unwrap();
-    let by = Secondary::build(&idx);
+    let by = Lookup::build(&idx);
     let pac = PacmanIndex::default();
 
     let mut selector_invoked = false;
@@ -293,7 +293,7 @@ fn pkgname_collision_with_another_pkgbase_does_not_leak_into_plan() {
     let dir = TempDir::new().unwrap();
     // Order matters: alphabetically `commit-mono-font` < `otf-commit-mono`,
     // so the standalone pkgbase wins the HashMap insert race in
-    // Secondary::build — same alignment as the real AUR mirror.
+    // Lookup::build — same alignment as the real AUR mirror.
     let bare = build_mirror(
         dir.path(),
         &[
@@ -316,7 +316,7 @@ fn pkgname_collision_with_another_pkgbase_does_not_leak_into_plan() {
     let cfg = default_config();
     let mirror = MirrorRepo::open(&bare).unwrap();
     let idx = full_build(&cfg, &mirror).unwrap();
-    let by = Secondary::build(&idx);
+    let by = Lookup::build(&idx);
     let pac = PacmanIndex::default();
 
     let mut select = |_pb: &PkgBase, pns: &[PkgName]| -> Result<Vec<PkgName>> { Ok(pns.to_vec()) };
@@ -375,7 +375,7 @@ fn pkgname_target_skips_selector_even_when_pkgbase_could_match() {
     let cfg = default_config();
     let mirror = MirrorRepo::open(&bare).unwrap();
     let idx = full_build(&cfg, &mirror).unwrap();
-    let by = Secondary::build(&idx);
+    let by = Lookup::build(&idx);
     let pac = PacmanIndex::default();
 
     let mut calls = 0;

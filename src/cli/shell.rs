@@ -6,7 +6,7 @@
 //! design and phasing.
 //!
 //! **Phase 4 status:** the session is hoisted at start (the AUR index +
-//! secondary maps via [`UpgradeSession`], a sorted name universe for
+//! lookup maps via [`AurIndexData`], a sorted name universe for
 //! globs/completion, and the sync-repo name set for coarse classification) and
 //! is *reloaded* on `upgrade`. The cart is live: `add` / `drop` / `remove` /
 //! `clear` stage a [`cart::Cart`]; `upgrade` refreshes + seeds the available
@@ -23,12 +23,12 @@
 //! so the cart mutations and the approval gate are exercised without a
 //! terminal, index, or `makepkg`.
 
-use crate::build::{self, ConfirmGate, DevelPolicy, InstallOpts, UpgradeSession, review};
+use crate::build::{self, ConfirmGate, DevelPolicy, InstallOpts, review};
 use crate::cli::dispatch;
 use crate::cli::search::{Row, rank_rows, search_row};
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::index::{self, IndexEntry};
+use crate::index::{self, AurIndexData, IndexEntry};
 use crate::mirror::{self, MirrorRepo};
 use crate::names::{PkgBase, PkgName, PkgTarget, RepoName, RepoRank, SearchTerm};
 use crate::pacman::alpm_db::{self, PacmanIndex, SyncInfo};
@@ -177,7 +177,7 @@ pub trait ShellEnv {
     fn system_usage(&mut self) -> system::Report;
     /// `system prune`: delete the re-derivable caches (mirror, index, sync
     /// dbs, build trees) behind a y/N confirm. `Ok(None)` = user declined.
-    /// Returns the bytes freed. The in-memory session stays loaded — search
+    /// Returns the bytes freed. The in-memory AUR data stays loaded — search
     /// and info keep working from it until a `refresh` re-fetches everything.
     fn system_prune(&mut self) -> Result<Option<ByteSize>>;
 }
@@ -1270,12 +1270,12 @@ fn startup_lines(aur: index::AurState) -> Vec<&'static str> {
 #[instrument(skip(cfg))]
 pub fn run(cfg: &Config, devel: DevelPolicy, initial_search: &[SearchTerm]) -> Result<u8> {
     info!(devel = ?devel, terms = initial_search.len(), "shell session start");
-    // Once per session: load the AUR index (+ secondary maps) and the name
+    // Once per session: load the AUR index (+ lookup maps) and the name
     // universe. Not repeated per command; `refresh` (later phase) re-fetches.
-    // The session is empty (not absent) when the AUR isn't in play.
+    // The AUR data loads empty (not absent) when the AUR isn't in play.
     let aur_state = index::AurState::probe(cfg);
-    let session = UpgradeSession::load(cfg)?;
-    let caches = build_universe(&session);
+    let aur_data = AurIndexData::load(cfg)?;
+    let caches = build_universe(&aur_data);
     debug!(
         names = caches.universe.len(),
         sync = caches.sync.len(),
@@ -1285,7 +1285,7 @@ pub fn run(cfg: &Config, devel: DevelPolicy, initial_search: &[SearchTerm]) -> R
     let mut env = RealEnv {
         cfg,
         devel,
-        session,
+        aur_data,
         aur_state,
         caches,
         view: None,
@@ -1371,9 +1371,9 @@ struct NameCaches {
 
 /// Build the [`NameCaches`] for a session. A missing index or unreadable alpm
 /// just yields smaller caches, never an error.
-fn build_universe(session: &UpgradeSession) -> NameCaches {
+fn build_universe(aur_data: &AurIndexData) -> NameCaches {
     let mut universe: Vec<PkgTarget> = Vec::new();
-    let by = session.secondary();
+    let by = aur_data.lookup();
     universe.extend(by.by_name.keys().map(PkgTarget::from));
     universe.extend(by.by_pkgbase.keys().map(PkgTarget::from));
     let mut sync = HashMap::new();
@@ -1408,15 +1408,15 @@ fn cart_targets(state: &State) -> Vec<PkgTarget> {
         .collect()
 }
 
-/// Production [`ShellEnv`]: the loaded session + stdout, bridging `upgrade` to
+/// Production [`ShellEnv`]: the loaded AUR data + stdout, bridging `upgrade` to
 /// the existing loop.
 struct RealEnv<'a> {
     cfg: &'a Config,
     devel: DevelPolicy,
     /// The loaded AUR data — *empty* (never absent) when the AUR isn't in
     /// play, so every command takes one uniform path. See
-    /// [`UpgradeSession::load`].
-    session: UpgradeSession,
+    /// [`AurIndexData::load`].
+    aur_data: AurIndexData,
     /// Wording-only snapshot of why the session might be empty (banner,
     /// hints). Never drives data flow.
     aur_state: index::AurState,
@@ -1508,9 +1508,9 @@ impl ShellEnv for RealEnv<'_> {
         {
             ui::note("AUR skipped — upgrades are repo-only; `refresh` sets it up");
         }
-        // With an empty session the recompute naturally yields repo upgrades
+        // With empty AUR data the recompute naturally yields repo upgrades
         // only — no separate fallback path.
-        self.session.recompute_remaining(self.devel)
+        self.aur_data.recompute_remaining(self.devel)
     }
 
     fn refresh(&mut self) -> Result<mirror::RefreshOutcome> {
@@ -1531,9 +1531,9 @@ impl ShellEnv for RealEnv<'_> {
             .map(Row::Repo)
             .collect();
         let aur = self
-            .session
-            .secondary()
-            .search(self.session.index(), &regexes);
+            .aur_data
+            .lookup()
+            .search(self.aur_data.index(), &regexes);
         rows.extend(aur.into_iter().map(Row::Aur));
         // Rank the merged repo+AUR list best-first (name-prefix > substring >
         // description; shorter names win; AUR ties break freshest-first).
@@ -1587,8 +1587,7 @@ impl ShellEnv for RealEnv<'_> {
                 // `pacman -Sy` ran since) — fall through to the AUR lookup.
             }
             if index::print_aur_info(
-                self.session.index(),
-                self.session.secondary(),
+                &self.aur_data,
                 t,
                 aur_sources.get_or_insert_with(index::info::InfoSources::open),
             ) {
@@ -1629,9 +1628,9 @@ impl ShellEnv for RealEnv<'_> {
                 repo: Some(repo.clone()),
             });
         }
-        self.session
-            .secondary()
-            .lookup(self.session.index(), target.as_str())
+        self.aur_data
+            .lookup()
+            .lookup(self.aur_data.index(), target.as_str())
             .map(|_| StageClass {
                 source: Source::Aur,
                 repo: None,
@@ -1646,15 +1645,15 @@ impl ShellEnv for RealEnv<'_> {
     }
 
     fn pkgbase_of(&self, target: &PkgTarget) -> Option<PkgBase> {
-        self.session
-            .secondary()
-            .lookup(self.session.index(), target.as_str())
+        self.aur_data
+            .lookup()
+            .lookup(self.aur_data.index(), target.as_str())
             .map(|e| e.pkgbase.clone())
     }
 
     fn review(&mut self, target: &PkgTarget) -> Result<ReviewOutcome> {
-        let session = &self.session;
-        let Some(entry) = session.secondary().lookup(session.index(), target.as_str()) else {
+        let aur_data = &self.aur_data;
+        let Some(entry) = aur_data.entry(target.as_str()) else {
             ui::warn(&format!("{}: not an AUR package", target.as_str()));
             return Ok(ReviewOutcome::Skipped);
         };
@@ -1725,7 +1724,7 @@ impl ShellEnv for RealEnv<'_> {
         // the cached resolution is stale once apply runs whatever its outcome;
         // drop it so the next `show` re-resolves against the new system state.
         self.view = None;
-        let session = &self.session;
+        let aur_data = &self.aur_data;
         let pac = upgrade::system_pac()?;
 
         // Preflight the repo-upgrade lane before anything is asked of the user:
@@ -1737,11 +1736,11 @@ impl ShellEnv for RealEnv<'_> {
         if !cart.repo_upgrades().is_empty() {
             upgrade::resync_repo_dbs(self.cfg);
         }
-        let repo_sel = self.repo_upgrade_selection(session, cart)?;
+        let repo_sel = self.repo_upgrade_selection(aur_data, cart)?;
         let blockers = if repo_sel.repo.is_empty() {
             Vec::new()
         } else {
-            match sysupgrade_gate(session, cart, &repo_sel)? {
+            match sysupgrade_gate(aur_data, cart, &repo_sel)? {
                 Some(blockers) => blockers,
                 None => return Ok(ApplyOutcome::Declined),
             }
@@ -1755,16 +1754,16 @@ impl ShellEnv for RealEnv<'_> {
             .install_targets()
             .into_iter()
             .partition(|t| blockers.iter().any(|b| b == t.spec.as_str()));
-        let blocker_plan = self.resolve_plan(session, &pac, &blocker_targets)?;
-        let main_plan = self.resolve_plan(session, &pac, &main_targets)?;
+        let blocker_plan = self.resolve_plan(aur_data, &pac, &blocker_targets)?;
+        let main_plan = self.resolve_plan(aur_data, &pac, &main_targets)?;
 
         // No table redraw — `show` is where the user looked. `apply` gates on the
         // one-line cost summary plus a single confirm (phase 5a).
         let size_pac = upgrade::synced_pac()?;
-        let roots = txn_roots(cart, session, &size_pac);
+        let roots = txn_roots(cart, aur_data, &size_pac);
         let (repo_deps, aur_deps) = merged_dep_rows(main_plan.as_ref(), blocker_plan.as_ref());
         let removals: Vec<PkgName> = cart.removals().to_vec();
-        let metrics = upgrade::preview_metrics(session, &roots, main_plan.as_ref());
+        let metrics = upgrade::preview_metrics(aur_data, &roots, main_plan.as_ref());
         ui::info(&ui::cost_summary(
             &roots, &repo_deps, &aur_deps, &removals, &size_pac, &metrics,
         ));
@@ -1786,12 +1785,13 @@ impl ShellEnv for RealEnv<'_> {
         // sysupgrade would break).
         let mut report = build::RunReport::default();
         if let Some(plan) = &blocker_plan {
-            report = build::apply_plan(self.cfg, session.index(), &pac, plan, opts, &mut reviewed)?;
+            report =
+                build::apply_plan(self.cfg, aur_data.index(), &pac, plan, opts, &mut reviewed)?;
             if !report.all_landed() {
                 // The blocker didn't land, so the repo lane would fail exactly
                 // as preflighted — stop before it runs. The repo rows haven't
                 // run either, so they stay staged (`repo_landed = false`).
-                return Ok(cart_apply_outcome(&report, cart, session, false));
+                return Ok(cart_apply_outcome(&report, cart, aur_data, false));
             }
         }
 
@@ -1806,10 +1806,10 @@ impl ShellEnv for RealEnv<'_> {
         // gated by the confirm above, so `apply_plan` doesn't re-ask.
         if let Some(plan) = &main_plan {
             let main_report =
-                build::apply_plan(self.cfg, session.index(), &pac, plan, opts, &mut reviewed)?;
+                build::apply_plan(self.cfg, aur_data.index(), &pac, plan, opts, &mut reviewed)?;
             report.absorb(main_report);
         }
-        let outcome = cart_apply_outcome(&report, cart, session, true);
+        let outcome = cart_apply_outcome(&report, cart, aur_data, true);
         if !matches!(outcome, ApplyOutcome::Succeeded) {
             return Ok(outcome);
         }
@@ -1856,9 +1856,10 @@ impl ShellEnv for RealEnv<'_> {
         if !ui::confirm_default_no(&prompt)? {
             return Ok(None);
         }
-        // The in-memory session (mmap of the now-deleted index) stays valid and
-        // loaded on purpose: search/info keep answering from it, and the next
-        // `refresh`/`upgrade` re-bootstraps the mirror + index from scratch.
+        // The in-memory AUR data (mmap of the now-deleted index) stays valid
+        // and loaded on purpose: search/info keep answering from it, and the
+        // next `refresh`/`upgrade` re-bootstraps the mirror + index from
+        // scratch.
         system::prune().map(Some)
     }
 }
@@ -1869,7 +1870,7 @@ impl RealEnv<'_> {
     /// installed packages, keyed by pkgname). Empty when there's no session or no
     /// such rows, in which case the table's build column stays blank.
     fn search_metrics(&self, rows: &[ui::SearchRow]) -> ui::PreviewMetrics {
-        let session = &self.session;
+        let aur_data = &self.aur_data;
         let roots: Vec<ui::TxnRoot> = rows
             .iter()
             .filter(|r| r.install.installed() && r.repo.rank() == RepoRank::Aur)
@@ -1885,7 +1886,7 @@ impl RealEnv<'_> {
         if roots.is_empty() {
             return ui::PreviewMetrics::empty();
         }
-        upgrade::preview_metrics(session, &roots, None)
+        upgrade::preview_metrics(aur_data, &roots, None)
     }
 
     /// Re-fetch the mirror + index (subject to `policy`'s TTL) and reload the
@@ -1898,8 +1899,8 @@ impl RealEnv<'_> {
     /// just changed.
     fn reload(&mut self, policy: upgrade::FetchPolicy) -> Result<Option<mirror::RefreshOutcome>> {
         let reload = upgrade::refresh_and_reload(self.cfg, policy)?;
-        self.caches = build_universe(&reload.session);
-        self.session = reload.session;
+        self.caches = build_universe(&reload.data);
+        self.aur_data = reload.data;
         self.aur_state = index::AurState::probe(self.cfg);
         self.view = None;
         Ok(reload.outcome)
@@ -1913,13 +1914,13 @@ impl RealEnv<'_> {
     /// rows — `show` must never abort.
     fn transaction_view(&mut self, cart: &Cart) -> Result<ui::Table> {
         self.ensure_view(cart)?;
-        let session = &self.session;
+        let aur_data = &self.aur_data;
         let r = &self
             .view
             .as_ref()
             .expect("ensure_view populated the cache on Ok")
             .resolved;
-        let roots = txn_roots(cart, session, &r.size_pac);
+        let roots = txn_roots(cart, aur_data, &r.size_pac);
         let removals: Vec<PkgName> = cart.removals().to_vec();
         Ok(ui::transaction_table(
             &roots,
@@ -1953,17 +1954,17 @@ impl RealEnv<'_> {
     /// two alpm opens + the metrics store), recomputed only on a package-set
     /// change or a reload/apply.
     fn resolve_view(&self, cart: &Cart) -> Result<ResolvedTxn> {
-        let session = &self.session;
+        let aur_data = &self.aur_data;
         let pac = upgrade::system_pac()?;
-        let plan = self.resolve_plan(session, &pac, &cart.install_targets())?;
+        let plan = self.resolve_plan(aur_data, &pac, &cart.install_targets())?;
         // Sizes from the freshly-synced db (the new versions' real download cost).
         let size_pac = upgrade::synced_pac()?;
         let (repo_deps, aur_deps) = upgrade::dep_rows(plan.as_ref());
         // Roots feed only the (approval-independent) build-time overlay here; the
         // render re-derives approval-aware roots from the live cart.
-        let roots = txn_roots(cart, session, &size_pac);
-        let metrics = upgrade::preview_metrics(session, &roots, plan.as_ref());
-        let preflight = self.preview_preflight(session, cart);
+        let roots = txn_roots(cart, aur_data, &size_pac);
+        let metrics = upgrade::preview_metrics(aur_data, &roots, plan.as_ref());
+        let preflight = self.preview_preflight(aur_data, cart);
         Ok(ResolvedTxn {
             size_pac,
             repo_deps,
@@ -1980,13 +1981,13 @@ impl RealEnv<'_> {
     /// preflight consumer).
     fn preview_preflight(
         &self,
-        session: &UpgradeSession,
+        aur_data: &AurIndexData,
         cart: &Cart,
     ) -> Vec<upgrade::PreflightNote> {
         if cart.repo_upgrades().is_empty() {
             return Vec::new();
         }
-        let sel = match self.repo_upgrade_selection(session, cart) {
+        let sel = match self.repo_upgrade_selection(aur_data, cart) {
             Ok(sel) => sel,
             Err(e) => {
                 debug!(error = %e, "preview preflight skipped (upgrade selection failed)");
@@ -1997,7 +1998,7 @@ impl RealEnv<'_> {
             return Vec::new();
         }
         match preflight::sysupgrade(&sel.repo_skipped) {
-            Ok(issues) => upgrade::preflight_notes(issues, session, cart),
+            Ok(issues) => upgrade::preflight_notes(issues, aur_data, cart),
             Err(e) => {
                 debug!(error = %e, "preview preflight skipped (could not run prepare)");
                 Vec::new()
@@ -2011,7 +2012,7 @@ impl RealEnv<'_> {
     /// subset is empty (a repo-upgrade-only or removal-only cart / phase).
     fn resolve_plan(
         &self,
-        session: &UpgradeSession,
+        aur_data: &AurIndexData,
         pac: &PacmanIndex,
         targets: &[build::Target],
     ) -> Result<Option<Plan>> {
@@ -2020,8 +2021,8 @@ impl RealEnv<'_> {
         }
         let plan = build::resolve_targets(
             self.cfg,
-            session.index(),
-            session.secondary(),
+            aur_data.index(),
+            aur_data.lookup(),
             pac,
             targets,
             false,
@@ -2035,7 +2036,7 @@ impl RealEnv<'_> {
     /// wrong packages.
     fn repo_upgrade_selection(
         &self,
-        session: &UpgradeSession,
+        aur_data: &AurIndexData,
         cart: &Cart,
     ) -> Result<UpgradeSelection> {
         let staged: HashSet<PkgName> = cart
@@ -2045,7 +2046,7 @@ impl RealEnv<'_> {
             .collect();
         let mut repo = Vec::new();
         let mut repo_skipped = Vec::new();
-        for u in session
+        for u in aur_data
             .recompute_remaining(self.devel)?
             .into_iter()
             .filter(|u| u.repo != REPO_AUR)
@@ -2080,17 +2081,14 @@ impl RealEnv<'_> {
 fn cart_apply_outcome(
     report: &build::RunReport,
     cart: &Cart,
-    session: &UpgradeSession,
+    aur_data: &AurIndexData,
     repo_landed: bool,
 ) -> ApplyOutcome {
     if report.all_landed() {
         return ApplyOutcome::Succeeded;
     }
     let installed = landed_install_specs(cart, &report.installed, repo_landed, |it| {
-        session
-            .secondary()
-            .lookup(session.index(), it.spec())
-            .map(|e| e.pkgbase.clone())
+        aur_data.entry(it.spec()).map(|e| e.pkgbase.clone())
     });
     ApplyOutcome::Failed { installed }
 }
@@ -2124,7 +2122,7 @@ fn landed_install_specs(
 /// that resolve flagged breakage and must install ahead of the repo lane.
 /// `Ok(None)` means the user declined at the override prompt.
 fn sysupgrade_gate(
-    session: &UpgradeSession,
+    aur_data: &AurIndexData,
     cart: &Cart,
     sel: &UpgradeSelection,
 ) -> Result<Option<Vec<PkgName>>> {
@@ -2143,7 +2141,7 @@ fn sysupgrade_gate(
     // The same structured events the passthrough lane logs, then the
     // human-facing notes with remediation.
     preflight::log_issues(&issues);
-    let notes = upgrade::preflight_notes(issues, session, cart);
+    let notes = upgrade::preflight_notes(issues, aur_data, cart);
     let mut blockers = Vec::new();
     let mut blocking = false;
     for note in &notes {
@@ -2199,19 +2197,19 @@ const fn approval_cell(approval: Approval) -> ui::ApprovalCell {
 /// Build the numbered root rows for the unified table from the (sorted) cart,
 /// resolving each row's version pair and AUR age. `size_pac` is the synced
 /// snapshot — it carries the new repo versions for fresh repo installs.
-fn txn_roots(cart: &Cart, session: &UpgradeSession, size_pac: &PacmanIndex) -> Vec<ui::TxnRoot> {
+fn txn_roots(cart: &Cart, aur_data: &AurIndexData, size_pac: &PacmanIndex) -> Vec<ui::TxnRoot> {
     let now = SystemTime::now();
     cart.items()
         .iter()
         .map(|it| {
-            let (old_ver, new_ver) = row_versions(it, session, size_pac);
+            let (old_ver, new_ver) = row_versions(it, aur_data, size_pac);
             ui::TxnRoot {
                 repo: it.repo_label(),
                 approval: approval_cell(it.approval),
                 name: PkgName::from(it.spec()),
                 old_ver,
                 new_ver,
-                age: aur_age(it, session, now),
+                age: aur_age(it, aur_data, now),
             }
         })
         .collect()
@@ -2223,17 +2221,14 @@ fn txn_roots(cart: &Cart, session: &UpgradeSession, size_pac: &PacmanIndex) -> V
 /// leaves the version cell blank but aligned).
 fn row_versions(
     it: &CartItem,
-    session: &UpgradeSession,
+    aur_data: &AurIndexData,
     size_pac: &PacmanIndex,
 ) -> (Option<Version>, Option<Version>) {
     if let Some(u) = &it.upgrade {
         return (Some(u.old_ver.clone()), Some(u.new_ver.clone()));
     }
     let new = match it.source {
-        Source::Aur => session
-            .secondary()
-            .lookup(session.index(), it.spec())
-            .map(IndexEntry::version),
+        Source::Aur => aur_data.entry(it.spec()).map(IndexEntry::version),
         Source::Repo => size_pac.sync_version(it.spec()).map(Version::from),
     };
     (None, new)
@@ -2243,11 +2238,11 @@ fn row_versions(
 /// for the table's age column. `None` for repo rows, when there's no matching
 /// index entry, or when the commit time is unrecorded (the
 /// [`crate::units::UnixTime`] sentinel in archives predating the field).
-fn aur_age(it: &CartItem, session: &UpgradeSession, now: SystemTime) -> Option<Duration> {
+fn aur_age(it: &CartItem, aur_data: &AurIndexData, now: SystemTime) -> Option<Duration> {
     if it.source != Source::Aur {
         return None;
     }
-    let entry = session.secondary().lookup(session.index(), it.spec())?;
+    let entry = aur_data.entry(it.spec())?;
     now.duration_since(entry.commit_time.system_time()?).ok()
 }
 

@@ -1,6 +1,6 @@
 //! Classify a single dep reference into Installed / Repo / AUR / Missing.
 
-use crate::index::secondary::Secondary;
+use crate::index::lookup::Lookup;
 use crate::names::PkgName;
 use crate::pacman::alpm_db::PacmanIndex;
 
@@ -38,9 +38,9 @@ pub enum Source {
 /// AUR even if AUR has its own copy — matches yay/paru convention. Inside the
 /// AUR, pkgname beats provides beats pkgbase; the pkgbase fallback lets users
 /// type `-S bisq` for an entry whose pkgname is `bisq-desktop`. With no AUR
-/// data in play `by` is simply *empty* (see `UpgradeSession::load`) and every
+/// data in play `by` is simply *empty* (see `AurIndexData::load`) and every
 /// non-pacman name lands on [`Source::Missing`].
-pub fn classify(by: &Secondary, pac: &PacmanIndex, name: &str) -> Source {
+pub fn classify(by: &Lookup, pac: &PacmanIndex, name: &str) -> Source {
     if let Some((concrete, installed)) = pac.resolve_concrete(name) {
         return if installed {
             Source::Installed(concrete.clone())
@@ -85,7 +85,7 @@ mod tests {
         }
     }
 
-    fn fixture() -> (IndexFile, Secondary, PacmanIndex) {
+    fn fixture() -> (IndexFile, Lookup, PacmanIndex) {
         let idx = IndexFile {
             entries: vec![
                 mk_aur("cower", &["cower"], &[]),
@@ -95,7 +95,7 @@ mod tests {
             ],
             ..IndexFile::empty()
         };
-        let by = Secondary::build(&idx);
+        let by = Lookup::build(&idx);
         let mut pac = PacmanIndex::default();
         pac.installed.insert("vim".into(), "9.0-1".into());
         pac.sync_versions.insert("firefox".into(), "110.0-1".into());
@@ -104,10 +104,10 @@ mod tests {
         (idx, by, pac)
     }
 
-    /// The "no AUR data" view: an empty secondary, exactly what
-    /// `UpgradeSession::empty()` feeds the resolver.
-    fn empty_by() -> Secondary {
-        Secondary::build(&IndexFile::empty())
+    /// The "no AUR data" view: an empty lookup, exactly what
+    /// `AurIndexData::empty()` feeds the resolver.
+    fn empty_by() -> Lookup {
+        Lookup::build(&IndexFile::empty())
     }
 
     #[test]
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn missing_without_aur_index() {
-        // No AUR data (pure pacman environment): the empty secondary yields
+        // No AUR data (pure pacman environment): the empty lookup yields
         // Missing for AUR-only names…
         let (_idx, _by, pac) = fixture();
         let by = empty_by();

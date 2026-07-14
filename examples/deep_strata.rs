@@ -6,7 +6,7 @@
 //! actually do. Skips entries the resolver rejects (cycles, missing deps).
 
 use aurox::config::defaults::default_config;
-use aurox::index::{self, secondary::Secondary};
+use aurox::index::{self, lookup::Lookup};
 use aurox::names::PkgBase;
 use aurox::pacman::alpm_db::{self, PacmanIndex};
 use aurox::paths;
@@ -14,7 +14,7 @@ use aurox::resolver;
 
 fn main() {
     let idx = index::load(&paths::index_path()).expect("load index — run `aurox -Sy` first");
-    let by = Secondary::build(&idx);
+    let by = Lookup::build(&idx);
     let alpm = alpm_db::open().expect("open alpm");
     let pac = PacmanIndex::build(&alpm);
     let cfg = default_config();

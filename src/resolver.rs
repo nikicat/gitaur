@@ -2,7 +2,7 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::index::secondary::{self, Secondary};
+use crate::index::lookup::{self, Lookup};
 use crate::index::{IndexEntry, IndexFile};
 use crate::names::{PkgBase, PkgName, PkgTarget};
 use crate::pacman::alpm_db::PacmanIndex;
@@ -150,7 +150,7 @@ impl Origin {
 pub fn resolve(
     _cfg: &Config,
     idx: &IndexFile,
-    by: &Secondary,
+    by: &Lookup,
     pac: &PacmanIndex,
     targets: &[String],
 ) -> Result<Plan> {
@@ -178,7 +178,7 @@ pub fn resolve(
 
     let direct_set: HashSet<PkgTarget> = targets
         .iter()
-        .map(|t| PkgTarget::from(secondary::strip_version_constraint(t)))
+        .map(|t| PkgTarget::from(lookup::strip_version_constraint(t)))
         .collect();
     for t in targets {
         // Widen the raw CLI/picker string into a typed `PkgTarget` — the
@@ -363,7 +363,7 @@ fn resolve_make_edges(
 /// installed AUR pkg. Transitive deps keep the default behavior; a satisfied
 /// dep is not a rebuild trigger — so only `Origin::Direct` (the raw queue
 /// flag, not the `direct_set` backstop) arms the override.
-fn resolve_target_source(by: &Secondary, pac: &PacmanIndex, bare: &str, origin: Origin) -> Source {
+fn resolve_target_source(by: &Lookup, pac: &PacmanIndex, bare: &str, origin: Origin) -> Source {
     let source = classify(by, pac, bare);
     if origin != Origin::Direct {
         return source;
@@ -425,7 +425,7 @@ mod tests {
             entries,
             ..IndexFile::empty()
         };
-        let by = Secondary::build(&idx);
+        let by = Lookup::build(&idx);
         let mut pac = PacmanIndex::default();
         for n in repo {
             pac.sync_versions.insert((*n).into(), "1.0-1".into());
@@ -440,7 +440,7 @@ mod tests {
     /// `sync_versions` / `sync_depends` / `installed` with typed values.
     fn resolve_repo(pac: &PacmanIndex, targets: &[&str]) -> Plan {
         let idx = IndexFile::empty();
-        let by = Secondary::build(&idx);
+        let by = Lookup::build(&idx);
         let cfg = default_config();
         let targets: Vec<String> = targets.iter().map(|s| (*s).to_owned()).collect();
         resolve(&cfg, &idx, &by, pac, &targets).unwrap()
@@ -824,7 +824,7 @@ mod tests {
             entries: vec![entry("paru", &[], &["cargo", "libalpm.so"])],
             ..IndexFile::empty()
         };
-        let by = Secondary::build(&idx);
+        let by = Lookup::build(&idx);
         let mut pac = PacmanIndex::default();
         pac.sync_versions.insert("rust".into(), "1.80.0-1".into());
         pac.sync_providers
@@ -851,7 +851,7 @@ mod tests {
             entries: vec![entry("paru", &[], &["cargo"])],
             ..IndexFile::empty()
         };
-        let by = Secondary::build(&idx);
+        let by = Lookup::build(&idx);
         let mut pac = PacmanIndex::default();
         pac.installed.insert("rust".into(), "1.80.0-1".into());
         pac.installed_providers
@@ -878,7 +878,7 @@ mod tests {
             entries: vec![entry("paru", &[], &["cargo"])],
             ..IndexFile::empty()
         };
-        let by = Secondary::build(&idx);
+        let by = Lookup::build(&idx);
         let mut pac = PacmanIndex::default();
         pac.sync_versions.insert("rust".into(), "1.80.0-1".into());
         pac.sync_providers
@@ -913,7 +913,7 @@ mod tests {
             entries: vec![entry("brave-bin", &[], &[])],
             ..IndexFile::empty()
         };
-        let by = Secondary::build(&idx);
+        let by = Lookup::build(&idx);
         let mut pac = PacmanIndex::default();
         pac.installed
             .insert("brave-bin".into(), "1:1.90.121-1".into());
@@ -931,7 +931,7 @@ mod tests {
             entries: vec![entry("client", &[], &["helper"]), entry("helper", &[], &[])],
             ..IndexFile::empty()
         };
-        let by = Secondary::build(&idx);
+        let by = Lookup::build(&idx);
         let mut pac = PacmanIndex::default();
         pac.installed.insert("helper".into(), "1.0-1".into());
         let cfg = default_config();

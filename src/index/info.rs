@@ -13,8 +13,8 @@
 
 use crate::config::Config;
 use crate::error::Result;
-use crate::index::schema::{IndexEntry, IndexFile};
-use crate::index::{AurState, load_or_resync, secondary};
+use crate::index::schema::IndexEntry;
+use crate::index::{AurIndexData, AurState};
 use crate::names::{Maintainer, PkgName, PkgTarget};
 use crate::pacman::alpm_db;
 use crate::paths;
@@ -43,12 +43,11 @@ pub fn cmd_info(cfg: &Config, targets: &[PkgTarget]) -> Result<u8> {
             return Ok(1);
         }
     }
-    let idx = load_or_resync(cfg, &paths::index_path())?;
-    let by = secondary::Secondary::build(&idx);
+    let data = AurIndexData::load(cfg)?;
     let sources = InfoSources::open();
     let missing: Vec<&PkgTarget> = targets
         .iter()
-        .filter(|t| !print_aur_info(&idx, &by, t, &sources))
+        .filter(|t| !print_aur_info(&data, t, &sources))
         .collect();
     if !missing.is_empty() {
         ui::warn(&format!(
@@ -64,18 +63,17 @@ pub fn cmd_info(cfg: &Config, targets: &[PkgTarget]) -> Result<u8> {
     Ok(u8::from(!missing.is_empty()))
 }
 
-/// Look up one target (pkgname / provides / pkgbase, via [`secondary`]) against
-/// an already-loaded index and print its `-Si`-style block. `false` ⇒ not in
+/// Look up one target (pkgname / provides / pkgbase, via
+/// [`AurIndexData::entry`]) and print its `-Si`-style block. `false` ⇒ not in
 /// the AUR — the caller decides how to report the miss ([`cmd_info`] warns
 /// "not in AUR"; the shell first tries the sync repos and words it
 /// accordingly). Shared so both surfaces resolve a name identically.
 pub(crate) fn print_aur_info(
-    idx: &IndexFile,
-    by: &secondary::Secondary,
+    data: &AurIndexData,
     target: &PkgTarget,
     sources: &InfoSources,
 ) -> bool {
-    match by.lookup(idx, target.as_str()) {
+    match data.entry(target.as_str()) {
         Some(entry) => {
             print_info(entry, &sources.extras(entry));
             true

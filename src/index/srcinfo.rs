@@ -328,7 +328,7 @@ pkgname = foo-b
         // When `provides` is declared at the pkgbase level, every pkgname is
         // a provider — we encode that by leaving the per-pkgname slots
         // empty and letting `e.provides` carry the line. Resolution code
-        // that walks both via `all_provides()` (or queries Secondary) sees
+        // that walks both via `all_provides()` (or queries Lookup) sees
         // the same lookup either way.
         let s = "pkgbase = foo\npkgver = 1\npkgrel = 1\nprovides = bar\npkgname = foo\npkgname = foo-extras\n";
         let e = parse(s).unwrap();

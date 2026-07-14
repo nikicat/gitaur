@@ -1,23 +1,27 @@
 //! In-memory index of AUR pkgbases, persisted as a single rkyv-archived file.
 //!
-//! Loaded via mmap with no per-entry deserialization. Secondary hashmaps
-//! (`by_name`, `by_provides`) are built post-load in [`secondary`].
+//! Loaded via mmap with no per-entry deserialization. Name-lookup hashmaps
+//! (`by_name`, `by_provides`, `by_pkgbase`) are built post-load in
+//! [`lookup`]; [`AurIndexData`] bundles the two into the one value the rest
+//! of the crate consumes.
 
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::mirror;
-use crate::names::SearchTerm;
+use crate::names::{PkgBase, PkgName, RepoName, SearchTerm};
+use crate::pacman::invoke::REPO_AUR;
 use crate::paths;
 use crate::runopts;
 use crate::ui;
+use lookup::{AurClass, Lookup};
 use rkyv::rancor::Error as RkyvError;
 use std::path::Path;
 use tracing::{debug, info, instrument};
 
 pub mod build;
 pub mod info;
+pub mod lookup;
 pub mod schema;
-pub mod secondary;
 pub mod srcinfo;
 pub mod update;
 
@@ -136,7 +140,7 @@ pub fn load_or_resync(cfg: &Config, path: &Path) -> Result<IndexFile> {
 /// for user-facing wording and the shell's first-launch question.
 ///
 /// Functional code never branches on this: when AUR data is unavailable the
-/// loader seam ([`crate::build::UpgradeSession::load`]) returns an *empty*
+/// loader seam ([`crate::build::AurIndexData::load`]) returns an *empty*
 /// index, so search/resolve/install/upgrade all take one uniform path and the
 /// AUR simply contributes no rows. Pacman-only mode (`aur = false`)
 /// deliberately ignores a leftover `index.bin` from before the switch.
@@ -161,6 +165,95 @@ impl AurState {
             Self::Ready
         } else {
             Self::NotSetUp
+        }
+    }
+}
+
+/// The loaded AUR data: the index plus its name-[`Lookup`] maps — the one
+/// value that answers "what does the AUR have?" for search, resolve, info,
+/// and upgrade scans.
+///
+/// **[`Self::load`] is the one seam where AUR availability affects data
+/// flow**: when the AUR is unavailable — never synced, or `aur = false` — it
+/// loads *empty*, so every downstream path runs uniformly and the AUR simply
+/// contributes no rows. Wording decisions consult [`AurState`] instead of
+/// branching on emptiness.
+pub struct AurIndexData {
+    idx: IndexFile,
+    by: Lookup,
+    /// Provenance/display label for rows served from this data — always
+    /// [`REPO_AUR`] today; the hook for future non-AUR package repos.
+    label: RepoName,
+}
+
+impl AurIndexData {
+    /// Load the on-disk index (resyncing an incompatible one) and build its
+    /// lookup maps; empty when [`AurState::probe`] isn't [`AurState::Ready`].
+    pub fn load(cfg: &Config) -> Result<Self> {
+        if AurState::probe(cfg) != AurState::Ready {
+            return Ok(Self::empty());
+        }
+        Ok(Self::from_index(load_or_resync(cfg, &paths::index_path())?))
+    }
+
+    /// Zero AUR entries — the pacman-only / not-yet-synced view.
+    pub fn empty() -> Self {
+        Self::from_index(IndexFile::empty())
+    }
+
+    /// Wrap an already-loaded index, building its lookup maps.
+    pub fn from_index(idx: IndexFile) -> Self {
+        let by = Lookup::build(&idx);
+        Self {
+            idx,
+            by,
+            label: RepoName::from(REPO_AUR),
+        }
+    }
+
+    /// The loaded index — immutable for this value's lifetime.
+    pub const fn index(&self) -> &IndexFile {
+        &self.idx
+    }
+
+    /// Raw access to the name-lookup maps, for callers that need the maps
+    /// themselves (e.g. the completion universe). Most callers want
+    /// [`Self::entry`] / [`Self::search`].
+    pub const fn lookup(&self) -> &Lookup {
+        &self.by
+    }
+
+    /// The provenance label rows from this data carry (`aur`).
+    pub const fn label(&self) -> &RepoName {
+        &self.label
+    }
+
+    /// Resolve one user-typed spec — pkgname, `provides` virtual, or pkgbase,
+    /// in that precedence — to its entry.
+    pub fn entry(&self, spec: &str) -> Option<&IndexEntry> {
+        self.by.lookup(&self.idx, spec)
+    }
+
+    /// Regex search across pkgnames / descriptions / provides.
+    pub fn search(&self, regexes: &[regex::Regex]) -> Vec<&IndexEntry> {
+        self.by.search(&self.idx, regexes)
+    }
+
+    /// How a foreign (non-repo) localdb pkgname relates to this data — own
+    /// pkgname / provides / pkgbase / unknown.
+    pub fn classify_foreign(&self, name: &PkgName) -> AurClass<'_> {
+        self.by.classify_foreign(&self.idx, name)
+    }
+
+    /// The pkgbase that owns a foreign localdb pkgname, or `None` when the
+    /// name isn't in the index. Maps an AUR upgrade row (keyed by pkgname)
+    /// back to the pkgbase build bookkeeping is keyed on.
+    pub fn pkgbase_of(&self, name: &PkgName) -> Option<&PkgBase> {
+        match self.classify_foreign(name) {
+            AurClass::AsPkgname(e) | AurClass::AsProvides(e) | AurClass::AsPkgbase(e) => {
+                Some(&e.pkgbase)
+            }
+            AurClass::NotInAur => None,
         }
     }
 }
@@ -195,7 +288,7 @@ pub fn cmd_search(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
         }
     }
     let idx = load_or_resync(cfg, &path)?;
-    let by = secondary::Secondary::build(&idx);
+    let by = Lookup::build(&idx);
     let regexes: Vec<regex::Regex> = terms
         .iter()
         .map(SearchTerm::compile)

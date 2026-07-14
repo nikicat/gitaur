@@ -1,4 +1,4 @@
-//! Secondary lookup tables built after loading the primary index.
+//! Lookup lookup tables built after loading the primary index.
 
 use crate::index::schema::{IndexEntry, IndexFile};
 use crate::names::{PkgBase, PkgName, VirtualName};
@@ -42,7 +42,7 @@ pub enum AurClass<'a> {
 /// primary pkgnames, [`VirtualName`] for `provides=` declarations,
 /// [`PkgBase`] for mirror branches. The three are deliberately distinct
 /// at the type level — see [`AurClass`] for the cross-domain bridge.
-pub struct Secondary {
+pub struct Lookup {
     /// pkgname → entries[idx]. Split pkgs map multiple names to the same idx.
     pub by_name: HashMap<PkgName, u32>,
     /// `provides=` virtual name → set of entry indices. Keys are
@@ -56,7 +56,7 @@ pub struct Secondary {
     pub by_pkgbase: HashMap<PkgBase, u32>,
 }
 
-impl Secondary {
+impl Lookup {
     /// Build `by_name`, `by_provides`, and `by_pkgbase` over the loaded index.
     #[instrument(skip(idx), fields(entries = idx.entries.len()))]
     pub fn build(idx: &IndexFile) -> Self {
@@ -90,7 +90,7 @@ impl Secondary {
             by_name = by_name.len(),
             by_provides = by_provides.len(),
             by_pkgbase = by_pkgbase.len(),
-            "secondary indexes built"
+            "lookup maps built"
         );
         Self {
             by_name,
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn split_pkg_maps_all_names() {
         let idx = fixture();
-        let s = Secondary::build(&idx);
+        let s = Lookup::build(&idx);
         assert!(s.by_name.contains_key("mingw-w64-gcc"));
         assert!(s.by_name.contains_key("mingw-w64-gcc-libs"));
         assert_eq!(
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn lookup_falls_back_to_provides() {
         let idx = fixture();
-        let s = Secondary::build(&idx);
+        let s = Lookup::build(&idx);
         let e = s.lookup(&idx, "paru").expect("provides lookup");
         assert_eq!(e.pkgbase, "paru-bin");
     }
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn lookup_strips_constraint() {
         let idx = fixture();
-        let s = Secondary::build(&idx);
+        let s = Lookup::build(&idx);
         assert_eq!(s.lookup(&idx, "cower>=10").unwrap().pkgbase, "cower");
     }
 
@@ -346,7 +346,7 @@ mod tests {
             entries: vec![mk("bisq", &["bisq-desktop"], &[])],
             ..IndexFile::empty()
         };
-        let s = Secondary::build(&idx);
+        let s = Lookup::build(&idx);
         assert!(
             !s.by_name.contains_key("bisq"),
             "pkgbase must not leak into by_name"
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn by_pkgbase_covers_all_entries() {
         let idx = fixture();
-        let s = Secondary::build(&idx);
+        let s = Lookup::build(&idx);
         for (i, e) in idx.entries.iter().enumerate() {
             let i = u32::try_from(i).unwrap();
             assert_eq!(s.by_pkgbase.get(&e.pkgbase).copied(), Some(i));
@@ -379,7 +379,7 @@ mod tests {
             )],
             ..IndexFile::empty()
         };
-        let s = Secondary::build(&idx);
+        let s = Lookup::build(&idx);
         let (entry_idx, pkgname) = s.provider_of(&idx, "bisq").expect("provider lookup");
         assert_eq!(entry_idx, 0);
         assert_eq!(pkgname, "bisq-desktop");
@@ -394,7 +394,7 @@ mod tests {
             entries: vec![mk("mypkg", &["mypkg", "mypkg-extras"], &["virtual"])],
             ..IndexFile::empty()
         };
-        let s = Secondary::build(&idx);
+        let s = Lookup::build(&idx);
         let (entry_idx, pkgname) = s.provider_of(&idx, "virtual").expect("provider lookup");
         assert_eq!(entry_idx, 0);
         assert_eq!(
@@ -408,7 +408,7 @@ mod tests {
         // `paru-bin` declares `provides = paru=2.0.0`; users may type
         // `paru>=1` and expect the same provider attribution.
         let idx = fixture();
-        let s = Secondary::build(&idx);
+        let s = Lookup::build(&idx);
         let hit = s.provider_of(&idx, "paru>=1").expect("provider lookup");
         assert_eq!(hit.1, "paru-bin");
     }
@@ -416,14 +416,14 @@ mod tests {
     #[test]
     fn provider_of_returns_none_when_no_provides_match() {
         let idx = fixture();
-        let s = Secondary::build(&idx);
+        let s = Lookup::build(&idx);
         assert!(s.provider_of(&idx, "nothing-provides-this").is_none());
     }
 
     #[test]
     fn search_filters_by_regex() {
         let idx = fixture();
-        let s = Secondary::build(&idx);
+        let s = Lookup::build(&idx);
         let re = regex::Regex::new("ming[wx]").unwrap();
         let hits = s.search(&idx, &[re]);
         assert_eq!(hits.len(), 1);

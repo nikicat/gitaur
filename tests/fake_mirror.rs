@@ -6,7 +6,7 @@
 
 use aurox::config::defaults::default_config;
 use aurox::index::build::full_build;
-use aurox::index::secondary::Secondary;
+use aurox::index::lookup::Lookup;
 use aurox::index::update::incremental_update;
 use aurox::index::{load, save};
 use aurox::mirror::MirrorRepo;
@@ -90,7 +90,7 @@ fn full_build_and_lookup() {
     let idx = full_build(&cfg, &mirror).unwrap();
     assert_eq!(idx.entries.len(), 3);
 
-    let secondary = Secondary::build(&idx);
+    let secondary = Lookup::build(&idx);
     assert!(secondary.lookup(&idx, "cower").is_some());
     assert_eq!(
         secondary.lookup(&idx, "paru").unwrap().pkgbase,
@@ -116,7 +116,7 @@ fn full_build_lookup_by_pkgbase_when_no_pkgname_matches() {
     let mirror = MirrorRepo::open(&bare).unwrap();
     let idx = full_build(&cfg, &mirror).unwrap();
 
-    let secondary = Secondary::build(&idx);
+    let secondary = Lookup::build(&idx);
     assert!(
         !secondary.by_name.contains_key("bisq"),
         "pkgbase must not be in by_name",
