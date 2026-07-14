@@ -47,9 +47,9 @@ pub(crate) enum FetchPolicy {
 pub(crate) struct SessionReload {
     /// `None` when the TTL said the mirror was fresh and no fetch ran.
     pub outcome: Option<mirror::RefreshOutcome>,
-    /// `None` when no index is on disk even now (e.g. the bootstrap prompt was
-    /// declined, or AUR is disabled) — the caller degrades to repo-only.
-    pub session: Option<UpgradeSession>,
+    /// The reloaded AUR data — *empty* when there's still no index on disk
+    /// (bootstrap declined, AUR disabled); see [`UpgradeSession::load`].
+    pub session: UpgradeSession,
 }
 
 /// Refresh the mirror + index (subject to `policy`), then reload the session so

@@ -98,7 +98,7 @@ pub struct ExpandedTargets {
 #[instrument(skip(idx, by, pac, targets, select), fields(targets = targets.len()))]
 pub fn expand_pkgbase_targets(
     idx: &IndexFile,
-    by: Option<&Secondary>,
+    by: &Secondary,
     pac: &PacmanIndex,
     targets: &[Target],
     select: &mut PkgnameSelector<'_>,
@@ -110,10 +110,6 @@ pub fn expand_pkgbase_targets(
 
     for t in targets {
         let bare = secondary::strip_version_constraint(&t.spec);
-        let Some(by) = by else {
-            out.targets.push(t.spec.clone());
-            continue;
-        };
         // Hint recording runs *unconditionally* — the rewrite decision
         // below may short-circuit (pacman wins, passthrough, …), but the
         // resolver still classifies the spec via `resolve_target_source`
@@ -516,8 +512,7 @@ mod tests {
         // resolver pins through `by_pkgbase`, dodging by_name collisions
         // with other AUR entries that happen to ship the same pkgname.
         let (idx, by, pac) = fixture();
-        let r =
-            expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["bisq"]), &mut select_all).unwrap();
+        let r = expand_pkgbase_targets(&idx, &by, &pac, &ts(&["bisq"]), &mut select_all).unwrap();
         assert_eq!(
             r.targets,
             vec!["bisq".to_owned()],
@@ -541,8 +536,7 @@ mod tests {
         // pkgbase. `-S paru` rewrites to the pkgbase string; no selection
         // recorded because every pkgname implicitly provides the virtual.
         let (idx, by, pac) = fixture();
-        let r =
-            expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["paru"]), &mut select_all).unwrap();
+        let r = expand_pkgbase_targets(&idx, &by, &pac, &ts(&["paru"]), &mut select_all).unwrap();
         assert_eq!(r.targets, vec!["paru-bin".to_owned()]);
         assert_eq!(r.direct_pkgnames, vec![PkgName::from("paru-bin")]);
         assert!(
@@ -554,8 +548,8 @@ mod tests {
     #[test]
     fn passes_through_pacman_targets_unchanged() {
         let (idx, by, pac) = fixture();
-        let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["firefox"]), &mut select_all)
-            .unwrap();
+        let r =
+            expand_pkgbase_targets(&idx, &by, &pac, &ts(&["firefox"]), &mut select_all).unwrap();
         assert_eq!(r.targets, vec!["firefox".to_owned()]);
         assert!(r.direct_pkgnames.is_empty());
     }
@@ -567,14 +561,8 @@ mod tests {
         // the pkgbase; `direct_pkgnames` carries the actual pkgname for
         // install_stratum to mark Explicit.
         let (idx, by, pac) = fixture();
-        let r = expand_pkgbase_targets(
-            &idx,
-            Some(&by),
-            &pac,
-            &ts(&["bisq-single"]),
-            &mut select_all,
-        )
-        .unwrap();
+        let r = expand_pkgbase_targets(&idx, &by, &pac, &ts(&["bisq-single"]), &mut select_all)
+            .unwrap();
         assert_eq!(r.targets, vec!["bisq-single".to_owned()]);
         assert_eq!(
             r.direct_pkgnames,
@@ -587,8 +575,8 @@ mod tests {
     #[test]
     fn expands_split_pkgbase_to_all_pkgnames_by_default() {
         let (idx, by, pac) = fixture();
-        let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["split-pkg"]), &mut select_all)
-            .unwrap();
+        let r =
+            expand_pkgbase_targets(&idx, &by, &pac, &ts(&["split-pkg"]), &mut select_all).unwrap();
         assert_eq!(r.targets, vec!["split-pkg".to_owned()]);
         assert_eq!(
             r.direct_pkgnames,
@@ -610,8 +598,7 @@ mod tests {
         let mut select = |_pkgbase: &PkgBase, _pkgnames: &[PkgName]| -> Result<Vec<PkgName>> {
             Ok(vec![PkgName::from("split-a"), PkgName::from("split-c")])
         };
-        let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["split-pkg"]), &mut select)
-            .unwrap();
+        let r = expand_pkgbase_targets(&idx, &by, &pac, &ts(&["split-pkg"]), &mut select).unwrap();
         assert_eq!(r.targets, vec!["split-pkg".to_owned()]);
         assert_eq!(
             r.direct_pkgnames,
@@ -634,8 +621,7 @@ mod tests {
             calls += 1;
             Ok(n.to_vec())
         };
-        let r =
-            expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["cower"]), &mut select).unwrap();
+        let r = expand_pkgbase_targets(&idx, &by, &pac, &ts(&["cower"]), &mut select).unwrap();
         assert_eq!(r.targets, vec!["cower".to_owned()]);
         assert_eq!(calls, 0, "selector must not be invoked on pkgname hits");
     }
@@ -648,8 +634,7 @@ mod tests {
         // passthroughs preserve it.
         let (idx, by, pac) = fixture();
         let r =
-            expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["cower>=1.2"]), &mut select_all)
-                .unwrap();
+            expand_pkgbase_targets(&idx, &by, &pac, &ts(&["cower>=1.2"]), &mut select_all).unwrap();
         assert_eq!(r.targets, vec!["cower>=1.2".to_owned()]);
     }
 
@@ -657,8 +642,8 @@ mod tests {
     fn empty_selection_errors() {
         let (idx, by, pac) = fixture();
         let mut select = |_p: &PkgBase, _n: &[PkgName]| -> Result<Vec<PkgName>> { Ok(vec![]) };
-        let err = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["split-pkg"]), &mut select)
-            .unwrap_err();
+        let err =
+            expand_pkgbase_targets(&idx, &by, &pac, &ts(&["split-pkg"]), &mut select).unwrap_err();
         assert!(format!("{err}").contains("no pkgnames selected"));
     }
 
@@ -668,8 +653,8 @@ mod tests {
         let mut select = |_p: &PkgBase, _n: &[PkgName]| -> Result<Vec<PkgName>> {
             Ok(vec![PkgName::from("totally-unrelated")])
         };
-        let err = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["split-pkg"]), &mut select)
-            .unwrap_err();
+        let err =
+            expand_pkgbase_targets(&idx, &by, &pac, &ts(&["split-pkg"]), &mut select).unwrap_err();
         assert!(format!("{err}").contains("not a pkgname of"));
     }
 
@@ -698,14 +683,9 @@ mod tests {
         let by = Secondary::build(&idx);
         let pac = PacmanIndex::default();
 
-        let r = expand_pkgbase_targets(
-            &idx,
-            Some(&by),
-            &pac,
-            &ts(&["commit-mono-font"]),
-            &mut select_all,
-        )
-        .unwrap();
+        let r =
+            expand_pkgbase_targets(&idx, &by, &pac, &ts(&["commit-mono-font"]), &mut select_all)
+                .unwrap();
         assert_eq!(
             r.targets,
             vec!["commit-mono-font".to_owned()],
@@ -730,8 +710,8 @@ mod tests {
         // without a selection. Selection must pin the install to bisq-cli;
         // sibling pkgnames must NOT appear in direct_pkgnames.
         let (idx, by, pac) = fixture();
-        let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["bisq-cli"]), &mut select_all)
-            .unwrap();
+        let r =
+            expand_pkgbase_targets(&idx, &by, &pac, &ts(&["bisq-cli"]), &mut select_all).unwrap();
         assert_eq!(r.targets, vec!["bisq".to_owned()]);
         assert_eq!(r.direct_pkgnames, vec![PkgName::from("bisq-cli")]);
         assert_eq!(
@@ -776,7 +756,7 @@ mod tests {
         let pac = PacmanIndex::default();
         let r = expand_pkgbase_targets(
             &idx,
-            Some(&by),
+            &by,
             &pac,
             &ts(&["test-split-extras"]),
             &mut select_all,
@@ -805,8 +785,7 @@ mod tests {
         // Trivial pkgbase (one pkgname): no selection needed, no
         // pkgbase-rewrite needed; the by_name passthrough is sufficient.
         let (idx, by, pac) = fixture();
-        let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["cower"]), &mut select_all)
-            .unwrap();
+        let r = expand_pkgbase_targets(&idx, &by, &pac, &ts(&["cower"]), &mut select_all).unwrap();
         assert_eq!(r.targets, vec!["cower".to_owned()]);
         assert!(r.selections.is_empty());
         assert!(r.direct_pkgnames.is_empty());
@@ -820,7 +799,7 @@ mod tests {
         let (idx, by, pac) = fixture();
         let r = expand_pkgbase_targets(
             &idx,
-            Some(&by),
+            &by,
             &pac,
             &ts(&["bisq-cli", "bisq-daemon"]),
             &mut select_all,
@@ -841,9 +820,19 @@ mod tests {
 
     #[test]
     fn no_index_means_passthrough() {
-        let (idx, _by, pac) = fixture();
-        let r = expand_pkgbase_targets(&idx, None, &pac, &ts(&["bisq-single"]), &mut select_all)
-            .unwrap();
+        // The empty secondary — the loader seam's pacman-only view — must
+        // pass unknown specs through unrewritten.
+        let (_idx, _by, pac) = fixture();
+        let empty_idx = IndexFile::empty();
+        let empty_by = Secondary::build(&empty_idx);
+        let r = expand_pkgbase_targets(
+            &empty_idx,
+            &empty_by,
+            &pac,
+            &ts(&["bisq-single"]),
+            &mut select_all,
+        )
+        .unwrap();
         assert_eq!(r.targets, vec!["bisq-single".to_owned()]);
         assert!(r.selections.is_empty());
     }
@@ -858,8 +847,7 @@ mod tests {
     #[test]
     fn provides_rewrite_records_virtual_as_hint() {
         let (idx, by, pac) = fixture();
-        let r =
-            expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["bisq"]), &mut select_all).unwrap();
+        let r = expand_pkgbase_targets(&idx, &by, &pac, &ts(&["bisq"]), &mut select_all).unwrap();
         assert_eq!(
             r.counterpart_hints.get(&PkgBase::from("bisq")),
             Some(&PkgName::from("bisq")),
@@ -872,8 +860,8 @@ mod tests {
     #[test]
     fn split_pkgname_rewrite_records_pkgname_as_hint() {
         let (idx, by, pac) = fixture();
-        let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["bisq-cli"]), &mut select_all)
-            .unwrap();
+        let r =
+            expand_pkgbase_targets(&idx, &by, &pac, &ts(&["bisq-cli"]), &mut select_all).unwrap();
         assert_eq!(
             r.counterpart_hints.get(&PkgBase::from("bisq")),
             Some(&PkgName::from("bisq-cli")),
@@ -885,14 +873,8 @@ mod tests {
     #[test]
     fn bare_pkgbase_records_no_hint_when_none_supplied() {
         let (idx, by, pac) = fixture();
-        let r = expand_pkgbase_targets(
-            &idx,
-            Some(&by),
-            &pac,
-            &ts(&["bisq-single"]),
-            &mut select_all,
-        )
-        .unwrap();
+        let r = expand_pkgbase_targets(&idx, &by, &pac, &ts(&["bisq-single"]), &mut select_all)
+            .unwrap();
         assert!(
             r.counterpart_hints.is_empty(),
             "no inferred hint for a pkgbase-typed target without explicit Target::hint",
@@ -908,7 +890,7 @@ mod tests {
     fn explicit_hint_overrides_inferred_hint() {
         let (idx, by, pac) = fixture();
         let explicit = vec![Target::with_hint("bisq", PkgName::from("bisq-cli"))];
-        let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &explicit, &mut select_all).unwrap();
+        let r = expand_pkgbase_targets(&idx, &by, &pac, &explicit, &mut select_all).unwrap();
         assert_eq!(
             r.counterpart_hints.get(&PkgBase::from("bisq")),
             Some(&PkgName::from("bisq-cli")),
@@ -925,7 +907,7 @@ mod tests {
         let (idx, by, pac) = fixture();
         let r = expand_pkgbase_targets(
             &idx,
-            Some(&by),
+            &by,
             &pac,
             &ts(&["bisq-cli", "bisq-daemon"]),
             &mut select_all,
@@ -957,8 +939,7 @@ mod tests {
         // shape — the name in `pac.installed` collides with the AUR
         // pkgbase's `provides`.
         pac.installed.insert("paru".into(), "1.0-1".into());
-        let r =
-            expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["paru"]), &mut select_all).unwrap();
+        let r = expand_pkgbase_targets(&idx, &by, &pac, &ts(&["paru"]), &mut select_all).unwrap();
         // Spec passed through unchanged — `pac.is_installed("paru")` is
         // true, so expand did NOT rewrite to the pkgbase string. Resolver
         // routes via `by_provides` in `resolve_target_source`.
@@ -991,8 +972,8 @@ mod tests {
         // foreign at an outdated version, mirroring the
         // google-cloud-cli-bq starting state.
         pac.installed.insert("bisq-cli".into(), "1.0-1".into());
-        let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["bisq-cli"]), &mut select_all)
-            .unwrap();
+        let r =
+            expand_pkgbase_targets(&idx, &by, &pac, &ts(&["bisq-cli"]), &mut select_all).unwrap();
         // Shortcut fired — spec passes through unchanged.
         assert_eq!(r.targets, vec!["bisq-cli".to_owned()]);
         // The crucial bit: selection IS recorded against the pkgbase.
@@ -1016,8 +997,7 @@ mod tests {
         let (idx, by, mut pac) = fixture();
         // `cower` is a trivial single-pkgname pkgbase. Installed foreign.
         pac.installed.insert("cower".into(), "1.0-1".into());
-        let r = expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["cower"]), &mut select_all)
-            .unwrap();
+        let r = expand_pkgbase_targets(&idx, &by, &pac, &ts(&["cower"]), &mut select_all).unwrap();
         assert_eq!(r.targets, vec!["cower".to_owned()]);
         assert!(
             r.selections.is_empty(),

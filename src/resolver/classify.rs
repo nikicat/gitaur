@@ -37,8 +37,10 @@ pub enum Source {
 /// Pacman precedence: a name resolvable from pacman is never routed through
 /// AUR even if AUR has its own copy — matches yay/paru convention. Inside the
 /// AUR, pkgname beats provides beats pkgbase; the pkgbase fallback lets users
-/// type `-S bisq` for an entry whose pkgname is `bisq-desktop`.
-pub fn classify(by: Option<&Secondary>, pac: &PacmanIndex, name: &str) -> Source {
+/// type `-S bisq` for an entry whose pkgname is `bisq-desktop`. With no AUR
+/// data in play `by` is simply *empty* (see `UpgradeSession::load`) and every
+/// non-pacman name lands on [`Source::Missing`].
+pub fn classify(by: &Secondary, pac: &PacmanIndex, name: &str) -> Source {
     if let Some((concrete, installed)) = pac.resolve_concrete(name) {
         return if installed {
             Source::Installed(concrete.clone())
@@ -46,9 +48,6 @@ pub fn classify(by: Option<&Secondary>, pac: &PacmanIndex, name: &str) -> Source
             Source::Repo(concrete.clone())
         };
     }
-    let Some(by) = by else {
-        return Source::Missing;
-    };
     if let Some(&i) = by.by_name.get(name) {
         return Source::Aur(i as usize);
     }
@@ -105,13 +104,16 @@ mod tests {
         (idx, by, pac)
     }
 
+    /// The "no AUR data" view: an empty secondary, exactly what
+    /// `UpgradeSession::empty()` feeds the resolver.
+    fn empty_by() -> Secondary {
+        Secondary::build(&IndexFile::empty())
+    }
+
     #[test]
     fn installed_wins_everything() {
         let (_idx, by, pac) = fixture();
-        assert_eq!(
-            classify(Some(&by), &pac, "vim"),
-            Source::Installed("vim".into())
-        );
+        assert_eq!(classify(&by, &pac, "vim"), Source::Installed("vim".into()));
     }
 
     #[test]
@@ -120,7 +122,7 @@ mod tests {
         // in the AUR fixture — pacman must take precedence.
         let (_idx, by, pac) = fixture();
         assert_eq!(
-            classify(Some(&by), &pac, "firefox"),
+            classify(&by, &pac, "firefox"),
             Source::Repo("firefox".into())
         );
     }
@@ -132,7 +134,7 @@ mod tests {
         // fake "package".
         let (_idx, by, pac) = fixture();
         assert_eq!(
-            classify(Some(&by), &pac, "java-runtime"),
+            classify(&by, &pac, "java-runtime"),
             Source::Repo("jre-openjdk".into())
         );
     }
@@ -150,7 +152,7 @@ mod tests {
             .insert("cargo".into(), vec!["rustup".into()]);
         pac.sync_versions.insert("rustup".into(), "1.27-1".into());
         assert_eq!(
-            classify(None, &pac, "cargo"),
+            classify(&empty_by(), &pac, "cargo"),
             Source::Installed("rust".into())
         );
     }
@@ -158,31 +160,33 @@ mod tests {
     #[test]
     fn aur_when_pacman_misses() {
         let (_idx, by, pac) = fixture();
-        assert!(matches!(classify(Some(&by), &pac, "cower"), Source::Aur(_)));
+        assert!(matches!(classify(&by, &pac, "cower"), Source::Aur(_)));
     }
 
     #[test]
     fn aur_provides_fallback() {
         let (_idx, by, pac) = fixture();
-        assert!(matches!(classify(Some(&by), &pac, "paru"), Source::Aur(_)));
+        assert!(matches!(classify(&by, &pac, "paru"), Source::Aur(_)));
     }
 
     #[test]
     fn missing_without_aur_index() {
-        // No AUR index loaded (pure pacman environment).
+        // No AUR data (pure pacman environment): the empty secondary yields
+        // Missing for AUR-only names…
         let (_idx, _by, pac) = fixture();
-        assert_eq!(classify(None, &pac, "cower"), Source::Missing);
+        let by = empty_by();
+        assert_eq!(classify(&by, &pac, "cower"), Source::Missing);
         // …but pacman-resolvable names still classify correctly.
         assert_eq!(
-            classify(None, &pac, "firefox"),
+            classify(&by, &pac, "firefox"),
             Source::Repo("firefox".into())
         );
-        assert_eq!(classify(None, &pac, "vim"), Source::Installed("vim".into()));
+        assert_eq!(classify(&by, &pac, "vim"), Source::Installed("vim".into()));
     }
 
     #[test]
     fn unknown_is_missing() {
         let (_idx, by, pac) = fixture();
-        assert_eq!(classify(Some(&by), &pac, "nonexistent"), Source::Missing);
+        assert_eq!(classify(&by, &pac, "nonexistent"), Source::Missing);
     }
 }

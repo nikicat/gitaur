@@ -9,14 +9,14 @@
 //! ranking, and the [`ui::search_table`] renderer are shared with the shell so
 //! both render matches identically.
 
+use crate::build::UpgradeSession;
 use crate::config::Config;
 use crate::context;
 use crate::error::Result;
-use crate::index::{self, IndexEntry, secondary::Secondary};
+use crate::index::{self, IndexEntry};
 use crate::names::{NameMatch, PkgName, PkgTarget, RepoName, SearchTerm};
 use crate::pacman::alpm_db::{self, PacmanIndex, RepoHit};
 use crate::pacman::invoke::REPO_AUR;
-use crate::paths;
 use crate::ui;
 use crate::units::UnixTime;
 use crate::version::Version;
@@ -79,33 +79,24 @@ pub fn cmd_search_install(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
         .collect::<std::result::Result<_, _>>()?;
 
     // Repo + AUR searches are independent I/O — an alpm DB scan vs an index
-    // mmap. Run them concurrently and merge below.
-    let (repo_res, aur_res) = context::join(
+    // mmap. Run them concurrently and merge below. The AUR side loads *empty*
+    // when not in play (see `UpgradeSession::load`), so the merge below is
+    // uniform either way.
+    let (repo_res, session_res) = context::join(
         || alpm_db::search_sync(terms),
         // `context::join` propagates the caller's context so `load_or_resync`
         // sees `--noresync` and the right `state_dir()` even on the stolen
         // worker thread.
-        || -> Result<Option<index::IndexFile>> {
-            let path = paths::index_path();
-            if !path.exists() {
-                return Ok(None);
-            }
-            Ok(Some(index::load_or_resync(cfg, &path)?))
-        },
+        || UpgradeSession::load(cfg),
     );
     let repo_hits = repo_res?;
-    let idx = aur_res?;
-    if idx.is_none() {
+    let session = session_res?;
+    // Pacman-only mode is a standing choice — repo-only results need no nudge.
+    if index::AurState::probe(cfg) == index::AurState::NotSetUp {
         ui::warn("no AUR index; showing repo matches only (run `aurox -Sy` to index the AUR)");
     }
 
-    let aur_hits: Vec<&IndexEntry> = match idx.as_ref() {
-        Some(idx) => {
-            let by = Secondary::build(idx);
-            by.search(idx, &regexes)
-        }
-        None => Vec::new(),
-    };
+    let aur_hits: Vec<&IndexEntry> = session.secondary().search(session.index(), &regexes);
 
     // Repo and AUR rows share one relevance-ranked list (unlike yay's fixed
     // "repos on top", `rank_rows` interleaves both sources by match quality).

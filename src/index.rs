@@ -132,6 +132,39 @@ pub fn load_or_resync(cfg: &Config, path: &Path) -> Result<IndexFile> {
     }
 }
 
+/// Where the AUR half of aurox stands this run — probed once, consulted only
+/// for user-facing wording and the shell's first-launch question.
+///
+/// Functional code never branches on this: when AUR data is unavailable the
+/// loader seam ([`crate::build::UpgradeSession::load`]) returns an *empty*
+/// index, so search/resolve/install/upgrade all take one uniform path and the
+/// AUR simply contributes no rows. Pacman-only mode (`aur = false`)
+/// deliberately ignores a leftover `index.bin` from before the switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AurState {
+    /// `aur` enabled and an index is on disk: full AUR data.
+    Ready,
+    /// `aur` enabled but never synced (or pruned): AUR loads empty until a
+    /// bootstrap runs.
+    NotSetUp,
+    /// `aur = false` in config.toml: pacman-only mode by choice.
+    Disabled,
+}
+
+impl AurState {
+    /// Probe config + disk. Cheap (one `exists()`), but callers that need the
+    /// answer more than once in a command should probe once and pass it down.
+    pub fn probe(cfg: &Config) -> Self {
+        if !cfg.aur {
+            Self::Disabled
+        } else if paths::index_path().exists() {
+            Self::Ready
+        } else {
+            Self::NotSetUp
+        }
+    }
+}
+
 /// Atomically write the index to `path` via `index.bin.tmp` + rename:
 /// the [`file_header`] followed by the rkyv archive.
 #[instrument(skip(idx), fields(entries = idx.entries.len()))]
@@ -150,9 +183,16 @@ pub fn save(idx: &IndexFile, path: &Path) -> Result<()> {
 /// `-Ss` search across pkgnames/pkgdesc/provides, with pacman-style output.
 pub fn cmd_search(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
     let path = paths::index_path();
-    if !path.exists() {
-        ui::warn("no index; run `aurox -Sy` first");
-        return Ok(1);
+    match AurState::probe(cfg) {
+        AurState::Ready => {}
+        AurState::NotSetUp => {
+            ui::warn("no index; run `aurox -Sy` first");
+            return Ok(1);
+        }
+        AurState::Disabled => {
+            ui::warn("AUR search is disabled (aur = false in config.toml)");
+            return Ok(1);
+        }
     }
     let idx = load_or_resync(cfg, &path)?;
     let by = secondary::Secondary::build(&idx);

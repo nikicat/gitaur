@@ -57,11 +57,9 @@ pub fn cmd_query_upgrades(cfg: &Config, devel: DevelPolicy) -> Result<u8> {
 /// rendering) and `-Syu` (feeds the interactive picker). Unprivileged —
 /// reads alpm and the AUR index file only.
 pub fn collect_upgrade_plan(cfg: &Config, devel: DevelPolicy) -> Result<Vec<PkgUpgrade>> {
-    match UpgradeSession::load(cfg)? {
-        Some(session) => session.recompute_remaining(devel),
-        // No AUR index yet (user hasn't run `-Sy`) — repo upgrades only.
-        None => Ok(invoke::query_repo_upgrades()?),
-    }
+    // With no AUR data the session loads empty and the recompute naturally
+    // yields repo upgrades only — same path either way.
+    UpgradeSession::load(cfg)?.recompute_remaining(devel)
 }
 
 /// The once-per-session immutable state behind the no-arg `aurox` upgrade loop.
@@ -81,17 +79,26 @@ pub struct UpgradeSession {
 }
 
 impl UpgradeSession {
-    /// Load the AUR index + secondary maps once. `Ok(None)` when no index file
-    /// exists yet (no `-Sy` has run), leaving the caller to fall back to a
-    /// repo-only upgrade query.
-    pub fn load(cfg: &Config) -> Result<Option<Self>> {
-        let idx_path = paths::index_path();
-        if !idx_path.exists() {
-            return Ok(None);
+    /// Load the AUR index + secondary maps once. **This is the one seam where
+    /// AUR availability affects data flow**: when AUR data is unavailable —
+    /// never synced, or `aur = false` — the session loads *empty*, so every
+    /// downstream path (search, classify, resolve, upgrade) runs uniformly
+    /// and the AUR simply contributes no rows. Wording decisions consult
+    /// [`index::AurState`] instead of branching here.
+    pub fn load(cfg: &Config) -> Result<Self> {
+        if index::AurState::probe(cfg) != index::AurState::Ready {
+            return Ok(Self::empty());
         }
-        let idx = index::load_or_resync(cfg, &idx_path)?;
+        let idx = index::load_or_resync(cfg, &paths::index_path())?;
         let by = Secondary::build(&idx);
-        Ok(Some(Self { idx, by }))
+        Ok(Self { idx, by })
+    }
+
+    /// A session with zero AUR entries — the pacman-only / not-yet-synced view.
+    pub fn empty() -> Self {
+        let idx = IndexFile::empty();
+        let by = Secondary::build(&idx);
+        Self { idx, by }
     }
 
     /// The loaded AUR index — immutable for the session.
@@ -146,6 +153,12 @@ fn aur_upgrades(
     pac: &PacmanIndex,
     devel: DevelPolicy,
 ) -> Vec<PkgUpgrade> {
+    // An empty index (AUR not in play this run) can't answer anything —
+    // skip the foreign scan entirely so the per-pkg "not in AUR index"
+    // warns below don't fire for every foreign package.
+    if idx.entries.is_empty() {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for (name, installed_ver) in pac.foreign() {
         // Cross-domain classifier: pacman has `name` as a localdb pkgname;

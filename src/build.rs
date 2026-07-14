@@ -149,37 +149,24 @@ pub fn cmd_install(
     asdeps: bool,
     already_confirmed: bool,
 ) -> Result<u8> {
-    let idx_path = paths::index_path();
+    // Probed once: drives only the unknown-target wording below. The data
+    // flow is uniform — an unavailable AUR loads as an empty session.
+    let aur_state = index::AurState::probe(cfg);
 
     // Pacman snapshot + AUR index loaded concurrently. PacmanIndex iterates
     // every sync DB and the localdb (tens of ms on a typical system); the
     // AUR mmap + rkyv deserialize is similar. `context::join` hides one behind
     // the other and propagates the caller's context so `load_or_resync` sees
     // `--noresync` and the right `state_dir()` even on the stolen worker.
-    let (pac_res, idx_res) = context::join(
+    let (pac_res, session_res) = context::join(
         || -> Result<PacmanIndex> {
             let alpm = alpm_db::open()?;
             Ok(PacmanIndex::build(&alpm))
         },
-        || -> Result<Option<(IndexFile, Secondary)>> {
-            if !idx_path.exists() {
-                return Ok(None);
-            }
-            let idx = index::load_or_resync(cfg, &idx_path)?;
-            let by = Secondary::build(&idx);
-            Ok(Some((idx, by)))
-        },
+        || UpgradeSession::load(cfg),
     );
     let pac = pac_res?;
-    let aur_loaded = idx_res?;
-
-    let empty_idx;
-    let (idx, by): (&IndexFile, Option<&Secondary>) = if let Some((i, s)) = aur_loaded.as_ref() {
-        (i, Some(s))
-    } else {
-        empty_idx = IndexFile::empty();
-        (&empty_idx, None)
-    };
+    let session = session_res?;
 
     // `-S` has no cross-call review memory, so a fresh per-invocation set. The
     // upgrade loop keeps its own session-scoped set across batches instead.
@@ -193,12 +180,46 @@ pub fn cmd_install(
             ConfirmGate::Ask
         },
     };
-    let report = install_with_index(cfg, idx, by, &pac, targets, opts, &mut reviewed)?;
+    let report = match install_with_index(
+        cfg,
+        session.index(),
+        session.secondary(),
+        &pac,
+        targets,
+        opts,
+        &mut reviewed,
+    ) {
+        // Unresolvable targets: when no AUR data was in play the names may
+        // simply live in the (unavailable) AUR — say what would bring it in.
+        Err(Error::UnknownTargets(names)) => {
+            return Err(Error::UnknownTargets(unknown_targets_hint(
+                names, aur_state,
+            )));
+        }
+        other => other?,
+    };
     // A Ctrl+C'd build exits non-zero too: the user aborted, so `||` chains and
     // scripts should see the run didn't complete.
     Ok(u8::from(
         report.had_failures() || !report.interrupted.is_empty(),
     ))
+}
+
+/// Suffix an [`Error::UnknownTargets`] with why the AUR couldn't answer: when
+/// no AUR data was in play the unresolved names may simply be AUR packages,
+/// so point at the missing half — how to enable it, or (in pacman-only mode)
+/// why it's off. With a ready index the names are genuinely unknown and pass
+/// through unchanged.
+fn unknown_targets_hint(names: String, aur: index::AurState) -> String {
+    match aur {
+        index::AurState::Ready => names,
+        index::AurState::NotSetUp => {
+            format!("{names} (no AUR index — run `aurox -Sy` to enable AUR installs)")
+        }
+        index::AurState::Disabled => {
+            format!("{names} (AUR disabled: aur = false in config.toml)")
+        }
+    }
 }
 
 /// Resolve `targets` against a caller-supplied index + pacman snapshot, then
@@ -213,7 +234,7 @@ pub fn cmd_install(
 pub(crate) fn install_with_index(
     cfg: &Config,
     idx: &IndexFile,
-    by: Option<&Secondary>,
+    by: &Secondary,
     pac: &PacmanIndex,
     targets: &[Target],
     opts: InstallOpts,
@@ -235,7 +256,7 @@ pub(crate) fn install_with_index(
 pub(crate) fn resolve_targets(
     cfg: &Config,
     idx: &IndexFile,
-    by: Option<&Secondary>,
+    by: &Secondary,
     pac: &PacmanIndex,
     targets: &[Target],
     noconfirm: bool,
@@ -1035,11 +1056,27 @@ pub fn cmd_clean(cfg: &Config, argv: &[String]) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assert_contains;
 
     /// Locals so `&pkgbase` lives long enough for `blocking_dep`'s `&PkgBase`
     /// argument and return value.
     fn pb(s: &str) -> PkgBase {
         PkgBase::from(s)
+    }
+
+    /// The unknown-target hint diagnoses the missing half correctly: no
+    /// suffix when full AUR data was searched, "enable it with -Sy" when the
+    /// AUR is merely not set up, "it's off in config" under pacman-only mode
+    /// (where -Sy would change nothing).
+    #[test]
+    fn unknown_targets_hint_matches_the_aur_state() {
+        let ready = unknown_targets_hint("spotify".into(), index::AurState::Ready);
+        assert_eq!(ready, "spotify");
+        let not_set_up = unknown_targets_hint("spotify".into(), index::AurState::NotSetUp);
+        assert_contains!(not_set_up, "spotify");
+        assert_contains!(not_set_up, "aurox -Sy");
+        let disabled = unknown_targets_hint("spotify".into(), index::AurState::Disabled);
+        assert_contains!(disabled, "aur = false");
     }
 
     /// `blocking_dep` is the resilience gate: it answers "should I skip

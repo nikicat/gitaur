@@ -35,7 +35,7 @@ fn main() {
             continue;
         };
         let targets = vec![pkgname.name.clone().into_inner()];
-        let Ok(plan) = resolver::resolve(&cfg, &idx, Some(&by), &pac, &targets) else {
+        let Ok(plan) = resolver::resolve(&cfg, &idx, &by, &pac, &targets) else {
             continue;
         };
         let strata = plan.aur_strata.len();

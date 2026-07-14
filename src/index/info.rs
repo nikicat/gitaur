@@ -14,7 +14,7 @@
 use crate::config::Config;
 use crate::error::Result;
 use crate::index::schema::{IndexEntry, IndexFile};
-use crate::index::{load_or_resync, secondary};
+use crate::index::{AurState, load_or_resync, secondary};
 use crate::names::{Maintainer, PkgName, PkgTarget};
 use crate::pacman::alpm_db;
 use crate::paths;
@@ -29,6 +29,20 @@ use tracing::debug;
 /// `-Si` info for one or more targets (AUR-only by design — repo packages are
 /// `pacman -Si`'s job on this path; the interactive shell merges the two).
 pub fn cmd_info(cfg: &Config, targets: &[PkgTarget]) -> Result<u8> {
+    // Without this guard a missing index loads as *empty* and every target
+    // reads "not in AUR" — wrong diagnosis, the AUR just isn't in play yet
+    // (or is off by choice).
+    match AurState::probe(cfg) {
+        AurState::Ready => {}
+        AurState::NotSetUp => {
+            ui::warn("no AUR index; run `aurox -Sy` first");
+            return Ok(1);
+        }
+        AurState::Disabled => {
+            ui::warn("AUR info is disabled (aur = false in config.toml)");
+            return Ok(1);
+        }
+    }
     let idx = load_or_resync(cfg, &paths::index_path())?;
     let by = secondary::Secondary::build(&idx);
     let sources = InfoSources::open();

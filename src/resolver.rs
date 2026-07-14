@@ -143,14 +143,14 @@ impl Origin {
 
 /// Resolve `targets` against the index + pacman DBs into a [`Plan`].
 ///
-/// `by` is `None` when no AUR index is loaded (typical fresh installs where
-/// the user hasn't run `-Sy` yet); classification then degenerates to
-/// pacman-only and any unknown name short-circuits to [`Source::Missing`].
+/// With no AUR data in play `idx`/`by` are simply *empty* (the loader seam's
+/// pacman-only view); classification then degenerates to pacman-only and any
+/// unknown name short-circuits to [`Source::Missing`].
 #[instrument(skip(_cfg, idx, by, pac), fields(targets = targets.len()))]
 pub fn resolve(
     _cfg: &Config,
     idx: &IndexFile,
-    by: Option<&Secondary>,
+    by: &Secondary,
     pac: &PacmanIndex,
     targets: &[String],
 ) -> Result<Plan> {
@@ -363,17 +363,12 @@ fn resolve_make_edges(
 /// installed AUR pkg. Transitive deps keep the default behavior; a satisfied
 /// dep is not a rebuild trigger — so only `Origin::Direct` (the raw queue
 /// flag, not the `direct_set` backstop) arms the override.
-fn resolve_target_source(
-    by: Option<&Secondary>,
-    pac: &PacmanIndex,
-    bare: &str,
-    origin: Origin,
-) -> Source {
+fn resolve_target_source(by: &Secondary, pac: &PacmanIndex, bare: &str, origin: Origin) -> Source {
     let source = classify(by, pac, bare);
     if origin != Origin::Direct {
         return source;
     }
-    let (Source::Installed(_), Some(by)) = (&source, by) else {
+    let Source::Installed(_) = &source else {
         return source;
     };
     let aur_hit = by
@@ -437,7 +432,7 @@ mod tests {
         }
         let cfg = default_config();
         let targets: Vec<String> = targets.iter().map(|s| (*s).to_owned()).collect();
-        resolve(&cfg, &idx, Some(&by), &pac, &targets)
+        resolve(&cfg, &idx, &by, &pac, &targets)
     }
 
     /// Resolve `targets` against a caller-built [`PacmanIndex`] and no AUR
@@ -448,7 +443,7 @@ mod tests {
         let by = Secondary::build(&idx);
         let cfg = default_config();
         let targets: Vec<String> = targets.iter().map(|s| (*s).to_owned()).collect();
-        resolve(&cfg, &idx, Some(&by), pac, &targets).unwrap()
+        resolve(&cfg, &idx, &by, pac, &targets).unwrap()
     }
 
     /// Register a sync package with its dependency list, typed at the seam:
@@ -838,7 +833,7 @@ mod tests {
         pac.sync_providers
             .insert("libalpm.so".into(), vec!["pacman".into()]);
         let cfg = default_config();
-        let plan = resolve(&cfg, &idx, Some(&by), &pac, &["paru".to_owned()]).unwrap();
+        let plan = resolve(&cfg, &idx, &by, &pac, &["paru".to_owned()]).unwrap();
 
         assert_eq!(plan.aur_strata, vec![vec!["paru".to_owned()]]);
         let mut t = plan.transitive_repo.clone();
@@ -866,7 +861,7 @@ mod tests {
         pac.sync_providers
             .insert("cargo".into(), vec!["rust".into()]);
         let cfg = default_config();
-        let plan = resolve(&cfg, &idx, Some(&by), &pac, &["paru".to_owned()]).unwrap();
+        let plan = resolve(&cfg, &idx, &by, &pac, &["paru".to_owned()]).unwrap();
 
         assert_eq!(plan.aur_strata, vec![vec!["paru".to_owned()]]);
         assert!(plan.transitive_repo.is_empty());
@@ -892,7 +887,7 @@ mod tests {
         let plan = resolve(
             &cfg,
             &idx,
-            Some(&by),
+            &by,
             &pac,
             &["rust".to_owned(), "paru".to_owned()],
         )
@@ -923,7 +918,7 @@ mod tests {
         pac.installed
             .insert("brave-bin".into(), "1:1.90.121-1".into());
         let cfg = default_config();
-        let plan = resolve(&cfg, &idx, Some(&by), &pac, &["brave-bin".to_owned()]).unwrap();
+        let plan = resolve(&cfg, &idx, &by, &pac, &["brave-bin".to_owned()]).unwrap();
         assert_eq!(plan.aur_strata, vec![vec!["brave-bin".to_owned()]]);
     }
 
@@ -940,7 +935,7 @@ mod tests {
         let mut pac = PacmanIndex::default();
         pac.installed.insert("helper".into(), "1.0-1".into());
         let cfg = default_config();
-        let plan = resolve(&cfg, &idx, Some(&by), &pac, &["client".to_owned()]).unwrap();
+        let plan = resolve(&cfg, &idx, &by, &pac, &["client".to_owned()]).unwrap();
         // Only client should be in the build plan; helper stays satisfied.
         assert_eq!(plan.aur_strata, vec![vec!["client".to_owned()]]);
     }
