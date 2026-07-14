@@ -60,7 +60,11 @@ pub(super) fn idle_byte_bar(pb: &ProgressBar) {
 }
 
 /// Undo [`idle_byte_bar`]: restore the live streaming style (rate visible).
+/// Restarts the rate estimator first — it was measuring the pre-idle
+/// transfer, and left alone the resumed row would open on that stale value
+/// decaying, not the fresh transfer's speed.
 pub(super) fn resume_byte_bar(pb: &ProgressBar) {
+    pb.reset_eta();
     pb.set_style(bytes_pending_style());
 }
 

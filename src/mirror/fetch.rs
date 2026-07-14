@@ -6,7 +6,7 @@
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::mirror::{MirrorRepo, boxed_http_options};
-use crate::ui::GixProgress;
+use crate::ui::{GixProgress, Operation};
 use gix::ObjectId;
 use gix::bstr::ByteSlice;
 use gix::refs::TargetRef;
@@ -39,7 +39,7 @@ pub fn incremental_fetch(
     mirror: &MirrorRepo,
     mp: &MultiProgress,
 ) -> Result<Vec<RefUpdate>> {
-    let mut progress = GixProgress::with_multi("fetch", mp.clone());
+    let mut progress = GixProgress::with_multi(Operation::Fetch, mp.clone());
     let net_counter = progress.net_counter();
     let interrupt = AtomicBool::new(false);
 

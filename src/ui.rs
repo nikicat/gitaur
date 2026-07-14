@@ -21,7 +21,7 @@ mod tables;
 
 pub use change_set::{ApprovalCell, TxnRoot, cost_summary, transaction_table};
 pub use cost::PreviewMetrics;
-pub use gix_progress::GixProgress;
+pub use gix_progress::{GixProgress, Operation};
 pub use progress::{
     TICK_PERIOD, bar_bytes, bar_bytes_streaming, bar_count, bar_sideband, promote_byte_bar,
     promote_count_bar, spinner, tick,
