@@ -21,7 +21,7 @@ use tracing::{info, instrument};
 pub fn bootstrap_clone(cfg: &Config, dest: &Path, mp: &MultiProgress) -> Result<()> {
     info!(url = %cfg.mirror_url, dest = %dest.display(), "gix clone --bare");
 
-    let mut progress = ui::GixProgress::with_multi("clone", mp.clone());
+    let mut progress = ui::GixProgress::with_multi(ui::Operation::Clone, mp.clone());
     let net_counter = progress.net_counter();
     let interrupt = AtomicBool::new(false);
 

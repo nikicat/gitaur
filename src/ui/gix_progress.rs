@@ -50,6 +50,8 @@ struct Shared {
     summary: ProgressBar,
     /// Always-on wire-throughput row, fed by [`NetMeter`]'s pump thread.
     net: NetMeter,
+    /// The operation whose progress this tree renders; picks the hint set.
+    op: Operation,
 }
 
 /// A persistent `network` byte bar plus the background thread that pumps it.
@@ -212,19 +214,33 @@ fn unit_is_bytes(unit: &Unit) -> bool {
     s.is_empty()
 }
 
+/// Which mirror operation this progress tree renders.
+///
+/// Doubles as the summary row's label and calibrates the phase hints: a
+/// bootstrap clone streams the full ~2 GiB pack, while an incremental fetch
+/// packs a small delta in seconds — the same silent phase deserves very
+/// different ETAs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Operation {
+    /// Full mirror bootstrap (bare clone).
+    Clone,
+    /// Incremental refresh of an existing mirror.
+    Fetch,
+}
+
 impl GixProgress {
     /// Create a fresh adapter with its own private `MultiProgress`. Stages just
     /// the summary line; leaves spawn lazily as gix children emit progress.
-    pub fn new(label: &str) -> Self {
-        Self::with_multi(label, MultiProgress::new())
+    pub fn new(op: Operation) -> Self {
+        Self::with_multi(op, MultiProgress::new())
     }
 
     /// Like [`new`](Self::new) but draws into a caller-supplied `MultiProgress`,
     /// so the fetch's rows share one display with other concurrent progress
     /// (e.g. the parallel official-repo db sync in `mirror::cmd_refresh`). Two
     /// separate `MultiProgress` instances would fight over the terminal.
-    pub fn with_multi(label: &str, mp: MultiProgress) -> Self {
-        let summary = mp.add(bar_sideband(label));
+    pub fn with_multi(op: Operation, mp: MultiProgress) -> Self {
+        let summary = mp.add(bar_sideband(op.label()));
         summary.set_message("starting…");
         tick(&summary);
         let net = NetMeter::spawn(&mp);
@@ -233,6 +249,7 @@ impl GixProgress {
                 multi: mp,
                 summary,
                 net,
+                op,
             }),
             own_name: String::new(),
             own_unit_is_bytes: false,
@@ -343,49 +360,68 @@ fn leaf_label(name: &str) -> &str {
     }
 }
 
-/// Map known gix phase names to a one-line user-facing hint. The hint tells
-/// the user what gix is *actually* doing and gives a rough ETA so the silent
-/// phases don't look stuck. Returns `None` for unknown phases; in that case
-/// the summary shows just the raw gix name.
-///
-/// ETAs are calibrated for `github.com/archlinux/aur` (~155 k refs, ~2 GiB
-/// pack) on a residential connection; smaller repos finish faster.
-///
-/// gix also names a "receiving pack" phase, deliberately unmapped: it's set on
-/// the fetch node the instant the server announces a pack, and the "read pack"
-/// child overwrites the summary immediately after — it never renders.
-fn phase_hint(name: &str) -> Option<&'static str> {
-    let lower = name.to_ascii_lowercase();
-    if lower.starts_with("handshake") {
-        Some("TLS + HTTP smart-protocol setup")
-    } else if lower == "authentication" {
-        Some("authenticating with server")
-    } else if lower == "list refs" {
-        Some("downloading ref list (~20 s)")
-    } else if lower.starts_with("negotiate") {
-        Some("sending wants/haves to server")
-    } else if lower == "read pack" {
-        Some("silent until server finishes packing (~7–8 min)")
-    } else if lower == "remote" {
-        Some("server-side progress (counting / compressing objects)")
-    } else if lower == "indexing" || lower == "resolving deltas" || lower == "resolving" {
-        Some("local delta resolution (CPU-heavy, ~1–2 min)")
-    } else if lower.starts_with("decompress") || lower == "decoding" {
-        Some("decompressing pack entries")
-    } else if lower == "sorting by id" {
-        Some("sorting pack entries (brief)")
-    } else if lower == "writing index file" {
-        Some("writing pack index — finishing up")
-    } else if lower == "create index file" {
-        Some("building pack index")
-    } else if lower.contains("fetch") {
-        // After the last visible bar (Resolving), gix runs `update_refs` to
-        // write every received ref to disk; that step emits no progress for
-        // ~30 s – 2 min on a 155 k-ref mirror. So when we're back in the
-        // outer "fetch" name with no active child bars, mention it.
-        Some("finalizing — writing refs silently (~30 s – 2 min)")
-    } else {
-        None
+impl Operation {
+    /// Fixed label shown as the summary row's prefix.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Clone => "clone",
+            Self::Fetch => "fetch",
+        }
+    }
+
+    /// Map known gix phase names to a one-line user-facing hint. The hint tells
+    /// the user what gix is *actually* doing and gives a rough ETA so the silent
+    /// phases don't look stuck. Returns `None` for unknown phases; in that case
+    /// the summary shows just the raw gix name.
+    ///
+    /// ETAs are calibrated for `github.com/archlinux/aur` (~155 k refs, ~2 GiB
+    /// pack) on a residential connection; smaller repos finish faster. Where a
+    /// phase's duration depends on the pack size, the hint branches on the
+    /// operation — a bootstrap clone waits minutes where an incremental fetch
+    /// waits seconds.
+    ///
+    /// gix also names a "receiving pack" phase, deliberately unmapped: it's set
+    /// on the fetch node the instant the server announces a pack, and the "read
+    /// pack" child overwrites the summary immediately after — it never renders.
+    fn phase_hint(self, name: &str) -> Option<&'static str> {
+        let lower = name.to_ascii_lowercase();
+        if lower.starts_with("handshake") {
+            Some("TLS + HTTP smart-protocol setup")
+        } else if lower == "authentication" {
+            Some("authenticating with server")
+        } else if lower == "list refs" {
+            Some("downloading ref list (~20 s)")
+        } else if lower.starts_with("negotiate") {
+            Some("sending wants/haves to server")
+        } else if lower == "read pack" {
+            Some(match self {
+                Self::Clone => "server packing (~7–8 min)",
+                Self::Fetch => "server packing (a few s)",
+            })
+        } else if lower == "remote" {
+            Some("server-side progress (counting / compressing objects)")
+        } else if lower == "indexing" || lower == "resolving deltas" || lower == "resolving" {
+            Some(match self {
+                Self::Clone => "local delta resolution (CPU-heavy, ~1–2 min)",
+                Self::Fetch => "local delta resolution",
+            })
+        } else if lower.starts_with("decompress") || lower == "decoding" {
+            Some("decompressing pack entries")
+        } else if lower == "sorting by id" {
+            Some("sorting pack entries (brief)")
+        } else if lower == "writing index file" {
+            Some("writing pack index — finishing up")
+        } else if lower == "create index file" {
+            Some("building pack index")
+        } else if lower.contains("fetch") {
+            // After the last visible bar (Resolving), gix runs `update_refs` to
+            // write every received ref to disk; that step emits no progress for
+            // ~30 s – 2 min on a 155 k-ref mirror. So when we're back in the
+            // outer "fetch" name with no active child bars, mention it.
+            Some("finalizing — writing refs silently (~30 s – 2 min)")
+        } else {
+            None
+        }
     }
 }
 
@@ -402,8 +438,8 @@ fn leaf_is_muted(name: &str) -> bool {
 /// Build the summary text for a phase name, appending the hint (dimmed) when
 /// one exists. The phase name stays at full brightness so the eye locks onto
 /// it; the hint is supporting context.
-fn summary_with_hint(name: &str) -> String {
-    match phase_hint(name) {
+fn summary_with_hint(op: Operation, name: &str) -> String {
+    match op.phase_hint(name) {
         Some(hint) => format!("{name} {}", dim(format!("— {hint}"))),
         None => name.to_owned(),
     }
@@ -496,7 +532,7 @@ impl GixProgressTrait for GixProgress {
         if name != self.own_name {
             tracing::debug!(target: "gix_progress", old = %self.own_name, new = %name, "set_name");
         }
-        self.set_summary(summary_with_hint(&name));
+        self.set_summary(summary_with_hint(self.shared.op, &name));
         self.own_name.clone_from(&name);
         if let Some(pb) = self.lock_leaf().as_ref() {
             pb.set_prefix(leaf_label(&name).to_owned());
@@ -540,7 +576,7 @@ impl NestedProgress for GixProgress {
     fn add_child(&mut self, name: impl Into<String>) -> Self::SubProgress {
         let name = name.into();
         tracing::debug!(target: "gix_progress", parent = %self.own_name, child = %name, "add_child");
-        self.set_summary(summary_with_hint(&name));
+        self.set_summary(summary_with_hint(self.shared.op, &name));
         Self {
             shared: Arc::clone(&self.shared),
             own_name: name,
@@ -576,7 +612,7 @@ mod tests {
         // The whole feature hinges on this seam: the counter handed to the curl
         // backend (`net_counter`) is the one the pump mirrors into the row the
         // user sees. Bytes written to it must surface on the bar.
-        let progress = GixProgress::new("test");
+        let progress = GixProgress::new(Operation::Fetch);
         progress.net_counter().fetch_add(4096, Ordering::Relaxed);
         assert_eq!(wait_for_position(&progress.shared.net.bar, 4096), 4096);
         progress.finish();
@@ -698,7 +734,7 @@ mod tests {
     /// there, not linger (with a decaying rate) through the ref-update tail.
     #[test]
     fn read_pack_done_clears_the_network_row() {
-        let mut root = GixProgress::new("test");
+        let mut root = GixProgress::new(Operation::Fetch);
         let child = root.add_child("read pack");
         child.message(MessageLevel::Info, "done. 2.0GiB received".into());
         assert!(
@@ -714,7 +750,7 @@ mod tests {
         // gix creates and drops child nodes per phase. A child's `Drop` must
         // clear only its own leaf, never stop the shared pump — otherwise the
         // network row would freeze after the first phase ends.
-        let mut root = GixProgress::new("test");
+        let mut root = GixProgress::new(Operation::Fetch);
         let counter = root.net_counter();
         drop(root.add_child("phase"));
         counter.fetch_add(2048, Ordering::Relaxed);
