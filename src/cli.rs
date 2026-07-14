@@ -71,14 +71,14 @@ const AFTER_HELP: &str = "AUROX-OWNED OPERATIONS:\n\
   -Sy            refresh AUR mirror + rebuild index (incremental fetch)\n\
   -Syy           force full re-clone of the AUR mirror (~8–9 min)\n\
   -Syu           pacman -Syu + AUR upgrades (plan shown, one confirm up front)\n\
-  -Ss <regex>    search AUR by name/desc/provides\n\
-  -Si <pkg>      show AUR package info\n\
+  -Ss <regex>    search repos + AUR by name/desc/provides\n\
+  -Si <pkg>      show package info (repos + AUR; repo wins a shared name)\n\
   -Sc / -Scc     remove built worktrees + pass -Sc/-Scc through to pacman\n\
   -Qu            list upgrades from repos + AUR, no sudo (dry-run for -Syu)\n\
 \n\
 YAY PARITY SHORTCUTS:\n\
   aurox                 run -Syu (refresh + upgrade)\n\
-  aurox <term>...       fuzzy AUR search → multi-select picker → install\n\
+  aurox <term>...       fuzzy repos+AUR search → shell seeded with the matches\n\
 \n\
 PASS-THROUGH (raw `pacman` — clap doesn't parse these):\n\
   -Q (except -Qu), -R, -T, -D, -F, -U, and any flags they accept\n\

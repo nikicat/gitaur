@@ -28,10 +28,11 @@ use crate::cli::dispatch;
 use crate::cli::search::{Row, rank_rows, search_row};
 use crate::config::{Config, ConfigHandle};
 use crate::error::{Error, Result};
+use crate::index::info::{self, InfoLookup};
 use crate::index::{self, AurIndexData, IndexEntry};
 use crate::mirror::{self, MirrorRepo};
 use crate::names::{PkgBase, PkgName, PkgTarget, RepoName, RepoRank, SearchTerm};
-use crate::pacman::alpm_db::{self, PacmanIndex, SyncInfo};
+use crate::pacman::alpm_db::{self, PacmanIndex};
 use crate::pacman::invoke::{self, PkgUpgrade, REPO_AUR};
 use crate::pacman::preflight;
 use crate::paths;
@@ -1601,55 +1602,15 @@ impl ShellEnv for RealEnv<'_> {
     }
 
     fn show_info(&mut self, targets: &[PkgTarget]) -> Result<()> {
-        // Repo wins ties — the same rule as `classify`: pacman owns a name
-        // that lives in both a sync repo and the AUR (`info cef` must describe
-        // extra/cef, not the same-named AUR pkgbase). Targets are handled in
-        // the order given so multi-target output matches pacman's.
-        let mut alpm = None;
-        // Lazy like `alpm`: opened at the first AUR target, reused for the
-        // rest of the command (mirror + localdb handles behind the AUR
-        // block's maintainer / first-submitted / installed-size fields).
-        let mut aur_sources = None;
-        let mut missing: Vec<&PkgTarget> = Vec::new();
-        for t in targets {
-            if self.caches.sync.contains_key(t.bare()) {
-                // One handle for the whole command, opened at the first repo
-                // target — repo info works even without an AUR index.
-                if alpm.is_none() {
-                    alpm = Some(alpm_db::open()?);
-                }
-                if let Some(info) = alpm.as_ref().and_then(|a| SyncInfo::lookup(a, t.bare())) {
-                    info.print();
-                    continue;
-                }
-                // The startup cache said repo but the live DBs disagree (a
-                // `pacman -Sy` ran since) — fall through to the AUR lookup.
-            }
-            if index::print_aur_info(
-                &self.aur_data,
-                t,
-                aur_sources.get_or_insert_with(index::info::InfoSources::open),
-            ) {
-                continue;
-            }
-            missing.push(t);
-        }
+        // The shared repo-then-AUR lookup (`-Si` runs the same one); only the
+        // miss wording is the shell's — its sync verb is `refresh`.
+        let missing = InfoLookup::open(&self.aur_data)?.print_all(targets);
         if !missing.is_empty() {
-            let names = missing
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            // Only claim we checked the AUR when we actually had its data.
-            ui::warn(&match self.aur_state {
-                index::AurState::Ready => format!("not in repos or AUR: {names}"),
-                index::AurState::NotSetUp => {
-                    format!(
-                        "not in repos: {names} (AUR not set up — `refresh` enables AUR lookups)"
-                    )
-                }
-                index::AurState::Disabled => format!("not in repos: {names} (AUR disabled)"),
-            });
+            ui::warn(&info::missing_warning(
+                self.aur_state,
+                &missing,
+                "`refresh`",
+            ));
         }
         Ok(())
     }

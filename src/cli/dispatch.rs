@@ -114,7 +114,7 @@ fn handle_s(config: &ConfigHandle, cli: &Cli, f: &PacFlags, argv: &[String]) -> 
     }
 
     if f.has('s') {
-        return index::cmd_search(cfg, &search_terms(&f.positional));
+        return search::cmd_search(cfg, &search_terms(&f.positional));
     }
     if f.has('i') {
         return index::cmd_info(cfg, &pkg_targets(&f.positional));

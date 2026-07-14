@@ -8,7 +8,7 @@
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::mirror;
-use crate::names::{PkgBase, PkgName, RepoName, SearchTerm};
+use crate::names::{PkgBase, PkgName, RepoName};
 use crate::pacman::invoke::REPO_AUR;
 use crate::paths;
 use crate::runopts;
@@ -26,7 +26,6 @@ pub mod srcinfo;
 pub mod update;
 
 pub use info::cmd_info;
-pub(crate) use info::print_aur_info;
 pub use schema::{IndexEntry, IndexFile};
 
 /// Magic prefix of the plain-bytes header written ahead of the rkyv archive.
@@ -273,70 +272,9 @@ pub fn save(idx: &IndexFile, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `-Ss` search across pkgnames/pkgdesc/provides, with pacman-style output.
-pub fn cmd_search(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
-    let path = paths::index_path();
-    match AurState::probe(cfg) {
-        AurState::Ready => {}
-        AurState::NotSetUp => {
-            ui::warn("no index; run `aurox -Sy` first");
-            return Ok(1);
-        }
-        AurState::Disabled => {
-            ui::warn("AUR search is disabled (aur = false in config.toml)");
-            return Ok(1);
-        }
-    }
-    let idx = load_or_resync(cfg, &path)?;
-    let by = Lookup::build(&idx);
-    let regexes: Vec<regex::Regex> = terms
-        .iter()
-        .map(SearchTerm::compile)
-        .collect::<std::result::Result<_, _>>()?;
-    let hits = by.search(&idx, &regexes);
-    info!(count = hits.len(), "search results");
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    for entry in hits {
-        write_search_result(&mut out, entry)?;
-    }
-    Ok(0)
-}
-
-/// Render one search hit in pacman's `-Ss` format to `out`.
-///
-/// Stdout (not stderr) so `aurox -Ss foo | head` works — the equivalent
-/// `pacman -Ss` also writes results to stdout. Lifted out of `cmd_search`
-/// so the exact byte layout can be tested without spawning a process.
-fn write_search_result<W: std::io::Write>(out: &mut W, entry: &IndexEntry) -> std::io::Result<()> {
-    writeln!(
-        out,
-        "aur/{} {}",
-        entry.pkgbase,
-        version_string(entry.epoch.as_ref(), &entry.pkgver, &entry.pkgrel)
-    )?;
-    if let Some(desc) = entry.display_desc() {
-        writeln!(out, "    {desc}")?;
-    }
-    Ok(())
-}
-
-fn version_string(epoch: Option<&String>, ver: &str, rel: &str) -> String {
-    match epoch {
-        Some(e) if !e.is_empty() => format!("{e}:{ver}-{rel}"),
-        _ => format!("{ver}-{rel}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn render(entry: &IndexEntry) -> String {
-        let mut buf: Vec<u8> = Vec::new();
-        write_search_result(&mut buf, entry).unwrap();
-        String::from_utf8(buf).unwrap()
-    }
 
     fn mk(pkgbase: &str) -> IndexEntry {
         use crate::index::schema::Pkgname;
@@ -351,50 +289,6 @@ mod tests {
             pkgrel: "1".into(),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn search_result_writes_to_writer_not_stdout() {
-        // The function takes any Write, so it must not be coupled to stdout.
-        // (If it called println! the buffer below would be empty.)
-        let e = mk("foo");
-        let out = render(&e);
-        assert!(!out.is_empty(), "writer captured nothing");
-    }
-
-    #[test]
-    fn search_result_format_matches_pacman_ss() {
-        // pacman -Ss prints `repo/name version` then indented description.
-        let mut e = mk("foo");
-        e.pkgdesc = Some("does foo".into());
-        let out = render(&e);
-        assert_eq!(out, "aur/foo 1.0-1\n    does foo\n");
-    }
-
-    #[test]
-    fn search_result_omits_description_block_when_none() {
-        // Single-line output, no blank "    " for entries without a pkgdesc.
-        let out = render(&mk("bar"));
-        assert_eq!(out, "aur/bar 1.0-1\n");
-    }
-
-    #[test]
-    fn search_result_includes_epoch_when_present() {
-        let mut e = mk("baz");
-        e.epoch = Some("2".into());
-        let out = render(&e);
-        assert!(out.starts_with("aur/baz 2:1.0-1\n"), "got: {out:?}");
-    }
-
-    #[test]
-    fn search_result_skips_empty_epoch_string() {
-        // An empty-string epoch (e.g. from `epoch=` with no value) is not
-        // rendered as `:1.0-1`. Regression bait: version_string special-cases
-        // it.
-        let mut e = mk("qux");
-        e.epoch = Some(String::new());
-        let out = render(&e);
-        assert!(out.starts_with("aur/qux 1.0-1\n"), "got: {out:?}");
     }
 
     // --- file header: version skew vs corruption, told apart at load ---
