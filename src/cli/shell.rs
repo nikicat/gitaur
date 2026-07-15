@@ -186,9 +186,10 @@ pub trait ShellEnv {
     fn system_prune(&mut self) -> Result<Option<ByteSize>>;
 }
 
-/// Word one `refresh` outcome: the AUR half may have been skipped (bootstrap
-/// declined, not set up, or pacman-only mode) while the repo databases still
-/// refreshed.
+/// Word one `refresh` outcome — the AUR half only. The repo-database half
+/// reports for itself from inside [`mirror::cmd_refresh`] (refreshed / up to
+/// date / failed) and doesn't run at all when `check_repo_updates` is off,
+/// so any claim about it here would double-report at best and lie at worst.
 const fn refresh_message(outcome: mirror::RefreshOutcome) -> &'static str {
     match outcome {
         mirror::RefreshOutcome::Refreshed => "mirror + index refreshed",
@@ -196,9 +197,9 @@ const fn refresh_message(outcome: mirror::RefreshOutcome) -> &'static str {
             mirror::SkipCause::Declined
             | mirror::SkipCause::NonInteractive
             | mirror::SkipCause::NotSetUp,
-        ) => "AUR setup skipped — repo databases refreshed; run `refresh` again when ready",
+        ) => "AUR setup skipped — run `refresh` again when ready",
         mirror::RefreshOutcome::AurSkipped(mirror::SkipCause::Disabled) => {
-            "official databases refreshed (AUR disabled in config)"
+            "AUR refresh skipped (aur = false in config.toml)"
         }
     }
 }
@@ -2657,10 +2658,11 @@ mod tests {
         assert!(!env.lines.contains("mirror + index refreshed"));
     }
 
-    /// Pacman-only mode: `refresh` still reports the repo-db half without
-    /// pretending the mirror was touched.
+    /// Pacman-only mode: `refresh` words the AUR skip and claims nothing
+    /// about the repo half — that half reports for itself from inside
+    /// `cmd_refresh`, and doesn't run at all with `check_repo_updates` off.
     #[test]
-    fn refresh_disabled_words_the_repo_only_refresh() {
+    fn refresh_disabled_words_the_skip_without_repo_claims() {
         let mut env = FakeEnv {
             refresh_outcome: Some(mirror::RefreshOutcome::AurSkipped(
                 mirror::SkipCause::Disabled,
@@ -2668,8 +2670,11 @@ mod tests {
             ..FakeEnv::default()
         };
         State::default().dispatch(&command::parse("refresh"), &mut env);
-        assert!(env.lines.contains("AUR disabled in config"));
-        assert!(!env.lines.contains("mirror + index refreshed"));
+        assert!(
+            env.lines
+                .contains("AUR refresh skipped (aur = false in config.toml)")
+        );
+        assert!(!env.lines.contains("refreshed"));
     }
 
     /// The pre-prompt banner: a ready session gets the one-liner, a "later"
