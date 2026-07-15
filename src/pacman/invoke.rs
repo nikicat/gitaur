@@ -363,17 +363,44 @@ fn with_pacman(argv: &[String]) -> Vec<String> {
 }
 
 /// Heuristic: operations that mutate the system require sudo unless `--print`.
+///
+/// Decided on the operation letter plus its modifiers, not an exact-cluster
+/// whitelist — pacman's short flags cluster freely (`-Su`, `-Rns`, `-Syyu`,
+/// …), so any spelled-out list is a latent gap (a missed `-Su` once ran
+/// pacman unprivileged and died on "you cannot perform this operation unless
+/// you are root" instead of offering to elevate).
 fn needs_sudo(argv: &[String]) -> bool {
     let has = |s: &str| argv.iter().any(|a| a == s);
     if has("--print") || has("-p") {
         return false;
     }
-    argv.iter().any(|a| {
-        matches!(
-            a.as_str(),
-            "-S" | "-Sy" | "-Syu" | "-Syyu" | "-R" | "-Rs" | "-Rns" | "-U" | "-Sc" | "-Scc" | "-D"
-        )
-    })
+    argv.iter().any(|a| cluster_mutates(a))
+}
+
+/// True when `a` is a short-flag cluster whose operation writes to the system:
+/// `-R…` / `-U…` always, `-D…` except the `-Dk` checks, `-F…` only when `y`
+/// refreshes the file databases, and the `-S` family except its read-only
+/// members (`-Ss` search, `-Si` info, `-Sl` list, `-Sg` groups, `-Sp`
+/// print-uris).
+fn cluster_mutates(a: &str) -> bool {
+    let Some(rest) = a.strip_prefix('-') else {
+        return false;
+    };
+    if rest.starts_with('-') {
+        return false; // long flag, not a cluster
+    }
+    let mut letters = rest.chars();
+    let Some(op) = letters.next() else {
+        return false;
+    };
+    let mods = letters.as_str();
+    match op {
+        'R' | 'U' => true,
+        'D' => !mods.contains('k'),
+        'F' => mods.contains('y'),
+        'S' => !mods.contains(['s', 'i', 'l', 'g', 'p']),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -383,14 +410,31 @@ mod tests {
     #[test]
     fn sudo_for_mutating_ops() {
         assert!(needs_sudo(&["-Syu".into()]));
+        // The passthrough shape that once ran pacman unprivileged: any `u`
+        // cluster order, not just the spellings aurox emits itself.
+        assert!(needs_sudo(&["-Su".into()]));
+        assert!(needs_sudo(&["-Suy".into()]));
+        assert!(needs_sudo(&["-S".into(), "vim".into()]));
+        assert!(needs_sudo(&["-Sc".into()]));
         assert!(needs_sudo(&["-Rns".into(), "foo".into()]));
+        assert!(needs_sudo(&["-Rdd".into(), "foo".into()]));
         assert!(needs_sudo(&["-U".into(), "x.pkg.tar.zst".into()]));
+        assert!(needs_sudo(&["-D".into(), "--asdeps".into(), "foo".into()]));
+        // `-Fy` writes the file databases under /var/lib/pacman.
+        assert!(needs_sudo(&["-Fy".into()]));
     }
 
     #[test]
     fn no_sudo_for_queries() {
         assert!(!needs_sudo(&["-Qi".into(), "vim".into()]));
         assert!(!needs_sudo(&["-Ss".into(), "vim".into()]));
+        assert!(!needs_sudo(&["-Si".into(), "vim".into()]));
+        assert!(!needs_sudo(&["-Sl".into(), "core".into()]));
+        assert!(!needs_sudo(&["-Sg".into(), "gnome".into()]));
+        assert!(!needs_sudo(&["-Sp".into(), "vim".into()]));
+        assert!(!needs_sudo(&["-F".into(), "usr/bin/vim".into()]));
+        assert!(!needs_sudo(&["-Dk".into()]));
+        assert!(!needs_sudo(&["-T".into(), "dep".into()]));
     }
 
     #[test]
