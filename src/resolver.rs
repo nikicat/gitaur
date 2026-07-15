@@ -120,13 +120,33 @@ pub struct PkgbasePlan<'a> {
 }
 
 /// How a target entered the resolver's work queue: named by the user
-/// (`Direct`) or pulled in as another package's dependency (`Dep`). Drives
-/// the explicit-vs-`--asdeps` split (`direct_repo`/`transitive_repo`,
-/// `direct_aur`) and gates the direct-target rebuild override.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// (`Direct`) or pulled in as another package's dependency (`Dep`, carrying
+/// the requiring package). Drives the explicit-vs-`--asdeps` split
+/// (`direct_repo`/`transitive_repo`, `direct_aur`), gates the direct-target
+/// rebuild override, and names the requirer when a dep resolves nowhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Origin {
     Direct,
-    Dep,
+    Dep(Requirer),
+}
+
+/// The package whose dependency array pulled a target into the queue — an
+/// AUR pkgbase or a concrete repo pkgname. Rendered into the unknown-target
+/// error so a missing *dependency* names what wanted it, instead of reading
+/// like a typo in the user's own targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Requirer {
+    Aur(PkgBase),
+    Repo(PkgName),
+}
+
+impl std::fmt::Display for Requirer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Aur(pkgbase) => pkgbase.fmt(f),
+            Self::Repo(pkgname) => pkgname.fmt(f),
+        }
+    }
 }
 
 impl Origin {
@@ -136,8 +156,8 @@ impl Origin {
     /// dependency first (`aurox -S cargo` where `cargo` is also an AUR pkg's
     /// makedep). The `direct_set` backstop is only relevant to the bucketing
     /// split, not the rebuild override (see [`resolve_target_source`]).
-    fn is_direct(self, target: &PkgTarget, direct_set: &HashSet<PkgTarget>) -> bool {
-        self == Self::Direct || direct_set.contains(target.bare())
+    fn is_direct(&self, target: &PkgTarget, direct_set: &HashSet<PkgTarget>) -> bool {
+        *self == Self::Direct || direct_set.contains(target.bare())
     }
 }
 
@@ -187,7 +207,7 @@ pub fn resolve(aur: &AurIndexData, pac: &PacmanIndex, targets: &[String]) -> Res
         .collect();
     while let Some((target, origin)) = queue.pop() {
         let bare = target.bare();
-        let source = resolve_target_source(by, pac, bare, origin);
+        let source = resolve_target_source(by, pac, bare, &origin);
         match source {
             Source::Installed(concrete) => {
                 debug!(target = %bare, %concrete, "already satisfied (installed)");
@@ -247,9 +267,15 @@ pub fn resolve(aur: &AurIndexData, pac: &PacmanIndex, targets: &[String]) -> Res
                     .collect();
                 all_edges.insert(pkgbase.clone(), cycle_edges);
                 make_edges.insert(pkgbase.clone(), build_time);
-                queue.extend(all.into_iter().map(|d| (d, Origin::Dep)));
+                queue.extend(
+                    all.into_iter()
+                        .map(|d| (d, Origin::Dep(Requirer::Aur(pkgbase.clone())))),
+                );
             }
-            Source::Missing => missing.push(bare.to_owned()),
+            Source::Missing => missing.push(match &origin {
+                Origin::Direct => bare.to_owned(),
+                Origin::Dep(requirer) => format!("{bare} (required by {requirer})"),
+            }),
         }
     }
 
@@ -287,7 +313,8 @@ pub fn resolve(aur: &AurIndexData, pac: &PacmanIndex, targets: &[String]) -> Res
 }
 
 /// Expand a repo package's `depends` into the BFS `queue` as `Origin::Dep`
-/// targets. Each is classified on its next pop: already-installed deps drop
+/// targets carrying `concrete` as their [`Requirer`].
+/// Each is classified on its next pop: already-installed deps drop
 /// out as `Installed`, sync deps land in `transitive_repo`, virtuals resolve
 /// to their provider. Surfacing them here is what lets the plan show — and
 /// [`Plan::only_requested`] gate on — deps the final `pacman -S` would
@@ -295,7 +322,7 @@ pub fn resolve(aur: &AurIndexData, pac: &PacmanIndex, targets: &[String]) -> Res
 fn enqueue_repo_deps(pac: &PacmanIndex, concrete: &PkgName, queue: &mut Vec<(PkgTarget, Origin)>) {
     for dep in pac.sync_depends(concrete) {
         if !dep.bare().is_empty() {
-            queue.push((dep.clone(), Origin::Dep));
+            queue.push((dep.clone(), Origin::Dep(Requirer::Repo(concrete.clone()))));
         }
     }
 }
@@ -358,9 +385,9 @@ fn resolve_make_edges(
 /// installed AUR pkg. Transitive deps keep the default behavior; a satisfied
 /// dep is not a rebuild trigger — so only `Origin::Direct` (the raw queue
 /// flag, not the `direct_set` backstop) arms the override.
-fn resolve_target_source(by: &Lookup, pac: &PacmanIndex, bare: &str, origin: Origin) -> Source {
+fn resolve_target_source(by: &Lookup, pac: &PacmanIndex, bare: &str, origin: &Origin) -> Source {
     let source = classify(by, pac, bare);
-    if origin != Origin::Direct {
+    if *origin != Origin::Direct {
         return source;
     }
     let Source::Installed(_) = &source else {
@@ -553,6 +580,32 @@ mod tests {
         let err = run(&["nope"], vec![], &[]).unwrap_err();
         match err {
             Error::UnknownTargets(s) => assert_eq!(s, "nope"),
+            other => panic!("expected UnknownTargets, got {other:?}"),
+        }
+    }
+
+    /// A missing *dependency* names its requirer; a missing direct target
+    /// stays bare (the user typed it — there is nothing to blame but the
+    /// spelling). AUR flavor: the requirer is the declaring pkgbase.
+    #[test]
+    fn missing_aur_dep_names_requirer() {
+        let err = run(&["foo"], vec![entry("foo", &["nope"], &[])], &[]).unwrap_err();
+        match err {
+            Error::UnknownTargets(s) => assert_eq!(s, "nope (required by foo)"),
+            other => panic!("expected UnknownTargets, got {other:?}"),
+        }
+    }
+
+    /// Repo flavor: a sync package's dep that resolves nowhere blames the
+    /// concrete repo pkgname that declared it.
+    #[test]
+    fn missing_repo_dep_names_requirer() {
+        let mut pac = PacmanIndex::default();
+        sync_pkg(&mut pac, "foo", &["gone"]);
+        let targets: Vec<String> = vec!["foo".into()];
+        let err = resolve(&AurIndexData::empty(), &pac, &targets).unwrap_err();
+        match err {
+            Error::UnknownTargets(s) => assert_eq!(s, "gone (required by foo)"),
             other => panic!("expected UnknownTargets, got {other:?}"),
         }
     }
