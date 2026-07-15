@@ -10,11 +10,26 @@ A yay-like AUR helper backed by the [`github.com/archlinux/aur`](https://github.
 
 ## Status
 
-Early — works end-to-end: AUR search/info/install (`-S`), recursive dep resolution, PKGBUILD review, and an interactive shell (`aurox` with no args) for staging + upgrading + applying. Repo/system upgrades go through `pacman` (`-Syu` is a passthrough). **Not** packaged for the AUR yet; expect rough edges.
+Early — works end-to-end: AUR search/info/install (`-S`), recursive dep resolution, PKGBUILD review, and an interactive shell (`aurox` with no args) for staging + upgrading + applying. Repo/system upgrades go through `pacman` (`-Syu` is a passthrough). Expect rough edges.
 
 ## Install
 
-From source (requires `pacman`, `git`, `base-devel`, `pkgconf`, `rustup`):
+### From the AUR
+
+Packaged as [`aurox`](https://aur.archlinux.org/packages/aurox):
+
+```sh
+git clone https://aur.archlinux.org/aurox.git
+cd aurox
+makepkg -si
+# or with any AUR helper: yay -S aurox
+```
+
+Once installed, aurox can upgrade itself like any other AUR package.
+
+### From source
+
+Requires `pacman`, `git`, `base-devel`, `pkgconf`, `rustup`:
 
 ```sh
 git clone https://github.com/nikicat/aurox
