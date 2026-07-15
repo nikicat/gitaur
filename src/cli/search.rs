@@ -49,6 +49,23 @@ impl Row<'_> {
         }
     }
 
+    /// The installed package this row answers for: the repo package itself
+    /// (state already carried on the hit), or the first of an AUR pkgbase's
+    /// split pkgnames present in the local DB — checking the pkgbase name
+    /// alone would miss a split member (installed `linux-tkg-bmq` under
+    /// pkgbase `linux-tkg`). Drives the `[installed]` marker and the
+    /// `old → new` version diff in both `-Ss` and the shell table.
+    pub(crate) fn installed_name(&self, pac: &PacmanIndex) -> Option<&PkgName> {
+        match self {
+            Row::Repo(r) => r.installed.then_some(&r.name),
+            Row::Aur(e) => e
+                .pkgnames
+                .iter()
+                .map(|p| &p.name)
+                .find(|n| pac.is_installed(n)),
+        }
+    }
+
     /// The repo bucket this row belongs to (`core`, `extra`, …, or `aur`), for
     /// the shell's repo-filter selectors (`add extra`).
     pub(crate) fn repo_name(&self) -> &str {
@@ -142,9 +159,7 @@ pub fn cmd_search(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for row in &rows {
-        let install = ui::InstallState::from_installed(
-            pac.is_installed(&PkgName::new(row.picked().into_inner())),
-        );
+        let install = ui::InstallState::from_installed(row.installed_name(&pac).is_some());
         write_search_result(&mut out, row, install)?;
     }
     Ok(0)
@@ -228,25 +243,23 @@ pub fn cmd_search_install(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
 pub(crate) fn search_row(row: &Row<'_>, pac: &PacmanIndex) -> ui::SearchRow {
     let name = PkgName::new(row.picked().into_inner());
     let available = Some(row.version());
-    let installed = pac.is_installed(&name);
+    let installed_as = row.installed_name(pac);
     // Surface the installed version (→ an `old → new` diff) only when it's
     // actually behind the available one; a same-version row just shows the
     // version.
-    let old_ver = if installed {
-        pac.installed_version(&name)
+    let old_ver = installed_as.and_then(|n| {
+        pac.installed_version(n)
             .filter(|iv| {
                 available
                     .as_ref()
                     .is_some_and(|av| iv.is_outdated(av.as_ver()))
             })
             .map(Version::from)
-    } else {
-        None
-    };
+    });
     ui::SearchRow {
         repo: RepoName::from(row.repo_name()),
         name,
-        install: ui::InstallState::from_installed(installed),
+        install: ui::InstallState::from_installed(installed_as.is_some()),
         old_ver,
         new_ver: available,
         desc: row.desc(),
@@ -442,6 +455,45 @@ mod tests {
         );
         let e = mk("bisq", None, None);
         assert_eq!(Row::Aur(&e).picked(), PkgTarget::from("bisq"));
+    }
+
+    /// `[installed]` for an AUR row means "some member of this pkgbase is
+    /// installed": for a split package the pkgbase name itself is not in the
+    /// localdb, so the check must walk the pkgnames. Repo rows answer from
+    /// the state carried on the hit.
+    #[test]
+    fn installed_name_finds_split_members() {
+        let mut e = mk("linux-tkg", None, None);
+        e.pkgnames = vec![
+            Pkgname {
+                name: "linux-tkg-bmq".into(),
+                provides: Vec::new(),
+                pkgdesc: None,
+            },
+            Pkgname {
+                name: "linux-tkg-pds".into(),
+                provides: Vec::new(),
+                pkgdesc: None,
+            },
+        ];
+        let pac = PacmanIndex {
+            installed: [(PkgName::new("linux-tkg-pds"), Version::from("1-1"))].into(),
+            ..Default::default()
+        };
+        // The pkgbase name isn't installed — only the member is.
+        assert!(!pac.is_installed(&PkgName::new("linux-tkg")));
+        assert_eq!(
+            Row::Aur(&e).installed_name(&pac),
+            Some(&PkgName::new("linux-tkg-pds"))
+        );
+        assert_eq!(
+            Row::Repo(repo("firefox", None, true)).installed_name(&pac),
+            Some(&PkgName::new("firefox"))
+        );
+        assert_eq!(
+            Row::Repo(repo("firefox", None, false)).installed_name(&pac),
+            None
+        );
     }
 
     /// Compile domain search terms into the regexes ranking consumes.
