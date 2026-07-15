@@ -73,7 +73,11 @@ pub struct Config {
     /// you keep the system db current yourself and want `-Sy` to touch the AUR
     /// mirror only.
     pub check_repo_updates: bool,
-    /// `prompt` | `skip` | `always-show` — PKGBUILD review default.
+    /// Legacy knob whose only remaining effect is the [`Self::aur_approval`]
+    /// fallback: `"skip"` auto-approves staged AUR packages when
+    /// `aur_approval` is unset (pre-`aur_approval` configs keep working).
+    /// It no longer controls the `-S` PKGBUILD review prompt — that always
+    /// asks, and only `--noconfirm` collapses it.
     pub review_default: String,
     /// `review` | `auto` — whether staged AUR packages need review before
     /// `apply` will run them. `review` (default) puts every AUR item behind the

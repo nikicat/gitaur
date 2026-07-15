@@ -80,7 +80,7 @@ makepkg_path         = "makepkg"
 makepkg_args         = ["-s", "--noconfirm", "--needed"]
 privilege_escalator  = "sudo"      # or "doas" / "run0"
 devel                = false
-review_default       = "prompt"    # or "skip" / "always-show"
+review_default       = "prompt"    # legacy — only "skip" still matters (see below)
 aur_approval         = "review"    # or "auto" — auto stages AUR pkgs pre-approved
 ```
 
