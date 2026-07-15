@@ -13,8 +13,8 @@
 //!      as *resolved by the staged rebuild* (no warning).
 //!   2. `drop test-breaks-dep` → the preview now warns with the pacman-parity
 //!      "breaks dependency" line and hints `add test-breaks-dep`.
-//!   3. `apply` → the gate fires *before* the cost summary and sudo prompt;
-//!      the default-no override declines on a bare Enter, cart kept.
+//!   3. `apply` → the gate fires *before* the cost summary and the sudo
+//!      prompt; the default-no override declines on a bare Enter, cart kept.
 //!   4. `add` + `approve` the rebuild → `apply` orders the blocker build +
 //!      `pacman -U` ahead of the `pacman -Syu` lane, and the whole
 //!      transaction lands.
@@ -77,8 +77,8 @@ fn main() {
         pty.screen()
     );
     assert!(
-        !pty.screen().contains("Proceed with this transaction"),
-        "cost-summary confirm fired before the preflight gate\n--- screen ---\n{}\n--- end ---",
+        !has(&pty.screen(), "install ·"),
+        "cost summary printed before the preflight gate\n--- screen ---\n{}\n--- end ---",
         pty.screen()
     );
     pty.send(b"\r");
@@ -94,13 +94,10 @@ fn main() {
     pty.send(b"approve test-breaks-dep\r");
     pty.expect("rebuild approved", |s| has(s, "approved test-breaks-dep"));
     pty.send(b"apply\r");
-    pty.expect("transaction confirm after the resolved note", |s| {
-        s.contains("Proceed with this transaction")
-    });
-    pty.send(b"\r");
 
-    // Blocker phase first: the rebuild's `pacman -U` must be elevated before
-    // any `pacman -Syu` appears.
+    // Blocker phase first (no transaction confirm — the explicit `apply` is
+    // the consent): the rebuild's `pacman -U` must be elevated before any
+    // `pacman -Syu` appears.
     pty.expect("blocker install sudo gate", |s| {
         s.contains("pacman -U") && s.contains("Continue?")
     });

@@ -231,11 +231,15 @@ Two problems with this split:
    coloring, different columns — so the cart the user curated and the thing
    `apply` shows read as two unrelated screens.
 
-### Decision: one table, owned by `show`; `apply` only confirms
+### Decision: one table, owned by `show`; `apply` doesn't re-ask
 
 There is **one** transaction-table renderer, rendered by `show`/`status`/`upgrade`.
-`apply` stops drawing it and gates on a one-line cost summary instead (see `apply`
-step 2 above). `show` becomes the genuine pre-commit preview — it resolves the
+`apply` stops drawing it and prints a one-line cost summary instead (see `apply`
+step 2 above). *(Amended after 5a landed: the summary is a receipt, not a gate —
+the explicit `apply` command after the approval gate is the transaction consent,
+so there is no `Proceed?` confirm; the sudo-escalation gate and the sysupgrade
+preflight override are the only prompts left on the apply path.)*
+`show` becomes the genuine pre-commit preview — it resolves the
 staged set so the user sees **the whole change set** (roots + pulled-in deps +
 removals) with cost, which is UPDATE_LOOP goal #5 finally landing in the shell.
 

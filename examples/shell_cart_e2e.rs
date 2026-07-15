@@ -9,7 +9,7 @@
 //!   add test-trivial        → staged, needs review (cart reprinted)
 //!   apply                   → refused: the approval gate blocks it
 //!   approve test-trivial    → cleared without opening a diff
-//!   apply                   → transaction confirm, build, then the sudo gate
+//!   apply                   → cost summary, build, then the sudo gate
 //!   show                    → "cart is empty" — the clean apply emptied it
 //! ```
 //!
@@ -39,14 +39,10 @@ fn main() {
     pty.expect("approved", |s| s.contains("approved test-trivial"));
 
     pty.send(b"apply\r");
-    // Phase 5a gates apply on a one-line cost summary + a transaction confirm
-    // before any irreversible work; answer it, then the build runs.
-    pty.expect("transaction confirm", |s| {
-        s.contains("Proceed with this transaction")
-    });
-    pty.send(b"\r");
-    // No deps are pulled in (only_requested), so the next and final prompt is the
-    // sudo gate before the privileged `pacman -U`.
+    // The explicit `apply` is the consent — no transaction confirm. The
+    // one-line cost summary prints and the build runs; no deps are pulled in
+    // (only_requested), so the first and only prompt is the sudo gate before
+    // the privileged `pacman -U`.
     pty.expect("sudo gate", |s| s.contains("Continue?"));
     pty.send(b"\r");
 

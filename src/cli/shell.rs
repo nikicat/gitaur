@@ -1778,8 +1778,8 @@ impl ShellEnv for RealEnv<'_> {
         // re-sync the rootless db (the drift guard — the check should see what
         // `pacman -Syu`'s own `-Sy` is about to fetch), recompute the
         // partial-upgrade selection against it, and simulate the `-Su`. Failing
-        // that check ends the apply here — before the cost summary, the
-        // transaction confirm, and the sudo prompt.
+        // that check ends the apply here — before the cost summary and the
+        // sudo prompt.
         if !cart.repo_upgrades().is_empty() {
             upgrade::resync_repo_dbs(self.cfg);
         }
@@ -1804,8 +1804,11 @@ impl ShellEnv for RealEnv<'_> {
         let blocker_plan = self.resolve_plan(aur_data, &pac, &blocker_targets)?;
         let main_plan = self.resolve_plan(aur_data, &pac, &main_targets)?;
 
-        // No table redraw — `show` is where the user looked. `apply` gates on the
-        // one-line cost summary plus a single confirm (phase 5a).
+        // No table redraw — `show` is where the user looked. No confirm either:
+        // the typed `apply` after the approval gate *is* the informed consent
+        // (consent at a decision point — don't double-prompt an explicit
+        // command). The one-line cost summary prints as a receipt of what the
+        // run is about to do.
         let size_pac = upgrade::synced_pac()?;
         let roots = txn_roots(cart, aur_data, &size_pac);
         let (repo_deps, aur_deps) = merged_dep_rows(main_plan.as_ref(), blocker_plan.as_ref());
@@ -1822,11 +1825,6 @@ impl ShellEnv for RealEnv<'_> {
             }
             .summary(),
         );
-        if !ui::confirm("Proceed with this transaction?", false)
-            .map_err(|e| Error::other(format!("confirm: {e}")))?
-        {
-            return Ok(ApplyOutcome::Declined);
-        }
 
         let mut reviewed = cart.reviewed().clone();
         let opts = InstallOpts {
@@ -1861,8 +1859,8 @@ impl ShellEnv for RealEnv<'_> {
             dispatch::run_repo_upgrade(self.cfg, &repo_sel)?;
         }
 
-        // Build + install the main AUR (and any fresh-install) half. Already
-        // gated by the confirm above, so `apply_plan` doesn't re-ask.
+        // Build + install the main AUR (and any fresh-install) half. The
+        // explicit `apply` was the consent, so `apply_plan` doesn't re-ask.
         if let Some(plan) = &main_plan {
             let main_report = ctx.apply_plan(plan, opts, &mut reviewed)?;
             report.absorb(main_report);

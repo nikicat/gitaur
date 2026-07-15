@@ -188,7 +188,8 @@ impl ChangeSet<'_> {
         out
     }
 
-    /// The one-line cost summary `apply` gates on.
+    /// The one-line cost summary `apply` prints before running — a receipt,
+    /// not a gate (the explicit `apply` command is the consent).
     ///
     /// `show` is where the user looks; `apply` no longer redraws the table. E.g.
     /// `3 install, +2 deps, 1 remove · 3.07 GiB · 22m build`. The deps / remove /

@@ -3,10 +3,9 @@
 //!
 //! No-arg `aurox` opens the shell. This drives the upgrade flow against an
 //! installed-but-outdated **repo** package: `upgrade` refreshes + seeds the
-//! pending upgrade (auto-approved, since it's a repo row), then `apply` renders
-//! the cost-overlay change-set preview, takes the transaction confirm + the
-//! sudo gate, and runs the partial `pacman -Syu`. A clean apply empties the
-//! cart, which `show` confirms.
+//! pending upgrade (auto-approved, since it's a repo row), then `apply` prints
+//! the one-line cost summary, takes the sudo gate, and runs the partial
+//! `pacman -Syu`. A clean apply empties the cart, which `show` confirms.
 //!
 //! It also folds in the synced-db **size guard** (the retired
 //! `05_loop_size_from_synced_db` test): the preview total must be a real nonzero
@@ -48,14 +47,6 @@ fn main() {
     });
     pty.expect("repo upgrade staged", |s| has(s, "loop-repo 1.0-1 → 2.0-1"));
 
-    // Apply gates on the one-line cost summary + a transaction confirm (phase
-    // 5a folded the old apply-time change-set table into `show`/`upgrade`, so the
-    // table — and its `this batch` total — now prints at `upgrade` above, not
-    // here).
-    pty.send(b"apply\r");
-    pty.expect("transaction confirm", |s| {
-        s.contains("Proceed with this transaction")
-    });
     // The size guard from the retired `05_loop_size_from_synced_db`: the staged
     // upgrade's total (rendered by `upgrade` above) must be a real nonzero figure,
     // never `total  0 B` — the smoking gun of reading sizes from the stale system
@@ -67,9 +58,13 @@ fn main() {
          system syncdb whose installed-version archive is cached) rather than \
          the freshly synced db's new version\n--- screen ---\n{screen}\n--- end ---"
     );
-    pty.send(b"\r");
 
-    // The sudo gate for the partial `pacman -Syu`.
+    // The explicit `apply` is the consent — no transaction confirm (phase 5a
+    // folded the old apply-time change-set table into `show`/`upgrade`, so the
+    // table — and its `this batch` total — prints at `upgrade` above). The
+    // first prompt after the one-line cost summary is the sudo gate for the
+    // partial `pacman -Syu`.
+    pty.send(b"apply\r");
     pty.expect("sudo gate", |s| s.contains("Continue?"));
     pty.send(b"\r");
 

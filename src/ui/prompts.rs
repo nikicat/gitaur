@@ -86,7 +86,7 @@ pub fn aur_setup_prompt() -> std::io::Result<AurSetupChoice> {
     let mut out = std::io::stdout().lock();
     write!(
         out,
-        "sync the AUR now? [y]es / [n]o, pacman-only from now on / [L]ater, this session: "
+        "sync the AUR now? [y]es / [n]o, pacman-only from now on / [s]kip this session only: "
     )?;
     out.flush()?;
     let mut line = String::new();
@@ -168,8 +168,8 @@ mod tests {
     }
 
     /// The launch question: y syncs, n goes pacman-only, and everything else
-    /// — Enter, EOF, typos, "l" — takes the safe "later" default (never a
-    /// surprise download, never a config write).
+    /// — Enter, EOF, typos, "s" — takes the safe skip-this-session default
+    /// (never a surprise download, never a config write).
     #[test]
     fn setup_answers_parse_with_later_default() {
         for line in ["y", "Y", "yes", " yes\n"] {
@@ -186,7 +186,7 @@ mod tests {
                 "{line:?}"
             );
         }
-        for line in ["", "\n", "l", "later", "wat"] {
+        for line in ["", "\n", "s", "skip", "wat"] {
             assert_eq!(parse_setup_answer(line), AurSetupChoice::Later, "{line:?}");
         }
     }
