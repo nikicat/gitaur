@@ -3,51 +3,74 @@
 # pattern (source lib.sh; bootstrap; reset_state; aurox …; assert_*).
 #
 # PKGBUILD-driven cases:
-#   - provides_virtual_resolves.sh       (`-S myvirt` → test-provides-virt)
-#   - install_hook_runs.sh               (post_install scriptlet)
-#   - cycle_in_aur_deps_errors.sh        (test-cycle-a ↔ test-cycle-b)
-#   - split_pkg_with_intra_dep.sh        (transitive within split)
-#   - split_pkg_partial_install.sh       (`-S test-split-core` alone)
+#   - provides_virtual_resolves.sh       (`-S myvirt` → test-provides-virt;
+#       the fixture is baked into the image, nothing references it yet)
+#   - install_hook_runs.sh               (post_install scriptlet touches
+#       /var/lib/test-install-hook-ran; fixture test-install-hook is baked,
+#       nothing references it yet)
 #   (graduated to smoke: epoch_dominates_version → smoke/40,
 #    vcs_pkg_skipped_without_devel → smoke/41,
 #    vcs_pkg_picked_up_with_devel → smoke/42)
+#   (covered elsewhere: cycle_in_aur_deps_errors → smoke/22 (regular-depends
+#    A↔B over test-cycle-a/b); split_pkg_with_intra_dep → smoke/06
+#    (test-split-extras pulls its intra-split test-split-core);
+#    split_pkg_partial_install → smoke/26 (one pkgname of a split installs
+#    alone, siblings stay out))
 #
 # Resolver / planner:
-#   - dep_constraint_versioned.sh        (`depends=('foo>=2')`)
-#   - dep_constraint_excluded.sh         (`depends=('foo<2')`)
-#   - duplicate_targets_dedup.sh
-#   - target_with_version_constraint.sh  (`aurox -S foo>=1`)
-#   - asdeps_overrides_direct.sh         (`-S --asdeps` even for direct)
+#   (covered elsewhere: asdeps_overrides_direct → smoke/08 (`--asdeps` flips
+#    the reason on a direct target); duplicate_targets_dedup → resolver unit
+#    tests (BFS visited-dedup + the cross-bucket dedup pass))
+#   (dropped: dep_constraint_versioned / dep_constraint_excluded /
+#    target_with_version_constraint — aurox strips version constraints off
+#    dep-specs and targets by design (lookup::strip_version_constraint,
+#    unit-tested); there is no enforcement to exercise. Revisit if
+#    constraints are ever honored.)
 #
 # State / idempotency:
-#   - rebuild_after_artifact_deleted.sh  (cached .pkg.tar.zst removed → rebuild)
+#   - rebuild_after_artifact_deleted.sh  (cached .pkg.tar.zst removed →
+#       rebuild; the complement of smoke/43's cached-skip)
 #   - declined_install_keeps_artifacts.sh
 #   - sc_clears_worktrees.sh             (-Sc)
 #   (graduated to smoke: rebuild_cached_skips → smoke/43)
 #
 # Refresh:
 #   - sy_incremental_fetch.sh            (delta only)
-#   - syy_force_reclone.sh
-#   - mirror_unreachable.sh              (move /srv/mock-aur away mid-test)
+#   - syy_force_reclone.sh               (accepted branch re-clones from
+#       scratch; the declined branch landed as smoke/64)
+#   - mirror_unreachable.sh              (move /srv/mock-aur away mid-test —
+#       the hard-fail half; the dead-socket timeout half landed as
+#       extended/01_fetch_idle_timeout)
 #
 # UX / flags:
-#   - noconfirm_skips_prompts.sh
 #   - color_never_strips_ansi.sh
-#   - color_always_keeps_ansi.sh
-#   - help_for_unknown_op.sh
+#   - help_for_unknown_op.sh             (smoke/15 covers --help/-h only)
+#   (covered elsewhere: color_always_keeps_ansi → smoke/52 (`color =
+#    "always"` forces ANSI onto a pipe); noconfirm_skips_prompts → the whole
+#    suite runs TTY-less under --noconfirm — any prompt would hang a run —
+#    and smoke/51 pins the confirm gating)
 #
 # Pacman pass-through:
 #   - rns_removes_with_deps.sh
-#   - syu_calls_pacman_first.sh
 #   - u_install_local_file.sh
+#   (obsolete: syu_calls_pacman_first — `-Su`/`-Syu` are plain passthrough
+#    now that the picker is gone; smoke/45 pins bare `aurox` → `-Syu`,
+#    smoke/66 pins the `-Su` elevation)
 #
 # Concurrency:
-#   - parallel_invocations_serialized.sh (state lock)
+#   - parallel_invocations_serialized.sh (two concurrent `-Sy`s: the dbpath
+#       flock in src/pacman/sync.rs must serialize them, with no "unable to
+#       lock database" leaking to either)
 #
 # Failure modes:
-#   - makepkg_fails_stops_pipeline.sh    (PKGBUILD with `exit 1` in build())
-#   - missing_dep_errors_with_hint.sh
-#   - corrupt_index_recoverable.sh       (truncate index.bin, expect -Sy fix)
+#   - missing_dep_errors_with_hint.sh    (an AUR dep that resolves nowhere;
+#       smoke/10 exercises the unknown *target* error, the unknown dep path
+#       is untested)
+#   (covered elsewhere: makepkg_fails_stops_pipeline → superseded — failures
+#    *isolate* rather than stop: smoke/28 (stratum sibling survives) +
+#    smoke/29 (dependents skipped); corrupt_index_recoverable → load() maps
+#    corrupt archive bytes to the same IndexIncompatible resync path that
+#    smoke/49 (self-heal) + smoke/50 (--noresync) pin)
 #
 # Shell (REPL):
 #   (landed: 07_shell_cart_apply.sh — add → gate → approve → apply, via the
@@ -60,6 +83,13 @@
 #   (landed: 10_shell_info_repo.sh — `info` describes a sync-repo name from the
 #    sync DBs (repo wins over a same-named AUR entry) and an AUR-only name from
 #    the index, via the shell_info_e2e PTY driver)
+#   (landed: 09_shell_undo.sh — number-follows-the-shown-list resolution,
+#    `remove`'s refusal on a staged install, undo/redo, via the
+#    shell_undo_e2e PTY driver)
+#   (landed: 12_shell_first_launch.sh — the three-way first-launch AUR
+#    question: Enter/Later persists nothing, `n` persists aur = false,
+#    `refresh aur` bootstraps without a second question; via the
+#    shell_bootstrap_{later,decline}_e2e drivers)
 #   - shell_upgrade_aur_built_tag.sh     (AUR upgrade with a pre-built artifact →
 #       the apply preview's change-set row carries `built`; ports the retired
 #       06_loop_built_tag now that the picker is gone)
@@ -68,6 +98,9 @@
 #       which drove the removed `-Syu` flag upgrade path)
 #   - shell_upgrade_split_picked_sibling.sh (foreign split sibling → `upgrade` +
 #       `apply` installs only the picked sibling; ports retired smoke 44)
-#   - shell_apply_failure_keeps_cart.sh  (failing build → cart kept → drop → apply)
+#   - shell_apply_failure_keeps_cart.sh  (failing build → cart kept → drop →
+#       apply; extended/02 covers the -S-path SIGINT mechanics, not the
+#       shell's bail-to-prompt resume)
 #   - shell_ctrl_c_bails_to_prompt.sh    (SIGINT mid-build returns to the prompt)
-#   - shell_remove_stages_uninstall.sh   (`remove` → pacman -R at apply)
+#   - shell_remove_stages_uninstall.sh   (`remove` → pacman -R at apply;
+#       09_shell_undo covers only the refusal-on-staged-install half)
