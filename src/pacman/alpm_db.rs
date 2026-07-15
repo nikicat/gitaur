@@ -436,23 +436,31 @@ impl PacmanIndex {
         }
     }
 
-    /// Installed version of `name`, or `None` if not installed. `name`
-    /// arrives as `&str` because lookups originate from many sources
-    /// (CLI args, .SRCINFO deps, `provides` strings) — `Borrow<str>` on
-    /// the typed key makes the lookup work without a temporary `PkgName`.
-    /// Returns `&Ver` so the caller can compare via vercmp.
-    pub fn installed_version(&self, name: &str) -> Option<&Ver> {
+    /// Installed version of the concrete pkgname `name`, or `None` if not
+    /// installed. Takes `&PkgName` like [`Self::sync_depends`]: a version
+    /// read only makes sense for an already-classified name, so the type
+    /// encodes that precondition — raw spec fragments probe via
+    /// [`Self::owns_name`] / [`Self::resolve_concrete`] instead. Returns
+    /// `&Ver` so the caller can compare via vercmp.
+    pub fn installed_version(&self, name: &PkgName) -> Option<&Ver> {
         self.installed.get(name).map(Version::as_ver)
     }
 
-    /// Already installed locally?
-    pub fn is_installed(&self, name: &str) -> bool {
+    /// Is the concrete pkgname `name` installed locally? Same typed
+    /// precondition as [`Self::installed_version`].
+    pub fn is_installed(&self, name: &PkgName) -> bool {
         self.installed.contains_key(name)
     }
 
-    /// Available in a sync repo, either by exact name or by virtual provide?
-    pub fn in_sync(&self, name: &str) -> bool {
-        self.sync_versions.contains_key(name) || self.sync_providers.contains_key(name)
+    /// Does pacman already own `bare` — an installed pkgname, an exact sync
+    /// pkgname, or a sync-repo virtual provide? The resolver's first
+    /// classify probe (the "repo wins a shared name" rule), asked before any
+    /// AUR interpretation — `&str` because at that point `bare` is a raw
+    /// spec fragment, exactly *not yet* a classified name.
+    pub fn owns_name(&self, bare: &str) -> bool {
+        self.installed.contains_key(bare)
+            || self.sync_versions.contains_key(bare)
+            || self.sync_providers.contains_key(bare)
     }
 
     /// Sync-repo version for `name`, or `None` when `name` is not an exact
@@ -853,13 +861,19 @@ mod tests {
         idx.sync_providers
             .insert("java-runtime".into(), vec!["jre-openjdk".into()]);
 
-        assert!(idx.is_installed("vim"));
-        assert!(!idx.is_installed("firefox"));
-        assert!(idx.in_sync("firefox"));
-        assert!(idx.in_sync("java-runtime"));
-        assert!(!idx.in_sync("nonexistent"));
-        assert_eq!(idx.installed_version("vim"), Some(Ver::new("9.0-1")));
-        assert_eq!(idx.installed_version("firefox"), None);
+        assert!(idx.is_installed(&PkgName::new("vim")));
+        assert!(!idx.is_installed(&PkgName::new("firefox")));
+        // `owns_name` probes with raw spec fragments: installed pkgname,
+        // exact sync pkgname, and sync virtual provide all count.
+        assert!(idx.owns_name("vim"));
+        assert!(idx.owns_name("firefox"));
+        assert!(idx.owns_name("java-runtime"));
+        assert!(!idx.owns_name("nonexistent"));
+        assert_eq!(
+            idx.installed_version(&PkgName::new("vim")),
+            Some(Ver::new("9.0-1"))
+        );
+        assert_eq!(idx.installed_version(&PkgName::new("firefox")), None);
         assert_eq!(idx.sync_version("firefox"), Some(Ver::new("110.0-1")));
         // Provides-only names carry no version of their own — only the
         // providing pkgname does.

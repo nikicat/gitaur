@@ -143,6 +143,7 @@ dependencies = [
  "nix 0.31.3",
  "opentelemetry",
  "opentelemetry_sdk",
+ "optfield",
  "pacmanconf",
  "portable-pty",
  "pty-harness",
@@ -2271,6 +2272,17 @@ dependencies = [
  "portable-atomic",
  "rand",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "optfield"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "969ccca8ffc4fb105bd131a228107d5c9dd89d9d627edf3295cbe979156f9712"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

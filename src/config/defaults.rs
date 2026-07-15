@@ -7,6 +7,7 @@ use crate::paths;
 pub fn default_config() -> Config {
     Config {
         build_dir: paths::state_dir().join("pkgs"),
+        aur: true,
         mirror_url: "https://github.com/archlinux/aur.git".into(),
         mirror_idle_timeout_secs: 30,
         // 10 minutes: GitHub's silent pack preparation for the full mirror

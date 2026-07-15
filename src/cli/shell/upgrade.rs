@@ -8,11 +8,10 @@
 
 use super::cart::{Cart, Source};
 use crate::build;
-use crate::build::UpgradeSession;
 use crate::build::metrics::MetricsStore;
 use crate::config::Config;
 use crate::error::Result;
-use crate::index::IndexEntry;
+use crate::index::{AurIndexData, IndexEntry};
 use crate::mirror;
 use crate::names::{PkgBase, PkgName, PkgTarget, RepoRank};
 use crate::pacman::alpm_db::{self, PacmanIndex};
@@ -42,23 +41,42 @@ pub(crate) enum FetchPolicy {
     WhenStale,
 }
 
+/// One reload's result: what the refresh did to the AUR mirror (when one
+/// ran at all) plus the freshly loaded AUR data.
+pub(crate) struct AurReload {
+    /// `None` when the TTL said the mirror was fresh and no fetch ran.
+    pub outcome: Option<mirror::RefreshOutcome>,
+    /// The reloaded AUR data — *empty* when there's still no index on disk
+    /// (bootstrap declined, AUR disabled); see [`AurIndexData::load`].
+    pub data: AurIndexData,
+}
+
 /// Refresh the mirror + index (subject to `policy`), then reload the session so
 /// subsequent `search`/`info`/`upgrade` see current data. Under
 /// [`FetchPolicy::WhenStale`] a recently-fetched mirror skips the network fetch,
-/// but the in-memory session is still reloaded from disk so an external `pacman
-/// -Sy`/`-Syu` is reflected. `Ok(None)` when no index exists even after
-/// (shouldn't happen once a clone is on disk, but the caller degrades
-/// gracefully).
-pub(crate) fn refresh_and_reload(
-    cfg: &Config,
-    policy: FetchPolicy,
-) -> Result<Option<UpgradeSession>> {
-    if should_fetch(cfg, policy) {
-        mirror::cmd_refresh(cfg, false)?;
+/// but the in-memory AUR data is still reloaded from disk so an external `pacman
+/// -Sy`/`-Syu` is reflected.
+///
+/// The policy also picks the bootstrap-consent stance (see
+/// [`mirror::RefreshReason`]): the explicit `refresh` command is
+/// pre-consented — the shell's launch prompt already spelled out the clone
+/// cost — while `upgrade`'s TTL fetch never bootstraps, skipping the AUR half
+/// with a hintable [`AurReload::outcome`] instead.
+pub(crate) fn refresh_and_reload(cfg: &Config, policy: FetchPolicy) -> Result<AurReload> {
+    let outcome = if should_fetch(cfg, policy) {
+        let reason = match policy {
+            FetchPolicy::Always => mirror::RefreshReason::ShellRefresh,
+            FetchPolicy::WhenStale => mirror::RefreshReason::ShellUpgrade,
+        };
+        Some(mirror::cmd_refresh(cfg, reason)?)
     } else {
         debug!("mirror fetched within the refresh TTL; reloading from disk without a fetch");
-    }
-    UpgradeSession::load(cfg)
+        None
+    };
+    Ok(AurReload {
+        outcome,
+        data: AurIndexData::load(cfg)?,
+    })
 }
 
 /// Whether [`refresh_and_reload`] should hit the network: always under
@@ -136,7 +154,7 @@ pub(crate) enum Remedy {
 /// fixing rebuild already staged?).
 pub(crate) fn preflight_notes(
     issues: Vec<preflight::Issue>,
-    session: &UpgradeSession,
+    aur_data: &AurIndexData,
     cart: &Cart,
 ) -> Vec<PreflightNote> {
     issues
@@ -144,7 +162,7 @@ pub(crate) fn preflight_notes(
         .map(|issue| {
             let remedy = match &issue {
                 preflight::Issue::UnsatisfiedDep { target, depend, .. } => {
-                    let entry = session.secondary().lookup(session.index(), target.as_str());
+                    let entry = aur_data.entry(target.as_str());
                     let staged = cart
                         .item(&PkgTarget::from(target))
                         .is_some_and(|it| it.source == Source::Aur);
@@ -310,7 +328,7 @@ pub(crate) fn dep_rows(plan: Option<&Plan>) -> (Vec<PkgName>, Vec<PkgBase>) {
 /// cross-session metrics store. Empty overlay on any store failure (the preview
 /// then shows `~?` for AUR rows, which is correct and never blocks apply).
 pub(crate) fn preview_metrics(
-    session: &UpgradeSession,
+    aur_data: &AurIndexData,
     roots: &[TxnRoot],
     plan: Option<&Plan>,
 ) -> PreviewMetrics {
@@ -324,7 +342,7 @@ pub(crate) fn preview_metrics(
 
     // AUR roots only — repo upgrades have no build, so no build-time/built cell.
     for r in roots.iter().filter(|r| r.repo.rank() == RepoRank::Aur) {
-        let Some(pb) = session.pkgbase_of(&r.name) else {
+        let Some(pb) = aur_data.pkgbase_of(&r.name) else {
             continue;
         };
         if row_built(pb, r) {
@@ -345,7 +363,7 @@ pub(crate) fn preview_metrics(
             .filter(|pb| !root_bases.contains(pb))
             .collect();
         for pb in &dep_pkgbases {
-            if pkgbase_built(session, pb) {
+            if pkgbase_built(aur_data, pb) {
                 out.built_deps.insert((*pb).clone());
             }
         }
@@ -400,10 +418,10 @@ fn insert_root_time(
 /// the index version has an artifact. Used for the pulled-in AUR **dep** rows
 /// (labelled by pkgbase, unlike per-pkgname roots). `false` when the pkgbase
 /// isn't in the index.
-fn pkgbase_built(session: &UpgradeSession, pb: &PkgBase) -> bool {
-    session
-        .secondary()
-        .lookup_pkgbase(session.index(), pb)
+fn pkgbase_built(aur_data: &AurIndexData, pb: &PkgBase) -> bool {
+    aur_data
+        .lookup()
+        .lookup_pkgbase(aur_data.index(), pb)
         .is_some_and(|entry| {
             let pkgnames: Vec<PkgName> = entry.pkgnames.iter().map(|p| p.name.clone()).collect();
             build::artifacts_built(pb, &entry.version(), &pkgnames)

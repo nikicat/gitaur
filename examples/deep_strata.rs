@@ -5,8 +5,7 @@
 //! Uses the real resolver, so the strata count matches what aurox would
 //! actually do. Skips entries the resolver rejects (cycles, missing deps).
 
-use aurox::config::defaults::default_config;
-use aurox::index::{self, secondary::Secondary};
+use aurox::index::{self, AurIndexData};
 use aurox::names::PkgBase;
 use aurox::pacman::alpm_db::{self, PacmanIndex};
 use aurox::paths;
@@ -14,14 +13,13 @@ use aurox::resolver;
 
 fn main() {
     let idx = index::load(&paths::index_path()).expect("load index — run `aurox -Sy` first");
-    let by = Secondary::build(&idx);
+    let aur = AurIndexData::from_index(idx);
     let alpm = alpm_db::open().expect("open alpm");
     let pac = PacmanIndex::build(&alpm);
-    let cfg = default_config();
 
     let mut ranked: Vec<(PkgBase, usize, usize)> = Vec::new();
-    let total = idx.entries.len();
-    for (i, entry) in idx.entries.iter().enumerate() {
+    let total = aur.index().entries.len();
+    for (i, entry) in aur.index().entries.iter().enumerate() {
         if i % 5000 == 0 {
             eprintln!("scanning {i}/{total}");
         }
@@ -35,7 +33,7 @@ fn main() {
             continue;
         };
         let targets = vec![pkgname.name.clone().into_inner()];
-        let Ok(plan) = resolver::resolve(&cfg, &idx, Some(&by), &pac, &targets) else {
+        let Ok(plan) = resolver::resolve(&aur, &pac, &targets) else {
             continue;
         };
         let strata = plan.aur_strata.len();
@@ -49,7 +47,12 @@ fn main() {
 
     println!("\nTop 30 pkgbases by resolved stratum count:");
     for (pb, strata, total) in ranked.iter().take(30) {
-        let entry = idx.entries.iter().find(|e| e.pkgbase == *pb).unwrap();
+        let entry = aur
+            .index()
+            .entries
+            .iter()
+            .find(|e| e.pkgbase == *pb)
+            .unwrap();
         let desc = entry.pkgdesc.as_deref().unwrap_or("");
         println!("  strata={strata} aur_pkgs={total}  {pb}  — {desc}");
     }

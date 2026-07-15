@@ -74,62 +74,78 @@ impl Prompting {
     }
 }
 
-/// Drive the review prompt loop for one pkgbase.
+/// One pkgbase's review subject.
+///
+/// Where its PKGBUILD lives (worktree, plus the mirror for history diffs),
+/// the version it builds, which installed pkg it displaces, and how far back
+/// to scan for the diff base.
 ///
 /// `counterpart` is the pacman-localdb pkg this build will displace — `None`
 /// for a fresh install, otherwise carrying the installed pkgname, its
 /// version, and how the AUR entry referenced it (pkgname / replaces /
 /// provides). `new_ver` is the version the AUR index reports for this
 /// pkgbase.
-#[instrument(skip(mirror, wt), fields(pkgbase = %pkgbase))]
-pub fn review(
-    mirror: &MirrorRepo,
-    pkgbase: &PkgBase,
-    new_ver: &Ver,
-    counterpart: Option<&InstalledCounterpart<'_>>,
-    wt: &Worktree,
-    history_scan_max: usize,
-    prompting: Prompting,
-) -> Result<Outcome> {
-    if prompting == Prompting::Auto {
-        // Carry counterpart provenance in the trace so non-interactive runs
-        // (container smoke tests, CI, scripts) can still verify that the
-        // installed pkg was correctly resolved across pkgname/replaces/provides.
-        // Without this the auto path is opaque — show() never renders.
-        // `?` (Debug) formats `Option<…>` as `Some(…)` / `None` so the absent
-        // case is grep-distinguishable from a present-but-empty one.
-        info!(
-            %pkgbase,
-            %new_ver,
-            installed = ?counterpart.map(|c| c.pkgname),
-            installed_version = ?counterpart.map(|c| c.version),
-            via = ?counterpart.map(|c| c.via),
-            "auto-proceeding (non-interactive)"
-        );
-        return Ok(Outcome::Approved);
-    }
+pub struct ReviewRequest<'a> {
+    pub mirror: &'a MirrorRepo,
+    pub pkgbase: &'a PkgBase,
+    pub new_ver: &'a Ver,
+    pub counterpart: Option<&'a InstalledCounterpart<'a>>,
+    pub wt: &'a Worktree,
+    pub history_scan_max: usize,
+}
 
-    // Initial render runs once — the loop body dispatches user actions and
-    // re-renders only what the user asked for, so picking "view PKGBUILD"
-    // isn't immediately clobbered by re-printing the diff above the prompt.
-    let base = show(mirror, pkgbase, new_ver, counterpart, wt, history_scan_max)?;
+impl ReviewRequest<'_> {
+    /// Drive the review prompt loop for this subject.
+    #[instrument(skip(self), fields(pkgbase = %self.pkgbase))]
+    pub fn review(&self, prompting: Prompting) -> Result<Outcome> {
+        let &Self {
+            mirror,
+            pkgbase,
+            new_ver,
+            counterpart,
+            wt,
+            history_scan_max,
+        } = self;
+        if prompting == Prompting::Auto {
+            // Carry counterpart provenance in the trace so non-interactive runs
+            // (container smoke tests, CI, scripts) can still verify that the
+            // installed pkg was correctly resolved across pkgname/replaces/provides.
+            // Without this the auto path is opaque — show() never renders.
+            // `?` (Debug) formats `Option<…>` as `Some(…)` / `None` so the absent
+            // case is grep-distinguishable from a present-but-empty one.
+            info!(
+                %pkgbase,
+                %new_ver,
+                installed = ?counterpart.map(|c| c.pkgname),
+                installed_version = ?counterpart.map(|c| c.version),
+                via = ?counterpart.map(|c| c.via),
+                "auto-proceeding (non-interactive)"
+            );
+            return Ok(Outcome::Approved);
+        }
 
-    let actions = menu_actions(base.is_some());
+        // Initial render runs once — the loop body dispatches user actions and
+        // re-renders only what the user asked for, so picking "view PKGBUILD"
+        // isn't immediately clobbered by re-printing the diff above the prompt.
+        let base = show(mirror, pkgbase, new_ver, counterpart, wt, history_scan_max)?;
 
-    loop {
-        match prompt_action(pkgbase, &actions)? {
-            Action::Approve => return Ok(Outcome::Approved),
-            Action::ApproveAll => return Ok(Outcome::ApprovedAll),
-            Action::ViewPkgbuild => show_pkgbuild(wt)?,
-            Action::ViewDiff => show_diff(
-                mirror,
-                wt,
-                base.expect("only present when a diff base was found"),
-                Some(FULL_DIFF_CONTEXT),
-            )?,
-            Action::Edit => edit_pkgbuild(wt)?,
-            Action::Skip => return Ok(Outcome::Skipped),
-            Action::Abort => return Err(Error::UserAbort),
+        let actions = menu_actions(base.is_some());
+
+        loop {
+            match prompt_action(pkgbase, &actions)? {
+                Action::Approve => return Ok(Outcome::Approved),
+                Action::ApproveAll => return Ok(Outcome::ApprovedAll),
+                Action::ViewPkgbuild => show_pkgbuild(wt)?,
+                Action::ViewDiff => show_diff(
+                    mirror,
+                    wt,
+                    base.expect("only present when a diff base was found"),
+                    Some(FULL_DIFF_CONTEXT),
+                )?,
+                Action::Edit => edit_pkgbuild(wt)?,
+                Action::Skip => return Ok(Outcome::Skipped),
+                Action::Abort => return Err(Error::UserAbort),
+            }
         }
     }
 }

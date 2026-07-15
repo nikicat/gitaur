@@ -37,23 +37,25 @@ src/
 ├── cli/
 │   ├── flags.rs        pacman-style clustered flag parser (-Syyu → S,y,y,u)
 │   ├── dispatch.rs     routes to mirror / index / build subcommands; -Su → pacman
-│   ├── search.rs       `aurox <term>...` — yay-style fuzzy search → multi-select → install
+│   ├── search.rs       -Ss + bare `aurox <term>...`: merged repo+AUR search, ranked
 │   ├── shell.rs        the interactive no-arg REPL (cart / approval / apply)
 │   └── shell/          command, selector, cart, upgrade (refresh+reload + cost preview)
 │
 ├── mirror.rs        cmd_refresh: clone-or-fetch + index update
 ├── mirror/
 │   ├── clone.rs        gix bare clone (custom refspec — see TESTING.md)
+│   ├── consent.rs      bootstrap consent gate (decision tables — see below)
 │   ├── fetch.rs        incremental gix fetch; emits RefUpdate deltas
 │   ├── worktree.rs     per-pkgbase build worktrees via git linked worktrees
 │   └── sideband.rs     parse the server sideband stream for nicer progress UI
 │
-├── index.rs         load/save/search/info over the rkyv-archived catalog
+├── index.rs         load/save + AurState + AurIndexData (the one AUR-data seam)
 ├── index/
 │   ├── schema.rs       IndexFile + IndexEntry definitions (FORMAT_VERSION)
 │   ├── build.rs        full_build: parallel parse of every .SRCINFO blob
 │   ├── update.rs       incremental_update: applies RefUpdate deltas
-│   ├── secondary.rs    by_name / by_provides hash tables (built post-load)
+│   ├── info.rs         InfoLookup: merged repo+AUR -Si / shell `info` blocks
+│   ├── lookup.rs       by_name / by_provides hash tables (built post-load)
 │   └── srcinfo.rs      tiny .SRCINFO parser
 │
 ├── resolver.rs      resolve: BFS into Plan + Kahn strata
@@ -107,6 +109,65 @@ src/
 ├── trace.rs         read-side span-trace analysis (shared by bin/trace.rs)
 └── testing.rs       #[doc(hidden)] shared test helpers (git CLI runner)
 ```
+
+## The AUR is optional: provider symmetry + bootstrap consent
+
+The AUR half needs a one-time bootstrap — a ~2 GiB clone of the monorepo
+(~10 min) — and aurox never starts it without a yes. Two mechanisms keep
+that from leaking availability checks through the codebase:
+
+**Provider symmetry.** Repo and AUR are peer package providers; an absent AUR
+is an *empty* AUR, decided at exactly one seam: `AurIndexData::load`
+(`src/index.rs`) returns a zero-entry index when the AUR is unavailable, so
+search, info, resolve, install, and upgrade all run one uniform path and the
+AUR simply contributes no rows. `AurState { Ready, NotSetUp, Disabled }` is
+probed once per command and consulted **only for wording** (nudges, miss
+messages, the shell banner) and the shell's first-launch question — never for
+data flow. Pacman-only mode is the config knob `aur = false`; it deliberately
+ignores a leftover `index.bin`.
+
+**Consent gate.** Every path that could trigger a bootstrap funnels through
+`mirror::cmd_refresh`, whose consent step lives in `src/mirror/consent.rs` as
+two pure, unit-tested decision functions. First, what the AUR half *wants*
+(`decide`):
+
+| `aur` cfg | mirror on disk | trigger       | wants                         |
+|-----------|----------------|---------------|-------------------------------|
+| off       | any            | any           | skip — pacman-only, no prompt |
+| on        | ready          | `-Syy`        | bootstrap (forced re-clone)   |
+| on        | ready          | anything else | incremental fetch, no prompt  |
+| on        | interrupted    | any           | bootstrap (redo from scratch) |
+| on        | absent         | any           | bootstrap (first run)         |
+
+Second, how a wanted bootstrap obtains consent (`consent_mode`), by trigger.
+`--noconfirm` short-circuits every row to auto-yes — except the install
+offer, which it refuses:
+
+| trigger                        | stdin a TTY | consent                                     |
+|--------------------------------|-------------|---------------------------------------------|
+| `-Sy` / `-Syy`                 | yes         | announce cost + Y/n prompt (default yes)    |
+| `-Sy` / `-Syy`                 | no          | announce + read line: EOF ⇒ yes, `n` ⇒ no   |
+| shell `refresh`                | (tty)       | auto-yes — the launch question already asked |
+| shell `upgrade`                | (tty)       | refuse quietly; upgrade degrades to repo-only |
+| schema-bump resync (implicit)  | yes         | announce + Y/n prompt (default yes)         |
+| schema-bump resync (implicit)  | no          | refuse — never bootstrap behind a pipe      |
+| `-S` unknown-target offer      | yes         | announce + Y/n prompt (default yes)         |
+| `-S` unknown-target offer      | no / `--noconfirm` | refuse — an offer is never auto-accepted |
+
+The shell rows exist because the shell asks its own three-way question at
+first launch while the AUR is enabled-but-unsynced — **sync now** (bootstraps
+immediately) / **no** (persists `aur = false` via the config handle) /
+**later**, the Enter default (persists nothing) — so typing `refresh` after
+"later" IS the consent and gets a one-line heads-up instead of a second Y/n,
+while `upgrade`'s TTL-driven fetch must not spring the clone on someone who
+just said "later". The `-S` offer row is `cmd_install`'s inline retry: an
+unknown target with the AUR unsynced offers the setup, bootstraps on yes,
+reloads, and retries the install once.
+
+A decline or refusal still refreshes the official sync DBs, still stamps the
+fetch TTL (so `upgrade` doesn't re-nag within the window), and surfaces as
+`RefreshOutcome::AurSkipped(SkipCause)` so each caller words the skip. The
+`-Syy` wipe of a healthy mirror happens strictly *after* consent.
 
 ## Data flow: `aurox -S <pkg>` end-to-end
 

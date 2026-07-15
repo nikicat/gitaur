@@ -2,6 +2,7 @@
 
 use thiserror::Error;
 use toml::de::Error as TomlDeError;
+use toml::ser::Error as TomlSerError;
 
 /// Crate result alias.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -25,6 +26,10 @@ pub enum Error {
     /// TOML parse failure from config.
     #[error("toml: {0}")]
     Toml(#[from] TomlDeError),
+
+    /// TOML serialize failure when writing config back.
+    #[error("toml serialize: {0}")]
+    TomlSer(#[from] TomlSerError),
 
     /// Regex compile failure (used by -Ss).
     #[error("regex: {0}")]

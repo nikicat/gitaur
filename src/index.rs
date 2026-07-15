@@ -1,28 +1,31 @@
 //! In-memory index of AUR pkgbases, persisted as a single rkyv-archived file.
 //!
-//! Loaded via mmap with no per-entry deserialization. Secondary hashmaps
-//! (`by_name`, `by_provides`) are built post-load in [`secondary`].
+//! Loaded via mmap with no per-entry deserialization. Name-lookup hashmaps
+//! (`by_name`, `by_provides`, `by_pkgbase`) are built post-load in
+//! [`lookup`]; [`AurIndexData`] bundles the two into the one value the rest
+//! of the crate consumes.
 
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::mirror;
-use crate::names::SearchTerm;
+use crate::names::{PkgBase, PkgName, RepoName};
+use crate::pacman::invoke::REPO_AUR;
 use crate::paths;
 use crate::runopts;
 use crate::ui;
+use lookup::{AurClass, Lookup};
 use rkyv::rancor::Error as RkyvError;
 use std::path::Path;
 use tracing::{debug, info, instrument};
 
 pub mod build;
 pub mod info;
+pub mod lookup;
 pub mod schema;
-pub mod secondary;
 pub mod srcinfo;
 pub mod update;
 
 pub use info::cmd_info;
-pub(crate) use info::print_aur_info;
 pub use schema::{IndexEntry, IndexFile};
 
 /// Magic prefix of the plain-bytes header written ahead of the rkyv archive.
@@ -118,10 +121,139 @@ pub fn load_or_resync(cfg: &Config, path: &Path) -> Result<IndexFile> {
                 )));
             }
             ui::info(&format!("AUR index {reason}; resyncing database"));
-            mirror::cmd_refresh(cfg, false)?;
-            load(path)
+            match mirror::cmd_refresh(cfg, mirror::RefreshReason::IndexResync)? {
+                mirror::RefreshOutcome::Refreshed => load(path),
+                // The refresh left the mirror alone (AUR disabled, bootstrap
+                // declined, or no terminal to ask on), so the incompatible
+                // index is still there — report why instead of retrying.
+                mirror::RefreshOutcome::AurSkipped(cause) => Err(Error::IndexIncompatible(
+                    format!("{reason}; AUR refresh skipped ({cause}) — run `aurox -Sy` to rebuild"),
+                )),
+            }
         }
         other => other,
+    }
+}
+
+/// Where the AUR half of aurox stands this run — probed once, consulted only
+/// for user-facing wording and the shell's first-launch question.
+///
+/// Functional code never branches on this: when AUR data is unavailable the
+/// loader seam ([`crate::build::AurIndexData::load`]) returns an *empty*
+/// index, so search/resolve/install/upgrade all take one uniform path and the
+/// AUR simply contributes no rows. Pacman-only mode (`aur = false`)
+/// deliberately ignores a leftover `index.bin` from before the switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AurState {
+    /// `aur` enabled and an index is on disk: full AUR data.
+    Ready,
+    /// `aur` enabled but never synced (or pruned): AUR loads empty until a
+    /// bootstrap runs.
+    NotSetUp,
+    /// `aur = false` in config.toml: pacman-only mode by choice.
+    Disabled,
+}
+
+impl AurState {
+    /// Probe config + disk. Cheap (one `exists()`), but callers that need the
+    /// answer more than once in a command should probe once and pass it down.
+    pub fn probe(cfg: &Config) -> Self {
+        if !cfg.aur {
+            Self::Disabled
+        } else if paths::index_path().exists() {
+            Self::Ready
+        } else {
+            Self::NotSetUp
+        }
+    }
+}
+
+/// The loaded AUR data: the index plus its name-[`Lookup`] maps — the one
+/// value that answers "what does the AUR have?" for search, resolve, info,
+/// and upgrade scans.
+///
+/// **[`Self::load`] is the one seam where AUR availability affects data
+/// flow**: when the AUR is unavailable — never synced, or `aur = false` — it
+/// loads *empty*, so every downstream path runs uniformly and the AUR simply
+/// contributes no rows. Wording decisions consult [`AurState`] instead of
+/// branching on emptiness.
+pub struct AurIndexData {
+    idx: IndexFile,
+    by: Lookup,
+    /// Provenance/display label for rows served from this data — always
+    /// [`REPO_AUR`] today; the hook for future non-AUR package repos.
+    label: RepoName,
+}
+
+impl AurIndexData {
+    /// Load the on-disk index (resyncing an incompatible one) and build its
+    /// lookup maps; empty when [`AurState::probe`] isn't [`AurState::Ready`].
+    pub fn load(cfg: &Config) -> Result<Self> {
+        if AurState::probe(cfg) != AurState::Ready {
+            return Ok(Self::empty());
+        }
+        Ok(Self::from_index(load_or_resync(cfg, &paths::index_path())?))
+    }
+
+    /// Zero AUR entries — the pacman-only / not-yet-synced view.
+    pub fn empty() -> Self {
+        Self::from_index(IndexFile::empty())
+    }
+
+    /// Wrap an already-loaded index, building its lookup maps.
+    pub fn from_index(idx: IndexFile) -> Self {
+        let by = Lookup::build(&idx);
+        Self {
+            idx,
+            by,
+            label: RepoName::from(REPO_AUR),
+        }
+    }
+
+    /// The loaded index — immutable for this value's lifetime.
+    pub const fn index(&self) -> &IndexFile {
+        &self.idx
+    }
+
+    /// Raw access to the name-lookup maps, for callers that need the maps
+    /// themselves (e.g. the completion universe). Most callers want
+    /// [`Self::entry`] / [`Self::search`].
+    pub const fn lookup(&self) -> &Lookup {
+        &self.by
+    }
+
+    /// The provenance label rows from this data carry (`aur`).
+    pub const fn label(&self) -> &RepoName {
+        &self.label
+    }
+
+    /// Resolve one user-typed spec — pkgname, `provides` virtual, or pkgbase,
+    /// in that precedence — to its entry.
+    pub fn entry(&self, spec: &str) -> Option<&IndexEntry> {
+        self.by.lookup(&self.idx, spec)
+    }
+
+    /// Regex search across pkgnames / descriptions / provides.
+    pub fn search(&self, regexes: &[regex::Regex]) -> Vec<&IndexEntry> {
+        self.by.search(&self.idx, regexes)
+    }
+
+    /// How a foreign (non-repo) localdb pkgname relates to this data — own
+    /// pkgname / provides / pkgbase / unknown.
+    pub fn classify_foreign(&self, name: &PkgName) -> AurClass<'_> {
+        self.by.classify_foreign(&self.idx, name)
+    }
+
+    /// The pkgbase that owns a foreign localdb pkgname, or `None` when the
+    /// name isn't in the index. Maps an AUR upgrade row (keyed by pkgname)
+    /// back to the pkgbase build bookkeeping is keyed on.
+    pub fn pkgbase_of(&self, name: &PkgName) -> Option<&PkgBase> {
+        match self.classify_foreign(name) {
+            AurClass::AsPkgname(e) | AurClass::AsProvides(e) | AurClass::AsPkgbase(e) => {
+                Some(&e.pkgbase)
+            }
+            AurClass::NotInAur => None,
+        }
     }
 }
 
@@ -140,63 +272,9 @@ pub fn save(idx: &IndexFile, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `-Ss` search across pkgnames/pkgdesc/provides, with pacman-style output.
-pub fn cmd_search(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
-    let path = paths::index_path();
-    if !path.exists() {
-        ui::warn("no index; run `aurox -Sy` first");
-        return Ok(1);
-    }
-    let idx = load_or_resync(cfg, &path)?;
-    let by = secondary::Secondary::build(&idx);
-    let regexes: Vec<regex::Regex> = terms
-        .iter()
-        .map(SearchTerm::compile)
-        .collect::<std::result::Result<_, _>>()?;
-    let hits = by.search(&idx, &regexes);
-    info!(count = hits.len(), "search results");
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    for entry in hits {
-        write_search_result(&mut out, entry)?;
-    }
-    Ok(0)
-}
-
-/// Render one search hit in pacman's `-Ss` format to `out`.
-///
-/// Stdout (not stderr) so `aurox -Ss foo | head` works — the equivalent
-/// `pacman -Ss` also writes results to stdout. Lifted out of `cmd_search`
-/// so the exact byte layout can be tested without spawning a process.
-fn write_search_result<W: std::io::Write>(out: &mut W, entry: &IndexEntry) -> std::io::Result<()> {
-    writeln!(
-        out,
-        "aur/{} {}",
-        entry.pkgbase,
-        version_string(entry.epoch.as_ref(), &entry.pkgver, &entry.pkgrel)
-    )?;
-    if let Some(desc) = entry.display_desc() {
-        writeln!(out, "    {desc}")?;
-    }
-    Ok(())
-}
-
-fn version_string(epoch: Option<&String>, ver: &str, rel: &str) -> String {
-    match epoch {
-        Some(e) if !e.is_empty() => format!("{e}:{ver}-{rel}"),
-        _ => format!("{ver}-{rel}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn render(entry: &IndexEntry) -> String {
-        let mut buf: Vec<u8> = Vec::new();
-        write_search_result(&mut buf, entry).unwrap();
-        String::from_utf8(buf).unwrap()
-    }
 
     fn mk(pkgbase: &str) -> IndexEntry {
         use crate::index::schema::Pkgname;
@@ -211,50 +289,6 @@ mod tests {
             pkgrel: "1".into(),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn search_result_writes_to_writer_not_stdout() {
-        // The function takes any Write, so it must not be coupled to stdout.
-        // (If it called println! the buffer below would be empty.)
-        let e = mk("foo");
-        let out = render(&e);
-        assert!(!out.is_empty(), "writer captured nothing");
-    }
-
-    #[test]
-    fn search_result_format_matches_pacman_ss() {
-        // pacman -Ss prints `repo/name version` then indented description.
-        let mut e = mk("foo");
-        e.pkgdesc = Some("does foo".into());
-        let out = render(&e);
-        assert_eq!(out, "aur/foo 1.0-1\n    does foo\n");
-    }
-
-    #[test]
-    fn search_result_omits_description_block_when_none() {
-        // Single-line output, no blank "    " for entries without a pkgdesc.
-        let out = render(&mk("bar"));
-        assert_eq!(out, "aur/bar 1.0-1\n");
-    }
-
-    #[test]
-    fn search_result_includes_epoch_when_present() {
-        let mut e = mk("baz");
-        e.epoch = Some("2".into());
-        let out = render(&e);
-        assert!(out.starts_with("aur/baz 2:1.0-1\n"), "got: {out:?}");
-    }
-
-    #[test]
-    fn search_result_skips_empty_epoch_string() {
-        // An empty-string epoch (e.g. from `epoch=` with no value) is not
-        // rendered as `:1.0-1`. Regression bait: version_string special-cases
-        // it.
-        let mut e = mk("qux");
-        e.epoch = Some(String::new());
-        let out = render(&e);
-        assert!(out.starts_with("aur/qux 1.0-1\n"), "got: {out:?}");
     }
 
     // --- file header: version skew vs corruption, told apart at load ---

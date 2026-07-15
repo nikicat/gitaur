@@ -82,78 +82,87 @@ pub struct TxnRoot {
     pub age: Option<Duration>,
 }
 
-/// Render the unified transaction table as display lines.
+/// One staged transaction's full change set, bundled for rendering.
 ///
-/// No trailing newline, and no top header — the shell's `show` prints its own
-/// header + approval summary around these. `roots` are rendered in the order
-/// given (the cart holds them sorted, so the row number *is* the cart index);
-/// `repo_deps` / `aur_deps` are the pulled-in dependencies the resolver added;
-/// `removals` are the staged uninstalls; `pac` backs the size figures and
-/// `metrics` the build-time ones. `paint` is passed in (callers use
-/// [`Paint::detect`]) rather than re-read from the environment, so tests can
-/// pin the plain rendering.
-pub fn transaction_table(
-    roots: &[TxnRoot],
-    repo_deps: &[PkgName],
-    aur_deps: &[PkgBase],
-    removals: &[PkgName],
-    pac: &PacmanIndex,
-    metrics: &PreviewMetrics,
-    paint: Paint,
-) -> Table {
-    let fig = figures(roots, repo_deps, aur_deps, pac, metrics);
+/// The user-named roots, the pulled-in dependencies, the staged removals,
+/// and the two figure sources (sizes from `pac`, build times from
+/// `metrics`) — the value `transaction_table` / `cost_summary` used to take
+/// as six parallel parameters.
+pub struct ChangeSet<'a> {
+    pub roots: &'a [TxnRoot],
+    pub repo_deps: &'a [PkgName],
+    pub aur_deps: &'a [PkgBase],
+    pub removals: &'a [PkgName],
+    pub pac: &'a PacmanIndex,
+    pub metrics: &'a PreviewMetrics,
+}
 
-    // Column widths over the plain cell text — padding is applied on that visible
-    // width so embedded ANSI codes never skew the columns.
-    let num_w = Width::of(&roots.len().to_string());
-    let repo_w = Width::widest(roots.iter().map(|r| Width::of(r.repo.as_str())));
-    let appr_w = Width::widest(roots.iter().map(|r| Width::of(r.approval.label())));
-    let name_w = Width::widest(roots.iter().map(|r| Width::of(r.name.as_str())));
-    let old_w = Width::widest(
-        roots
-            .iter()
-            .filter_map(|r| r.old_ver.as_ref())
-            .map(|v| Width::of(v.as_str())),
-    );
-    let new_w = Width::widest(
-        roots
-            .iter()
-            .filter_map(|r| r.new_ver.as_ref())
-            .map(|v| Width::of(v.as_str())),
-    );
-    let size_w = Width::widest(
-        fig.root_sizes
-            .iter()
-            .chain(&fig.repo_dep_sizes)
-            .chain(&fig.aur_dep_sizes)
-            .map(|s| Width::of(&s.render())),
-    );
-    let time_w = Width::widest(
-        fig.root_costs
-            .iter()
-            .chain(&fig.aur_dep_costs)
-            .map(|c| c.visible_width()),
-    );
+impl ChangeSet<'_> {
+    /// Render the unified transaction table as display lines.
+    ///
+    /// No trailing newline, and no top header — the shell's `show` prints its own
+    /// header + approval summary around these. `roots` are rendered in the order
+    /// given (the cart holds them sorted, so the row number *is* the cart index);
+    /// `repo_deps` / `aur_deps` are the pulled-in dependencies the resolver added;
+    /// `removals` are the staged uninstalls; `pac` backs the size figures and
+    /// `metrics` the build-time ones. `paint` is passed in (callers use
+    /// [`Paint::detect`]) rather than re-read from the environment, so tests can
+    /// pin the plain rendering.
+    pub fn table(&self, paint: Paint) -> Table {
+        let fig = self.figures();
 
-    let mut out = Table::new();
-    for (i, ((root, size), cost)) in roots
-        .iter()
-        .zip(&fig.root_sizes)
-        .zip(&fig.root_costs)
-        .enumerate()
-    {
-        let repo_cell =
-            Cell::paint(root.repo.as_str(), paint, |s| repo_style(s).to_string()).pad_to(repo_w);
-        let appr_cell = root.approval.cell(paint).pad_to(appr_w);
-        let name_cell = Cell::plain(root.name.as_str()).pad_to(name_w);
-        let ver = version_block(
-            root.old_ver.as_ref(),
-            root.new_ver.as_ref(),
-            old_w,
-            new_w,
-            paint,
+        // Column widths over the plain cell text — padding is applied on that visible
+        // width so embedded ANSI codes never skew the columns.
+        let num_w = Width::of(&self.roots.len().to_string());
+        let repo_w = Width::widest(self.roots.iter().map(|r| Width::of(r.repo.as_str())));
+        let appr_w = Width::widest(self.roots.iter().map(|r| Width::of(r.approval.label())));
+        let name_w = Width::widest(self.roots.iter().map(|r| Width::of(r.name.as_str())));
+        let old_w = Width::widest(
+            self.roots
+                .iter()
+                .filter_map(|r| r.old_ver.as_ref())
+                .map(|v| Width::of(v.as_str())),
         );
-        out.push(format!(
+        let new_w = Width::widest(
+            self.roots
+                .iter()
+                .filter_map(|r| r.new_ver.as_ref())
+                .map(|v| Width::of(v.as_str())),
+        );
+        let size_w = Width::widest(
+            fig.root_sizes
+                .iter()
+                .chain(&fig.repo_dep_sizes)
+                .chain(&fig.aur_dep_sizes)
+                .map(|s| Width::of(&s.render())),
+        );
+        let time_w = Width::widest(
+            fig.root_costs
+                .iter()
+                .chain(&fig.aur_dep_costs)
+                .map(|c| c.visible_width()),
+        );
+
+        let mut out = Table::new();
+        for (i, ((root, size), cost)) in self
+            .roots
+            .iter()
+            .zip(&fig.root_sizes)
+            .zip(&fig.root_costs)
+            .enumerate()
+        {
+            let repo_cell = Cell::paint(root.repo.as_str(), paint, |s| repo_style(s).to_string())
+                .pad_to(repo_w);
+            let appr_cell = root.approval.cell(paint).pad_to(appr_w);
+            let name_cell = Cell::plain(root.name.as_str()).pad_to(name_w);
+            let ver = version_block(
+                root.old_ver.as_ref(),
+                root.new_ver.as_ref(),
+                old_w,
+                new_w,
+                paint,
+            );
+            out.push(format!(
             "{n:>num$}  {repo_cell}  {appr_cell}  {name_cell}  {ver}  {size:>sw$}  {time}{built}{age}",
             n = i + 1,
             num = num_w.cells(),
@@ -163,13 +172,78 @@ pub fn transaction_table(
             built = built_suffix(*cost, paint),
             age = age_cell(root.age, paint),
         ));
+        }
+
+        out.append(dep_lines(
+            self.repo_deps,
+            self.aur_deps,
+            &fig,
+            size_w,
+            time_w,
+            paint,
+        ));
+        out.append(removal_lines(self.removals, paint));
+
+        out.push(total_line(&fig));
+        out
     }
 
-    out.append(dep_lines(repo_deps, aur_deps, &fig, size_w, time_w, paint));
-    out.append(removal_lines(removals, paint));
+    /// The one-line cost summary `apply` gates on.
+    ///
+    /// `show` is where the user looks; `apply` no longer redraws the table. E.g.
+    /// `3 install, +2 deps, 1 remove · 3.07 GiB · 22m build`. The deps / remove /
+    /// build terms are omitted when their count is zero. A total that under-counts
+    /// because some row's figure is unknown is a lower bound, prefixed `>`.
+    pub fn summary(&self) -> String {
+        let fig = self.figures();
+        let size = fig.size_total();
+        let time = fig.time_total();
 
-    out.push(total_line(&fig));
-    out
+        let mut parts = vec![format!("{} install", self.roots.len())];
+        let deps = self.repo_deps.len() + self.aur_deps.len();
+        if deps > 0 {
+            parts.push(format!("+{deps} dep{}", if deps == 1 { "" } else { "s" }));
+        }
+        if !self.removals.is_empty() {
+            parts.push(format!("{} remove", self.removals.len()));
+        }
+        let mut line = parts.join(", ");
+        write!(line, " · {}", size.render()).ok();
+        if let Some(build) = build_term(time) {
+            write!(line, " · {build}").ok();
+        }
+        line
+    }
+
+    /// Compute the per-row size + build-time figures once, shared by
+    /// [`Self::table`] (per-cell + widths) and [`Self::summary`] (totals).
+    fn figures(&self) -> Figures {
+        Figures {
+            root_sizes: self
+                .roots
+                .iter()
+                .map(|r| size_of(&r.repo, &r.name, self.pac))
+                .collect(),
+            root_costs: self
+                .roots
+                .iter()
+                .map(|r| cost_of(&r.repo, &r.name, self.metrics))
+                .collect(),
+            repo_dep_sizes: self
+                .repo_deps
+                .iter()
+                .map(|n| size_of_repo_dep(n, self.pac))
+                .collect(),
+            // Pulled-in AUR deps are unsatisfied builds — not yet installed — so
+            // their footprint is unknown (`?`).
+            aur_dep_sizes: vec![SizeEst::Unknown; self.aur_deps.len()],
+            aur_dep_costs: self
+                .aur_deps
+                .iter()
+                .map(|pb| cost_of_aur_dep(pb, self.metrics))
+                .collect(),
+        }
+    }
 }
 
 /// The indented "pulls in:" block: the repo deps (`(install)`) then the AUR
@@ -242,40 +316,6 @@ fn removal_lines(removals: &[PkgName], paint: Paint) -> Table {
     out
 }
 
-/// The one-line cost summary `apply` gates on.
-///
-/// `show` is where the user looks; `apply` no longer redraws the table. E.g.
-/// `3 install, +2 deps, 1 remove · 3.07 GiB · 22m build`. The deps / remove /
-/// build terms are omitted when their count is zero. A total that under-counts
-/// because some row's figure is unknown is a lower bound, prefixed `>`.
-pub fn cost_summary(
-    roots: &[TxnRoot],
-    repo_deps: &[PkgName],
-    aur_deps: &[PkgBase],
-    removals: &[PkgName],
-    pac: &PacmanIndex,
-    metrics: &PreviewMetrics,
-) -> String {
-    let fig = figures(roots, repo_deps, aur_deps, pac, metrics);
-    let size = fig.size_total();
-    let time = fig.time_total();
-
-    let mut parts = vec![format!("{} install", roots.len())];
-    let deps = repo_deps.len() + aur_deps.len();
-    if deps > 0 {
-        parts.push(format!("+{deps} dep{}", if deps == 1 { "" } else { "s" }));
-    }
-    if !removals.is_empty() {
-        parts.push(format!("{} remove", removals.len()));
-    }
-    let mut line = parts.join(", ");
-    write!(line, " · {}", size.render()).ok();
-    if let Some(build) = build_term(time) {
-        write!(line, " · {build}").ok();
-    }
-    line
-}
-
 /// The trailing ` build` figure for a batch total, or `None` for a pure-repo
 /// batch that carries no build-time term. An all-unknown total renders
 /// `? build` — never a bogus `0s build`, the never-built case; a total that
@@ -317,7 +357,7 @@ impl From<bool> for Bound {
 }
 
 /// The per-row size + build-time figures for a change set, computed once and
-/// shared by [`transaction_table`] (per-cell + widths) and [`cost_summary`]
+/// shared by [`ChangeSet::table`] (per-cell + widths) and [`ChangeSet::summary`]
 /// (totals only).
 struct Figures {
     root_sizes: Vec<SizeEst>,
@@ -347,33 +387,6 @@ impl Figures {
                 .chain(&self.aur_dep_costs)
                 .map(|c| c.time),
         )
-    }
-}
-
-fn figures(
-    roots: &[TxnRoot],
-    repo_deps: &[PkgName],
-    aur_deps: &[PkgBase],
-    pac: &PacmanIndex,
-    metrics: &PreviewMetrics,
-) -> Figures {
-    Figures {
-        root_sizes: roots
-            .iter()
-            .map(|r| size_of(&r.repo, &r.name, pac))
-            .collect(),
-        root_costs: roots
-            .iter()
-            .map(|r| cost_of(&r.repo, &r.name, metrics))
-            .collect(),
-        repo_dep_sizes: repo_deps.iter().map(|n| size_of_repo_dep(n, pac)).collect(),
-        // Pulled-in AUR deps are unsatisfied builds — not yet installed — so
-        // their footprint is unknown (`?`).
-        aur_dep_sizes: vec![SizeEst::Unknown; aur_deps.len()],
-        aur_dep_costs: aur_deps
-            .iter()
-            .map(|pb| cost_of_aur_dep(pb, metrics))
-            .collect(),
     }
 }
 
@@ -529,6 +542,26 @@ fn batch_time_total(times: impl IntoIterator<Item = TimeEst>) -> TimeTotal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fixture: assemble a [`ChangeSet`] from a test's pieces.
+    fn cs<'a>(
+        roots: &'a [TxnRoot],
+        repo_deps: &'a [PkgName],
+        aur_deps: &'a [PkgBase],
+        removals: &'a [PkgName],
+        pac: &'a PacmanIndex,
+        metrics: &'a PreviewMetrics,
+    ) -> ChangeSet<'a> {
+        ChangeSet {
+            roots,
+            repo_deps,
+            aur_deps,
+            removals,
+            pac,
+            metrics,
+        }
+    }
+
     use crate::{assert_contains, assert_not_contains, assert_regex};
     use console::strip_ansi_codes;
 
@@ -732,7 +765,7 @@ mod tests {
         let mut pac = PacmanIndex::default();
         pac.installed_size.insert("newthing".into(), mib(85));
         let roots = vec![root("aur", "newthing", None, Some("1.0-1"))];
-        let s = cost_summary(&roots, &[], &[], &[], &pac, &PreviewMetrics::empty());
+        let s = cs(&roots, &[], &[], &[], &pac, &PreviewMetrics::empty()).summary();
         assert_contains!(s, "? build", "never-built build time is unknown");
         assert_not_contains!(s, "0s build", "must not fake a summed figure");
     }
@@ -760,15 +793,8 @@ mod tests {
         let removals = vec![PkgName::from("old-cuda")];
         let metrics = PreviewMetrics::empty();
 
-        let table = transaction_table(
-            &roots,
-            &repo_deps,
-            &aur_deps,
-            &removals,
-            &pac,
-            &metrics,
-            Paint::Plain,
-        );
+        let table =
+            cs(&roots, &repo_deps, &aur_deps, &removals, &pac, &metrics).table(Paint::Plain);
         let lines = table.lines();
         // One pattern per row pins the column order: number (as wide as the
         // row count's digit count — 1 here), repo, then name and versions.
@@ -795,15 +821,7 @@ mod tests {
         let mut pac = PacmanIndex::default();
         pac.sync_download_size.insert("glibc".into(), 1024);
         let roots = vec![root("core", "glibc", Some("1-1"), Some("1-2"))];
-        let table = transaction_table(
-            &roots,
-            &[],
-            &[],
-            &[],
-            &pac,
-            &PreviewMetrics::empty(),
-            Paint::Plain,
-        );
+        let table = cs(&roots, &[], &[], &[], &pac, &PreviewMetrics::empty()).table(Paint::Plain);
         let total = table.lines().last().unwrap();
         assert_regex!(total, r"^-> total  \S");
         assert_not_contains!(total, "build", "pure-repo total has no build term");
@@ -835,11 +853,8 @@ mod tests {
         let aur_deps = vec![PkgBase::from("nvidia-utils")];
         let removals = vec![PkgName::from("old-cuda")];
         let metrics = PreviewMetrics::empty();
-        let render = |paint| {
-            transaction_table(
-                &roots, &repo_deps, &aur_deps, &removals, &pac, &metrics, paint,
-            )
-        };
+        let render =
+            |paint| cs(&roots, &repo_deps, &aur_deps, &removals, &pac, &metrics).table(paint);
 
         let (plain, colored) = (render(Paint::Plain), render(Paint::Colored));
 
@@ -883,8 +898,7 @@ mod tests {
         ];
         let size_re = regex::Regex::new(r"\d[\d.]* [KMGT]iB").unwrap();
         for paint in [Paint::Plain, Paint::Colored] {
-            let table =
-                transaction_table(&roots, &[], &[], &[], &pac, &PreviewMetrics::empty(), paint);
+            let table = cs(&roots, &[], &[], &[], &pac, &PreviewMetrics::empty()).table(paint);
             let end_columns: Vec<usize> = table.lines()[..3]
                 .iter()
                 .map(|line| {
@@ -910,7 +924,7 @@ mod tests {
         let mut pac = PacmanIndex::default();
         pac.sync_download_size.insert("glibc".into(), 100);
         let roots = vec![root("core", "glibc", Some("1-1"), Some("1-2"))];
-        let plain = cost_summary(&roots, &[], &[], &[], &pac, &PreviewMetrics::empty());
+        let plain = cs(&roots, &[], &[], &[], &pac, &PreviewMetrics::empty()).summary();
         assert_eq!(plain, "1 install · 100 B");
 
         pac.installed_size.insert("cuda".into(), 1024);
@@ -923,14 +937,15 @@ mod tests {
         // `gcc13` has no syncdb size → an Unknown row → the size total is a
         // lower bound. `cuda` is measured (120s) with no unknown build in the
         // mix → an exact `2m 0s build`.
-        let s = cost_summary(
+        let s = cs(
             &roots,
             &[PkgName::from("gcc13")],
             &[],
             &[PkgName::from("old")],
             &pac,
             &metrics,
-        );
+        )
+        .summary();
         assert!(
             s.starts_with("2 install, +1 dep, 1 remove · >"),
             "unknown-size dep makes the size a lower bound: {s}"

@@ -11,9 +11,8 @@
 use crate::config::Config;
 use crate::context;
 use crate::error::{Error, Result};
-use crate::index::secondary::Secondary;
-use crate::index::{self, IndexFile};
-use crate::mirror::{self, MirrorRepo};
+use crate::index::{self, AurIndexData};
+use crate::mirror::{self, MirrorRepo, RefreshOutcome, RefreshReason};
 use crate::names::{PkgBase, PkgName, PkgTarget, PkgTargetSetExt};
 use crate::pacman::alpm_db::{self, PacmanIndex};
 use crate::pacman::invoke;
@@ -22,6 +21,7 @@ use crate::resolver::{self, PkgbasePlan, Plan};
 use crate::ui;
 use crate::version::Version;
 use std::collections::{HashMap, HashSet};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
@@ -33,7 +33,7 @@ pub mod print;
 pub mod review;
 pub mod upgrade;
 
-pub use upgrade::{DevelPolicy, UpgradeSession, cmd_query_upgrades, collect_upgrade_plan};
+pub use upgrade::{DevelPolicy, cmd_query_upgrades, collect_upgrade_plan};
 
 /// Read-only mirror of [`prepare_one`]'s idempotency check.
 ///
@@ -135,6 +135,23 @@ pub struct InstallOpts {
     pub gate: ConfirmGate,
 }
 
+/// Whether the unknown-target path may offer the one-time AUR setup.
+///
+/// The caller answers it from what already happened this invocation:
+/// `-Sy <targets>` runs the sync consent prompt before the install half
+/// ([`offer_aur_setup`]), and a user who just declined it must not be asked
+/// the same question again seconds later (`mirror/consent.rs`: no
+/// double-prompts after an informed explicit command).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupOffer {
+    /// Nothing asked yet this invocation — the offer may prompt (still
+    /// subject to [`offer_applies`]).
+    Open,
+    /// An explicit sync in this same invocation already asked and was
+    /// declined; the answer stands for the rest of the invocation.
+    AlreadyDeclined,
+}
+
 /// Entry point for `aurox -S <targets>`.
 ///
 /// Loads the pacman snapshot and (optionally) the AUR index in parallel, then
@@ -145,55 +162,65 @@ pub struct InstallOpts {
 pub fn cmd_install(
     cfg: &Config,
     targets: &[Target],
-    noconfirm: bool,
-    asdeps: bool,
-    already_confirmed: bool,
+    opts: InstallOpts,
+    offer: SetupOffer,
 ) -> Result<u8> {
-    let idx_path = paths::index_path();
+    // Probed once: drives only the unknown-target wording below. The data
+    // flow is uniform — an unavailable AUR loads as empty AUR data.
+    let aur_state = index::AurState::probe(cfg);
 
     // Pacman snapshot + AUR index loaded concurrently. PacmanIndex iterates
     // every sync DB and the localdb (tens of ms on a typical system); the
     // AUR mmap + rkyv deserialize is similar. `context::join` hides one behind
     // the other and propagates the caller's context so `load_or_resync` sees
     // `--noresync` and the right `state_dir()` even on the stolen worker.
-    let (pac_res, idx_res) = context::join(
+    let (pac_res, aur_res) = context::join(
         || -> Result<PacmanIndex> {
             let alpm = alpm_db::open()?;
             Ok(PacmanIndex::build(&alpm))
         },
-        || -> Result<Option<(IndexFile, Secondary)>> {
-            if !idx_path.exists() {
-                return Ok(None);
-            }
-            let idx = index::load_or_resync(cfg, &idx_path)?;
-            let by = Secondary::build(&idx);
-            Ok(Some((idx, by)))
-        },
+        || AurIndexData::load(cfg),
     );
     let pac = pac_res?;
-    let aur_loaded = idx_res?;
-
-    let empty_idx;
-    let (idx, by): (&IndexFile, Option<&Secondary>) = if let Some((i, s)) = aur_loaded.as_ref() {
-        (i, Some(s))
-    } else {
-        empty_idx = IndexFile::empty();
-        (&empty_idx, None)
-    };
+    let aur_data = aur_res?;
 
     // `-S` has no cross-call review memory, so a fresh per-invocation set. The
     // upgrade loop keeps its own session-scoped set across batches instead.
     let mut reviewed = HashSet::new();
-    let opts = InstallOpts {
-        noconfirm,
-        asdeps,
-        gate: if already_confirmed {
-            ConfirmGate::AlreadyConfirmed
-        } else {
-            ConfirmGate::Ask
-        },
+    let ctx = InstallCtx {
+        cfg,
+        aur: &aur_data,
+        pac: &pac,
     };
-    let report = install_with_index(cfg, idx, by, &pac, targets, opts, &mut reviewed)?;
+    let report = match ctx.install(targets, opts, &mut reviewed) {
+        // Unresolvable targets: when no AUR data was in play the names may
+        // simply live in the (unavailable) AUR — offer to bring it in and
+        // retry once, else say what would.
+        Err(Error::UnknownTargets(names)) => {
+            let Some(aur_data) = offer_aur_setup(cfg, &names, aur_state, opts.noconfirm, offer)?
+            else {
+                return Err(Error::UnknownTargets(unknown_targets_hint(
+                    names, aur_state,
+                )));
+            };
+            let ctx = InstallCtx {
+                cfg,
+                aur: &aur_data,
+                pac: &pac,
+            };
+            match ctx.install(targets, opts, &mut reviewed) {
+                // Still unknown with a fresh index: genuinely not a package.
+                Err(Error::UnknownTargets(names)) => {
+                    return Err(Error::UnknownTargets(unknown_targets_hint(
+                        names,
+                        index::AurState::probe(cfg),
+                    )));
+                }
+                other => other?,
+            }
+        }
+        other => other?,
+    };
     // A Ctrl+C'd build exits non-zero too: the user aborted, so `||` chains and
     // scripts should see the run didn't complete.
     Ok(u8::from(
@@ -201,103 +228,448 @@ pub fn cmd_install(
     ))
 }
 
-/// Resolve `targets` against a caller-supplied index + pacman snapshot, then
-/// drive the repo and AUR install phases, returning the per-pkgbase
-/// [`RunReport`].
-///
-/// Split out of [`cmd_install`] so the no-arg upgrade loop can run many
-/// batches against one already-loaded [`IndexFile`]/[`Secondary`] without
-/// re-reading the index each iteration, and so the loop can fold the report
-/// into its session state. `reviewed` is the session-scoped set of pkgbases
-/// already approved (see [`prepare_one`]); `-S` passes a fresh empty one.
-pub(crate) fn install_with_index(
+/// After `-S` hit unknown targets with the AUR enabled-but-unsynced: the
+/// names may simply live in the AUR, so offer the one-time mirror setup —
+/// through the consent gate's [`RefreshReason::InstallOffer`] row, which
+/// announces the cost and prompts — and return the freshly loaded index on
+/// "yes". `None` ⇒ the offer doesn't apply ([`offer_applies`]) or the user
+/// declined; the caller reports the plain unknown-target error instead.
+fn offer_aur_setup(
     cfg: &Config,
-    idx: &IndexFile,
-    by: Option<&Secondary>,
-    pac: &PacmanIndex,
-    targets: &[Target],
-    opts: InstallOpts,
-    reviewed: &mut HashSet<PkgBase>,
-) -> Result<RunReport> {
-    let plan = resolve_targets(cfg, idx, by, pac, targets, opts.noconfirm)?;
-    print::plan(&plan, idx, pac);
-    apply_plan(cfg, idx, pac, &plan, opts, reviewed)
-}
-
-/// Classify `targets` into a [`Plan`] — expand bare pkgbases, resolve deps, and
-/// stamp the per-pkgbase decisions (split selections, counterpart hints) onto
-/// it.
-///
-/// Pulled out of [`install_with_index`] so the upgrade loop can resolve once,
-/// render its change-set preview against the [`Plan`], and then hand the *same*
-/// plan to [`apply_plan`] — re-resolving would re-run the split-package prompt
-/// inside `expand_pkgbase_targets`.
-pub(crate) fn resolve_targets(
-    cfg: &Config,
-    idx: &IndexFile,
-    by: Option<&Secondary>,
-    pac: &PacmanIndex,
-    targets: &[Target],
+    names: &str,
+    aur: index::AurState,
     noconfirm: bool,
-) -> Result<Plan> {
-    // Expand bare `-S <pkgbase>` targets into the pkgname(s) the user wants
-    // installed as explicit. Split pkgbases prompt for a subset; single-pkgname
-    // pkgbases pass through silently. The selector closure delegates to
-    // `ui::select_pkgnames` so tests can swap in a deterministic picker.
-    let expanded = resolver::expand_pkgbase_targets(idx, by, pac, targets, &mut |pb, pns| {
-        ui::select_pkgnames(pb, pns, noconfirm).map_err(|e| Error::other(e.to_string()))
-    })?;
-    let mut plan = resolver::resolve(cfg, idx, by, pac, &expanded.targets)?;
-    plan.pkgname_selections = expanded.selections;
-    // For pkgbase/provides hits the resolver received the pkgbase string, so
-    // `plan.direct_targets` only contains the pkgbase. Mark the pkgnames the
-    // user actually chose as direct too, so `install_stratum` flips their
-    // `.pkg.tar.zst` to Explicit (instead of `--asdeps`). The expanded
-    // pkgnames widen into `PkgTarget` — explicit "treat this pkgname as
-    // an unclassified user target for the install-reason check."
-    plan.direct_targets
-        .extend(expanded.direct_pkgnames.into_iter().map(PkgTarget::from));
-    plan.counterpart_hints = expanded.counterpart_hints;
-    Ok(plan)
+    offer: SetupOffer,
+) -> Result<Option<AurIndexData>> {
+    if !offer_applies(aur, noconfirm, std::io::stdin().is_terminal(), offer) {
+        return Ok(None);
+    }
+    ui::note(&format!(
+        "{names}: not in the official repos — may be in the AUR"
+    ));
+    match mirror::cmd_refresh(cfg, RefreshReason::InstallOffer)? {
+        RefreshOutcome::Refreshed => Ok(Some(AurIndexData::load(cfg)?)),
+        RefreshOutcome::AurSkipped(_) => Ok(None),
+    }
 }
 
-/// Execute an already-resolved [`Plan`]: confirm gate, repo phase, AUR
-/// pipeline. The caller is responsible for displaying the plan first
-/// ([`print::plan`] for `-S`, the change-set preview for the loop).
-pub(crate) fn apply_plan(
-    cfg: &Config,
-    idx: &IndexFile,
-    pac: &PacmanIndex,
-    plan: &Plan,
-    opts: InstallOpts,
-    reviewed: &mut HashSet<PkgBase>,
-) -> Result<RunReport> {
-    if plan.direct_repo.is_empty() && plan.transitive_repo.is_empty() && plan.aur_strata.is_empty()
-    {
-        return Ok(RunReport::default());
+/// Whether an unknown-target failure should offer the AUR setup: only when
+/// the AUR is enabled-but-unsynced (with a ready index the names are
+/// genuinely unknown; pacman-only mode is a standing choice), only where
+/// a human can answer — a TTY without `--noconfirm` — and never when this
+/// invocation's explicit sync already asked and was declined
+/// ([`SetupOffer::AlreadyDeclined`]). The consent gate enforces the
+/// TTY/`--noconfirm` rule too ([`RefreshReason::InstallOffer`]); this
+/// pre-gate just avoids a pointless repo-DB refresh on the refusal path.
+const fn offer_applies(
+    aur: index::AurState,
+    noconfirm: bool,
+    stdin_is_tty: bool,
+    offer: SetupOffer,
+) -> bool {
+    matches!(offer, SetupOffer::Open)
+        && matches!(aur, index::AurState::NotSetUp)
+        && !noconfirm
+        && stdin_is_tty
+}
+
+/// Suffix an [`Error::UnknownTargets`] with why the AUR couldn't answer: when
+/// no AUR data was in play the unresolved names may simply be AUR packages,
+/// so point at the missing half — how to enable it, or (in pacman-only mode)
+/// why it's off. With a ready index the names are genuinely unknown and pass
+/// through unchanged.
+fn unknown_targets_hint(names: String, aur: index::AurState) -> String {
+    match aur {
+        index::AurState::Ready => names,
+        index::AurState::NotSetUp => {
+            format!("{names} (no AUR index — run `aurox -Sy` to enable AUR installs)")
+        }
+        index::AurState::Disabled => {
+            format!("{names} (AUR disabled: aur = false in config.toml)")
+        }
+    }
+}
+
+/// Everything one resolve/install pass *reads*: config plus the two package
+/// sources. Groups the `(cfg, idx, pac)` caravan the resolve/build call
+/// chain used to thread through every signature; the mutable run state lives
+/// in [`PipelineRun`].
+pub(crate) struct InstallCtx<'a> {
+    pub cfg: &'a Config,
+    pub aur: &'a AurIndexData,
+    pub pac: &'a PacmanIndex,
+}
+
+impl InstallCtx<'_> {
+    /// Resolve `targets` against this context, then drive the repo and AUR
+    /// install phases, returning the per-pkgbase [`RunReport`].
+    ///
+    /// Split out of [`cmd_install`] so the no-arg upgrade loop can run many
+    /// batches against one already-loaded context without re-reading the index
+    /// each iteration, and so the loop can fold the report into its session
+    /// state. `reviewed` is the session-scoped set of pkgbases already approved
+    /// (see [`Self::prepare_one`]); `-S` passes a fresh empty one.
+    pub(crate) fn install(
+        &self,
+        targets: &[Target],
+        opts: InstallOpts,
+        reviewed: &mut HashSet<PkgBase>,
+    ) -> Result<RunReport> {
+        let plan = self.resolve_targets(targets, opts.noconfirm)?;
+        print::plan(&plan, self.aur.index(), self.pac);
+        self.apply_plan(&plan, opts, reviewed)
     }
 
-    // Skip the plan confirm when every package was explicitly named — the
-    // table above just echoes the user's own request. The prompt earns its
-    // place only when the plan drags in unrequested packages (repo deps or
-    // AUR makedepends). The sudo "Continue?" gate (and AUR review prompts)
-    // still fire regardless.
-    if opts.gate == ConfirmGate::Ask
-        && !plan.only_requested()
-        && !ui::confirm("Proceed with installation?", opts.noconfirm)?
-    {
-        return Err(Error::UserAbort);
+    /// Classify `targets` into a [`Plan`] — expand bare pkgbases, resolve deps, and
+    /// stamp the per-pkgbase decisions (split selections, counterpart hints) onto
+    /// it.
+    ///
+    /// Pulled out of [`Self::install`] so the upgrade loop can resolve once,
+    /// render its change-set preview against the [`Plan`], and then hand the *same*
+    /// plan to [`apply_plan`] — re-resolving would re-run the split-package prompt
+    /// inside `expand_pkgbase_targets`.
+    pub(crate) fn resolve_targets(&self, targets: &[Target], noconfirm: bool) -> Result<Plan> {
+        // Expand bare `-S <pkgbase>` targets into the pkgname(s) the user wants
+        // installed as explicit. Split pkgbases prompt for a subset; single-pkgname
+        // pkgbases pass through silently. The selector closure delegates to
+        // `ui::select_pkgnames` so tests can swap in a deterministic picker.
+        let expanded =
+            resolver::expand_pkgbase_targets(self.aur, self.pac, targets, &mut |pb, pns| {
+                ui::select_pkgnames(pb, pns, noconfirm).map_err(|e| Error::other(e.to_string()))
+            })?;
+        let mut plan = resolver::resolve(self.aur, self.pac, &expanded.targets)?;
+        plan.pkgname_selections = expanded.selections;
+        // For pkgbase/provides hits the resolver received the pkgbase string, so
+        // `plan.direct_targets` only contains the pkgbase. Mark the pkgnames the
+        // user actually chose as direct too, so `install_stratum` flips their
+        // `.pkg.tar.zst` to Explicit (instead of `--asdeps`). The expanded
+        // pkgnames widen into `PkgTarget` — explicit "treat this pkgname as
+        // an unclassified user target for the install-reason check."
+        plan.direct_targets
+            .extend(expanded.direct_pkgnames.into_iter().map(PkgTarget::from));
+        plan.counterpart_hints = expanded.counterpart_hints;
+        Ok(plan)
     }
 
-    install_repo_phase(cfg, plan, opts.asdeps)?;
+    /// Execute an already-resolved [`Plan`]: confirm gate, repo phase, AUR
+    /// pipeline. The caller is responsible for displaying the plan first
+    /// ([`print::plan`] for `-S`, the change-set preview for the loop).
+    pub(crate) fn apply_plan(
+        &self,
+        plan: &Plan,
+        opts: InstallOpts,
+        reviewed: &mut HashSet<PkgBase>,
+    ) -> Result<RunReport> {
+        if plan.direct_repo.is_empty()
+            && plan.transitive_repo.is_empty()
+            && plan.aur_strata.is_empty()
+        {
+            return Ok(RunReport::default());
+        }
 
-    if plan.aur_strata.is_empty() {
-        return Ok(RunReport::default());
+        // Skip the plan confirm when every package was explicitly named — the
+        // table above just echoes the user's own request. The prompt earns its
+        // place only when the plan drags in unrequested packages (repo deps or
+        // AUR makedepends). The sudo "Continue?" gate (and AUR review prompts)
+        // still fire regardless.
+        if opts.gate == ConfirmGate::Ask
+            && !plan.only_requested()
+            && !ui::confirm("Proceed with installation?", opts.noconfirm)?
+        {
+            return Err(Error::UserAbort);
+        }
+
+        install_repo_phase(self.cfg, plan, opts.asdeps)?;
+
+        if plan.aur_strata.is_empty() {
+            return Ok(RunReport::default());
+        }
+        // A non-empty `aur_strata` implies the resolver found AUR entries, which
+        // can only happen when real AUR data was loaded — so `self.aur` here is
+        // the loaded index, never the empty fallback.
+        self.run_aur_pipeline(plan, opts, reviewed)
     }
-    // A non-empty `aur_strata` implies the resolver found AUR entries, which
-    // can only happen when `by` (and thus a real `idx`) was present — so `idx`
-    // here is the loaded index, never the empty fallback.
-    run_aur_pipeline(cfg, idx, pac, plan, opts, reviewed)
+
+    /// Stratified AUR build+install loop with per-pkgbase failure isolation.
+    ///
+    /// For each stratum (set of AUR pkgbases whose build-time deps are all in
+    /// earlier strata): build every pkgbase, then `pacman -U` the resulting
+    /// `.pkg.tar.zst`'s so the next stratum's `makepkg` finds them in localdb.
+    /// Sudo cache (typically 5-15 min) bridges per-stratum sudo prompts. Plain
+    /// runtime `depends` are resolved by the final stratum's `pacman -U`
+    /// resolving against the same batch. After all strata, transitive AUR pkgs
+    /// that ended up Explicit during their stratum's `-U` are flipped to
+    /// `--asdeps` via a single cheap `pacman -D` call.
+    ///
+    /// A single makepkg failure no longer aborts the run: the offending pkgbase
+    /// is marked failed, anything in the closure of `plan.aur_make_edges`
+    /// rooted at it is auto-skipped (its deps wouldn't be in localdb anyway),
+    /// and the remaining independent pkgbases keep building. A final summary
+    /// lists installed / failed / skipped pkgbases; the return code is non-zero
+    /// iff anything failed or was skipped due to a dep failure.
+    fn run_aur_pipeline(
+        &self,
+        plan: &Plan,
+        opts: InstallOpts,
+        reviewed: &mut HashSet<PkgBase>,
+    ) -> Result<RunReport> {
+        let mirror = MirrorRepo::open(&paths::aur_repo_path())?;
+        let mut run = PipelineRun {
+            direct: &plan.direct_targets,
+            asdeps: opts.asdeps,
+            transitive_marks: Vec::new(),
+            report: RunReport::default(),
+        };
+
+        // Phase 1: open every worktree, run idempotency checks, and prompt the
+        // user for review across all strata up front. Skipped pkgbases are
+        // dropped; an "abort" propagates immediately as Error::UserAbort. No
+        // makepkg runs in this phase, so the user can walk through every diff
+        // before any build kicks off.
+        let mut prep_strata: Vec<Vec<Prep<'_>>> = Vec::with_capacity(plan.aur_strata.len());
+        // Threaded across every `prepare_one`: seeded from the run's non-interactive
+        // flag, then flipped to `Auto` by a mid-pass "approve all" so the remaining
+        // pkgbases skip their diff prompt.
+        let mut prompting = review::Prompting::from_noconfirm(opts.noconfirm);
+        for stratum in &plan.aur_strata {
+            let mut row = Vec::with_capacity(stratum.len());
+            for pkgbase in stratum {
+                // Partial-split selection — present only when the user asked
+                // for a subset. makepkg always packages every pkgname in a
+                // split (no `--pkg=` flag); we filter the produced files down
+                // to the selection so `install_stratum`'s `pacman -U` skips
+                // the rest.
+                row.push(self.prepare_one(
+                    &mirror,
+                    &plan.pkgbase_plan(pkgbase),
+                    reviewed,
+                    &mut prompting,
+                )?);
+            }
+            prep_strata.push(row);
+        }
+
+        // Phase 2: makepkg approved pkgbases, install per-stratum so later
+        // strata's makepkg finds earlier strata's deps in localdb.
+        for (stratum_idx, (stratum, preps)) in plan.aur_strata.iter().zip(prep_strata).enumerate() {
+            if plan.aur_strata.len() > 1 {
+                ui::info(&format!(
+                    "build stratum {}/{}: {}",
+                    stratum_idx + 1,
+                    plan.aur_strata.len(),
+                    stratum.join(" "),
+                ));
+            }
+            let built = self.build_stratum(preps, &plan.aur_make_edges, &mut run.report);
+            run.commit_stratum(self, &built, stratum_idx);
+            // A Ctrl+C'd build stops the whole batch here — anything already
+            // built+installed above stays; the rest stays outstanding for the next
+            // table pass (or a `-S` retry).
+            if !run.report.interrupted.is_empty() {
+                ui::warn("build interrupted — stopping this batch");
+                break;
+            }
+        }
+
+        let PipelineRun {
+            transitive_marks,
+            report,
+            ..
+        } = run;
+        if !opts.asdeps && !transitive_marks.is_empty() {
+            let mut args = vec!["-D".to_owned(), "--asdeps".into()];
+            // pacman argv is `Vec<String>` — downgrade typed `PkgName`s at
+            // this single boundary.
+            args.extend(transitive_marks.into_iter().map(PkgName::into_inner));
+            if let Err(e) = invoke::exec_pacman(self.cfg, &args) {
+                // Cosmetic only: pacman will still recompute install reasons on
+                // the next `-D`/`-Syu`. Warn instead of failing the run.
+                ui::warn(&format!("could not flip transitive pkgs to --asdeps: {e}"));
+            }
+        }
+
+        print::final_summary(&report);
+        Ok(report)
+    }
+
+    /// Build every pkgbase in one stratum, mutating `report` as failures /
+    /// user-skips happen. Returns the `BuiltPkg`s ready for `commit_stratum`.
+    fn build_stratum(
+        &self,
+        preps: Vec<Prep<'_>>,
+        make_edges: &HashMap<PkgBase, Vec<PkgBase>>,
+        report: &mut RunReport,
+    ) -> Vec<BuiltPkg> {
+        let mut built: Vec<BuiltPkg> = Vec::with_capacity(preps.len());
+        for prep in preps {
+            // Skip anything whose makedep closure already contains a
+            // failed/skipped pkgbase — the build would just fail with a
+            // confusing "missing dep" error. `aur_make_edges` is the resolver's
+            // pkgbase→makedep-pkgbases map, so a direct lookup is enough (the
+            // transitive case was caught when the ancestor itself was skipped
+            // in an earlier stratum).
+            if let Some(blocker) = blocking_dep(prep.pkgbase, make_edges, report) {
+                ui::warn(&format!(
+                    "{}: skipping (depends on failed/skipped {blocker})",
+                    prep.pkgbase,
+                ));
+                report
+                    .skipped_dep
+                    .insert(prep.pkgbase.to_owned(), blocker.to_owned());
+                continue;
+            }
+            match prep.disposition {
+                Disposition::Skipped => {
+                    ui::note(&format!("{}: skipped", prep.pkgbase));
+                    report.skipped_user.push(prep.pkgbase.to_owned());
+                }
+                Disposition::Cached(files) => built.push(BuiltPkg {
+                    pkgbase: prep.pkgbase.to_owned(),
+                    files,
+                }),
+                Disposition::Build => match run_build(self.cfg, &prep) {
+                    Ok(files) => built.push(BuiltPkg {
+                        pkgbase: prep.pkgbase.to_owned(),
+                        files,
+                    }),
+                    // Ctrl+C during this build: mark it interrupted and stop the
+                    // rest of the stratum. The caller installs what built so far,
+                    // then bails the whole run (the no-arg loop re-enters the
+                    // table; `-S` exits non-zero).
+                    Err(Error::Interrupted) => {
+                        ui::warn(&format!("{}: build interrupted", prep.pkgbase));
+                        report.interrupted.push(prep.pkgbase.to_owned());
+                        break;
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        ui::error(&format!("{}: build failed: {msg}", prep.pkgbase));
+                        report
+                            .failed
+                            .insert(prep.pkgbase.to_owned(), BuildFailure::Build(msg));
+                    }
+                },
+            }
+        }
+        built
+    }
+
+    #[instrument(skip(self, mirror, target, reviewed), fields(pkgbase = %target.pkgbase))]
+    fn prepare_one<'p>(
+        &self,
+        mirror: &MirrorRepo,
+        target: &PkgbasePlan<'p>,
+        reviewed: &mut HashSet<PkgBase>,
+        prompting: &mut review::Prompting,
+    ) -> Result<Prep<'p>> {
+        let (idx, pac, history_scan_max) =
+            (self.aur.index(), self.pac, self.cfg.review_history_scan_max);
+        let &PkgbasePlan {
+            pkgbase,
+            selection,
+            hint,
+        } = target;
+        let entry = idx
+            .entries
+            .iter()
+            .find(|e| &e.pkgbase == pkgbase)
+            .ok_or_else(|| Error::Build(format!("{pkgbase}: missing from index")))?;
+        let dest = paths::pkg_worktree(pkgbase);
+        let wt = mirror::worktree::add_or_reset(mirror, pkgbase, &dest)?;
+
+        let new_ver = entry.version();
+        let required: Vec<PkgName> = match selection {
+            Some(sel) => sel.to_vec(),
+            None => entry.pkgnames.iter().map(|p| p.name.clone()).collect(),
+        };
+
+        // Idempotency: skip rebuild iff a .pkg.tar.{zst,xz} file at exactly
+        // `new_ver` already exists for every required pkgname. Derived purely
+        // from on-disk artifacts — no sidecar DB needed. VCS pkgbases never hit
+        // this (their static `pkgver` differs from the dynamic one makepkg
+        // writes into the artifact filename), so they always rebuild, which is
+        // the right behavior for `-git`/`-svn`/etc.
+        let existing = install::find_produced(&wt.path)?;
+        let cached = !required.is_empty()
+            && required.iter().all(|name| {
+                existing
+                    .iter()
+                    .any(|f| install::matches_pkg(f, name, &new_ver))
+            });
+        if cached {
+            let kept = select_outputs(&existing, &required, &new_ver);
+            ui::note(&format!("{pkgbase}: already built {new_ver}"));
+            debug!(
+                %pkgbase,
+                version = %new_ver,
+                files = kept.len(),
+                "reusing cached build"
+            );
+            return Ok(Prep {
+                pkgbase,
+                wt,
+                new_ver,
+                required,
+                disposition: Disposition::Cached(kept),
+            });
+        }
+
+        // Already approved this session: the mirror is frozen for the whole
+        // session (no mid-loop re-fetch), so a pkgbase maps to a single PKGBUILD
+        // commit and re-reviewing it is pure friction. Auto-approve — this is what
+        // makes the loop's retry-after-failure painless (a pkgbase approved in one
+        // iteration and rebuilt in the next isn't re-prompted).
+        if reviewed.contains(pkgbase) {
+            debug!(%pkgbase, "PKGBUILD already reviewed this session; skipping prompt");
+            return Ok(Prep {
+                pkgbase,
+                wt,
+                new_ver,
+                required,
+                disposition: Disposition::Build,
+            });
+        }
+
+        // What the user has installed that this pkgbase will displace. Looks
+        // through pkgname → replaces → provides so renames and split pkgs label
+        // correctly; see `PacmanIndex::counterpart_with_hint` for the resolution
+        // order and how `hint` overrides the "first-hit" default.
+        let counterpart = pac.counterpart_with_hint(entry, hint);
+        // `prompting` is the pass-level state: `Auto` on a non-interactive run or
+        // once "approve all" was chosen, else `Prompt`.
+        let request = review::ReviewRequest {
+            mirror,
+            pkgbase,
+            new_ver: &new_ver,
+            counterpart: counterpart.as_ref(),
+            wt: &wt,
+            history_scan_max,
+        };
+        let disposition = match request.review(*prompting)? {
+            review::Outcome::Approved => {
+                // Remember the approval so a later batch in the same session
+                // doesn't re-prompt the same diff.
+                reviewed.insert(pkgbase.clone());
+                Disposition::Build
+            }
+            review::Outcome::ApprovedAll => {
+                // Approve this one and auto-approve every remaining pkgbase in the
+                // pass — flip the shared state the caller threads across
+                // `prepare_one` calls.
+                *prompting = review::Prompting::Auto;
+                reviewed.insert(pkgbase.clone());
+                Disposition::Build
+            }
+            review::Outcome::Skipped => Disposition::Skipped,
+        };
+        Ok(Prep {
+            pkgbase,
+            wt,
+            new_ver,
+            required,
+            disposition,
+        })
+    }
 }
 
 /// Install the user's repo targets up front: direct ones as explicit, deps
@@ -329,215 +701,114 @@ fn install_repo_phase(cfg: &Config, plan: &Plan, asdeps: bool) -> Result<()> {
     Ok(())
 }
 
-/// Stratified AUR build+install loop with per-pkgbase failure isolation.
-///
-/// For each stratum (set of AUR pkgbases whose build-time deps are all in
-/// earlier strata): build every pkgbase, then `pacman -U` the resulting
-/// `.pkg.tar.zst`'s so the next stratum's `makepkg` finds them in localdb.
-/// Sudo cache (typically 5-15 min) bridges per-stratum sudo prompts. Plain
-/// runtime `depends` are resolved by the final stratum's `pacman -U`
-/// resolving against the same batch. After all strata, transitive AUR pkgs
-/// that ended up Explicit during their stratum's `-U` are flipped to
-/// `--asdeps` via a single cheap `pacman -D` call.
-///
-/// A single makepkg failure no longer aborts the run: the offending pkgbase
-/// is marked failed, anything in the closure of `plan.aur_make_edges`
-/// rooted at it is auto-skipped (its deps wouldn't be in localdb anyway),
-/// and the remaining independent pkgbases keep building. A final summary
-/// lists installed / failed / skipped pkgbases; the return code is non-zero
-/// iff anything failed or was skipped due to a dep failure.
-fn run_aur_pipeline(
-    cfg: &Config,
-    idx: &IndexFile,
-    pac: &PacmanIndex,
-    plan: &Plan,
-    opts: InstallOpts,
-    reviewed: &mut HashSet<PkgBase>,
-) -> Result<RunReport> {
-    let mirror = MirrorRepo::open(&paths::aur_repo_path())?;
-    // `plan.direct_targets` is already `HashSet<PkgTarget>` — pass it
-    // through; `install_stratum` uses `PkgTargetSetExt::contains_pkgname`
-    // to test built pkgs without any string-level cast at the call site.
-    let direct_names = &plan.direct_targets;
-    let mut transitive_marks: Vec<PkgName> = Vec::new();
-
-    // Phase 1: open every worktree, run idempotency checks, and prompt the
-    // user for review across all strata up front. Skipped pkgbases are
-    // dropped; an "abort" propagates immediately as Error::UserAbort. No
-    // makepkg runs in this phase, so the user can walk through every diff
-    // before any build kicks off.
-    let mut prep_strata: Vec<Vec<Prep<'_>>> = Vec::with_capacity(plan.aur_strata.len());
-    // Threaded across every `prepare_one`: seeded from the run's non-interactive
-    // flag, then flipped to `Auto` by a mid-pass "approve all" so the remaining
-    // pkgbases skip their diff prompt.
-    let mut prompting = review::Prompting::from_noconfirm(opts.noconfirm);
-    for stratum in &plan.aur_strata {
-        let mut row = Vec::with_capacity(stratum.len());
-        for pkgbase in stratum {
-            // Partial-split selection — present only when the user asked
-            // for a subset. makepkg always packages every pkgname in a
-            // split (no `--pkg=` flag); we filter the produced files down
-            // to the selection so `install_stratum`'s `pacman -U` skips
-            // the rest.
-            row.push(prepare_one(
-                &mirror,
-                idx,
-                pac,
-                &plan.pkgbase_plan(pkgbase),
-                cfg.review_history_scan_max,
-                reviewed,
-                &mut prompting,
-            )?);
-        }
-        prep_strata.push(row);
-    }
-
-    let mut report = RunReport::default();
-
-    // Phase 2: makepkg approved pkgbases, install per-stratum so later
-    // strata's makepkg finds earlier strata's deps in localdb.
-    for (stratum_idx, (stratum, preps)) in plan.aur_strata.iter().zip(prep_strata).enumerate() {
-        if plan.aur_strata.len() > 1 {
-            ui::info(&format!(
-                "build stratum {}/{}: {}",
-                stratum_idx + 1,
-                plan.aur_strata.len(),
-                stratum.join(" "),
-            ));
-        }
-        let built = build_stratum(cfg, preps, &plan.aur_make_edges, &mut report);
-        commit_stratum(
-            cfg,
-            idx,
-            &built,
-            stratum_idx,
-            direct_names,
-            opts.asdeps,
-            &mut transitive_marks,
-            &mut report,
-        );
-        // A Ctrl+C'd build stops the whole batch here — anything already
-        // built+installed above stays; the rest stays outstanding for the next
-        // table pass (or a `-S` retry).
-        if !report.interrupted.is_empty() {
-            ui::warn("build interrupted — stopping this batch");
-            break;
-        }
-    }
-
-    if !opts.asdeps && !transitive_marks.is_empty() {
-        let mut args = vec!["-D".to_owned(), "--asdeps".into()];
-        // pacman argv is `Vec<String>` — downgrade typed `PkgName`s at
-        // this single boundary.
-        args.extend(transitive_marks.into_iter().map(PkgName::into_inner));
-        if let Err(e) = invoke::exec_pacman(cfg, &args) {
-            // Cosmetic only: pacman will still recompute install reasons on
-            // the next `-D`/`-Syu`. Warn instead of failing the run.
-            ui::warn(&format!("could not flip transitive pkgs to --asdeps: {e}"));
-        }
-    }
-
-    print::final_summary(&report);
-    Ok(report)
+/// The mutable half of one AUR pipeline run: which built pkgnames stay
+/// Explicit, the `--asdeps` override, the pending install-reason flips, and
+/// the accumulating per-pkgbase outcome. Groups what `commit_stratum` /
+/// `install_stratum` used to take as four parallel parameters.
+struct PipelineRun<'a> {
+    /// The user-named targets — a built pkgname matching one of these stays
+    /// Explicit (`PkgTargetSetExt::contains_pkgname` is the probe).
+    direct: &'a HashSet<PkgTarget>,
+    /// `--asdeps`: every built pkg installs as a dep, nothing stays Explicit.
+    asdeps: bool,
+    /// Pkgnames to flip to `--asdeps` once the whole run lands.
+    transitive_marks: Vec<PkgName>,
+    report: RunReport,
 }
 
-/// Build every pkgbase in one stratum, mutating `report` as failures /
-/// user-skips happen. Returns the `BuiltPkg`s ready for `commit_stratum`.
-fn build_stratum(
-    cfg: &Config,
-    preps: Vec<Prep<'_>>,
-    make_edges: &HashMap<PkgBase, Vec<PkgBase>>,
-    report: &mut RunReport,
-) -> Vec<BuiltPkg> {
-    let mut built: Vec<BuiltPkg> = Vec::with_capacity(preps.len());
-    for prep in preps {
-        // Skip anything whose makedep closure already contains a
-        // failed/skipped pkgbase — the build would just fail with a
-        // confusing "missing dep" error. `aur_make_edges` is the resolver's
-        // pkgbase→makedep-pkgbases map, so a direct lookup is enough (the
-        // transitive case was caught when the ancestor itself was skipped
-        // in an earlier stratum).
-        if let Some(blocker) = blocking_dep(prep.pkgbase, make_edges, report) {
-            ui::warn(&format!(
-                "{}: skipping (depends on failed/skipped {blocker})",
-                prep.pkgbase,
-            ));
-            report
-                .skipped_dep
-                .insert(prep.pkgbase.to_owned(), blocker.to_owned());
-            continue;
+impl PipelineRun<'_> {
+    /// Run `pacman -U` for one stratum's built pkgs and update the report with
+    /// the outcome. A pacman failure is atomic, so every pkgbase in this stratum
+    /// is marked failed and the next stratum's dep check skips dependents.
+    fn commit_stratum(&mut self, ctx: &InstallCtx<'_>, built: &[BuiltPkg], stratum_idx: usize) {
+        if built.is_empty() {
+            return;
         }
-        match prep.disposition {
-            Disposition::Skipped => {
-                ui::note(&format!("{}: skipped", prep.pkgbase));
-                report.skipped_user.push(prep.pkgbase.to_owned());
-            }
-            Disposition::Cached(files) => built.push(BuiltPkg {
-                pkgbase: prep.pkgbase.to_owned(),
-                files,
-            }),
-            Disposition::Build => match run_build(cfg, &prep) {
-                Ok(files) => built.push(BuiltPkg {
-                    pkgbase: prep.pkgbase.to_owned(),
-                    files,
-                }),
-                // Ctrl+C during this build: mark it interrupted and stop the
-                // rest of the stratum. The caller installs what built so far,
-                // then bails the whole run (the no-arg loop re-enters the
-                // table; `-S` exits non-zero).
-                Err(Error::Interrupted) => {
-                    ui::warn(&format!("{}: build interrupted", prep.pkgbase));
-                    report.interrupted.push(prep.pkgbase.to_owned());
-                    break;
+        match self.install_stratum(ctx, built) {
+            Ok(()) => {
+                for b in built {
+                    self.report.installed.push(b.pkgbase.clone());
                 }
-                Err(e) => {
-                    let msg = e.to_string();
-                    ui::error(&format!("{}: build failed: {msg}", prep.pkgbase));
-                    report
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                ui::error(&format!(
+                    "stratum {} install failed: {msg}",
+                    stratum_idx + 1
+                ));
+                for b in built {
+                    self.report
                         .failed
-                        .insert(prep.pkgbase.to_owned(), BuildFailure::Build(msg));
+                        .insert(b.pkgbase.clone(), BuildFailure::Install(msg.clone()));
                 }
-            },
+            }
         }
     }
-    built
-}
 
-/// Run `pacman -U` for one stratum's built pkgs and update `report` with the
-/// outcome. A pacman failure is atomic, so every pkgbase in this stratum is
-/// marked failed and the next stratum's dep check skips dependents.
-#[allow(clippy::too_many_arguments)]
-fn commit_stratum(
-    cfg: &Config,
-    idx: &IndexFile,
-    built: &[BuiltPkg],
-    stratum_idx: usize,
-    direct: &HashSet<PkgTarget>,
-    asdeps_override: bool,
-    transitive_marks: &mut Vec<PkgName>,
-    report: &mut RunReport,
-) {
-    if built.is_empty() {
-        return;
-    }
-    match install_stratum(cfg, idx, built, direct, asdeps_override, transitive_marks) {
-        Ok(()) => {
-            for b in built {
-                report.installed.push(b.pkgbase.clone());
+    /// Install every `.pkg.tar.zst` produced by one stratum's builds in a single
+    /// `pacman -U` transaction so intra-stratum runtime deps (split packages,
+    /// AUR pkg + sibling AUR dep) resolve against each other. Pkgnames that
+    /// weren't on the user's command line are appended to
+    /// [`Self::transitive_marks`] so the run can flip them to `--asdeps` at the
+    /// very end.
+    #[instrument(skip(self, ctx, built))]
+    fn install_stratum(&mut self, ctx: &InstallCtx<'_>, built: &[BuiltPkg]) -> Result<()> {
+        let (cfg, idx, asdeps_override) = (ctx.cfg, ctx.aur.index(), self.asdeps);
+        if built.is_empty() {
+            return Ok(());
+        }
+        let total: usize = built.iter().map(|b| b.files.len()).sum();
+        ui::step(&format!("installing {total} built package(s) with pacman"));
+
+        let mut files: Vec<PathBuf> = Vec::new();
+        let mut pending_marks: Vec<PkgName> = Vec::new();
+        for b in built {
+            // Look up the index entry to know which pkgnames belong to this
+            // pkgbase (split packages have multiple names sharing one pkgbase).
+            let _entry = idx
+                .entries
+                .iter()
+                .find(|e| e.pkgbase == b.pkgbase)
+                .ok_or_else(|| Error::Build(format!("{}: missing from index", b.pkgbase)))?;
+            for f in &b.files {
+                files.push(f.clone());
+                // makepkg artifacts always have a parseable `<name>-<ver>-<rel>-<arch>.pkg.tar.*`
+                // shape — None here means a corrupted/unexpected filename slipped through, and
+                // silently defaulting to an empty pkgname would misclassify the install
+                // (`contains_pkgname("")` is trivially false → marked as a dep, then
+                // `pacman -D --asdeps ""` is a no-op). Fail loudly instead.
+                let pkgname = install::extract_pkgname(f).ok_or_else(|| {
+                    Error::Build(format!(
+                        "{}: cannot extract pkgname from artifact {}",
+                        b.pkgbase,
+                        f.display(),
+                    ))
+                })?;
+                // `direct` is `HashSet<PkgTarget>`; `contains_pkgname` is the
+                // single Borrow<str> probe site (cross-domain string match
+                // between the user's typed targets and the built pkgname).
+                let is_direct = !asdeps_override && self.direct.contains_pkgname(&pkgname);
+                if !is_direct {
+                    pending_marks.push(pkgname);
+                }
             }
         }
-        Err(e) => {
-            let msg = e.to_string();
-            ui::error(&format!(
-                "stratum {} install failed: {msg}",
-                stratum_idx + 1
-            ));
-            for b in built {
-                report
-                    .failed
-                    .insert(b.pkgbase.clone(), BuildFailure::Install(msg.clone()));
-            }
+
+        // Always `--noconfirm`: aurox's plan+confirm at the top of `cmd_install`
+        // is the single user gate; pacman shouldn't ask again.
+        let mut args = vec!["-U".to_owned(), "--needed".into(), "--noconfirm".into()];
+        if asdeps_override {
+            args.push("--asdeps".into());
         }
+        for p in &files {
+            args.push(p.to_string_lossy().into_owned());
+        }
+        invoke::exec_pacman(cfg, &args)?;
+        // Only record install-reason flips after pacman -U succeeds — a failed
+        // transaction never installed these pkgs, so a later `pacman -D --asdeps`
+        // would error on them.
+        self.transitive_marks.extend(pending_marks);
+        Ok(())
     }
 }
 
@@ -660,123 +931,6 @@ enum Disposition {
     Build,
     /// User chose "skip" — drop from this run.
     Skipped,
-}
-
-#[instrument(skip(mirror, idx, pac, target, reviewed), fields(pkgbase = %target.pkgbase))]
-fn prepare_one<'a>(
-    mirror: &MirrorRepo,
-    idx: &'a IndexFile,
-    pac: &PacmanIndex,
-    target: &PkgbasePlan<'a>,
-    history_scan_max: usize,
-    reviewed: &mut HashSet<PkgBase>,
-    prompting: &mut review::Prompting,
-) -> Result<Prep<'a>> {
-    let &PkgbasePlan {
-        pkgbase,
-        selection,
-        hint,
-    } = target;
-    let entry = idx
-        .entries
-        .iter()
-        .find(|e| &e.pkgbase == pkgbase)
-        .ok_or_else(|| Error::Build(format!("{pkgbase}: missing from index")))?;
-    let dest = paths::pkg_worktree(pkgbase);
-    let wt = mirror::worktree::add_or_reset(mirror, pkgbase, &dest)?;
-
-    let new_ver = entry.version();
-    let required: Vec<PkgName> = match selection {
-        Some(sel) => sel.to_vec(),
-        None => entry.pkgnames.iter().map(|p| p.name.clone()).collect(),
-    };
-
-    // Idempotency: skip rebuild iff a .pkg.tar.{zst,xz} file at exactly
-    // `new_ver` already exists for every required pkgname. Derived purely
-    // from on-disk artifacts — no sidecar DB needed. VCS pkgbases never hit
-    // this (their static `pkgver` differs from the dynamic one makepkg
-    // writes into the artifact filename), so they always rebuild, which is
-    // the right behavior for `-git`/`-svn`/etc.
-    let existing = install::find_produced(&wt.path)?;
-    let cached = !required.is_empty()
-        && required.iter().all(|name| {
-            existing
-                .iter()
-                .any(|f| install::matches_pkg(f, name, &new_ver))
-        });
-    if cached {
-        let kept = select_outputs(&existing, &required, &new_ver);
-        ui::note(&format!("{pkgbase}: already built {new_ver}"));
-        debug!(
-            %pkgbase,
-            version = %new_ver,
-            files = kept.len(),
-            "reusing cached build"
-        );
-        return Ok(Prep {
-            pkgbase,
-            wt,
-            new_ver,
-            required,
-            disposition: Disposition::Cached(kept),
-        });
-    }
-
-    // Already approved this session: the mirror is frozen for the whole
-    // session (no mid-loop re-fetch), so a pkgbase maps to a single PKGBUILD
-    // commit and re-reviewing it is pure friction. Auto-approve — this is what
-    // makes the loop's retry-after-failure painless (a pkgbase approved in one
-    // iteration and rebuilt in the next isn't re-prompted).
-    if reviewed.contains(pkgbase) {
-        debug!(%pkgbase, "PKGBUILD already reviewed this session; skipping prompt");
-        return Ok(Prep {
-            pkgbase,
-            wt,
-            new_ver,
-            required,
-            disposition: Disposition::Build,
-        });
-    }
-
-    // What the user has installed that this pkgbase will displace. Looks
-    // through pkgname → replaces → provides so renames and split pkgs label
-    // correctly; see `PacmanIndex::counterpart_with_hint` for the resolution
-    // order and how `hint` overrides the "first-hit" default.
-    let counterpart = pac.counterpart_with_hint(entry, hint);
-    // `prompting` is the pass-level state: `Auto` on a non-interactive run or
-    // once "approve all" was chosen, else `Prompt`.
-    let disposition = match review::review(
-        mirror,
-        pkgbase,
-        &new_ver,
-        counterpart.as_ref(),
-        &wt,
-        history_scan_max,
-        *prompting,
-    )? {
-        review::Outcome::Approved => {
-            // Remember the approval so a later batch in the same session
-            // doesn't re-prompt the same diff.
-            reviewed.insert(pkgbase.clone());
-            Disposition::Build
-        }
-        review::Outcome::ApprovedAll => {
-            // Approve this one and auto-approve every remaining pkgbase in the
-            // pass — flip the shared state the caller threads across
-            // `prepare_one` calls.
-            *prompting = review::Prompting::Auto;
-            reviewed.insert(pkgbase.clone());
-            Disposition::Build
-        }
-        review::Outcome::Skipped => Disposition::Skipped,
-    };
-    Ok(Prep {
-        pkgbase,
-        wt,
-        new_ver,
-        required,
-        disposition,
-    })
 }
 
 #[instrument(skip(cfg, prep), fields(pkgbase = %prep.pkgbase, version = %prep.new_ver))]
@@ -939,77 +1093,6 @@ fn covers_all(selected: &[PathBuf], required: &[PkgName]) -> bool {
     })
 }
 
-/// Install every `.pkg.tar.zst` produced by one stratum's builds in a single
-/// `pacman -U` transaction so intra-stratum runtime deps (split packages,
-/// AUR pkg + sibling AUR dep) resolve against each other. Pkgnames that
-/// weren't on the user's command line are appended to `transitive_marks` so
-/// the caller can flip them to `--asdeps` at the very end.
-#[instrument(skip(cfg, idx, built, direct, transitive_marks))]
-fn install_stratum(
-    cfg: &Config,
-    idx: &IndexFile,
-    built: &[BuiltPkg],
-    direct: &HashSet<PkgTarget>,
-    asdeps_override: bool,
-    transitive_marks: &mut Vec<PkgName>,
-) -> Result<()> {
-    if built.is_empty() {
-        return Ok(());
-    }
-    let total: usize = built.iter().map(|b| b.files.len()).sum();
-    ui::step(&format!("installing {total} built package(s) with pacman"));
-
-    let mut files: Vec<PathBuf> = Vec::new();
-    let mut pending_marks: Vec<PkgName> = Vec::new();
-    for b in built {
-        // Look up the index entry to know which pkgnames belong to this
-        // pkgbase (split packages have multiple names sharing one pkgbase).
-        let _entry = idx
-            .entries
-            .iter()
-            .find(|e| e.pkgbase == b.pkgbase)
-            .ok_or_else(|| Error::Build(format!("{}: missing from index", b.pkgbase)))?;
-        for f in &b.files {
-            files.push(f.clone());
-            // makepkg artifacts always have a parseable `<name>-<ver>-<rel>-<arch>.pkg.tar.*`
-            // shape — None here means a corrupted/unexpected filename slipped through, and
-            // silently defaulting to an empty pkgname would misclassify the install
-            // (`contains_pkgname("")` is trivially false → marked as a dep, then
-            // `pacman -D --asdeps ""` is a no-op). Fail loudly instead.
-            let pkgname = install::extract_pkgname(f).ok_or_else(|| {
-                Error::Build(format!(
-                    "{}: cannot extract pkgname from artifact {}",
-                    b.pkgbase,
-                    f.display(),
-                ))
-            })?;
-            // `direct` is `HashSet<PkgTarget>`; `contains_pkgname` is the
-            // single Borrow<str> probe site (cross-domain string match
-            // between the user's typed targets and the built pkgname).
-            let is_direct = !asdeps_override && direct.contains_pkgname(&pkgname);
-            if !is_direct {
-                pending_marks.push(pkgname);
-            }
-        }
-    }
-
-    // Always `--noconfirm`: aurox's plan+confirm at the top of `cmd_install`
-    // is the single user gate; pacman shouldn't ask again.
-    let mut args = vec!["-U".to_owned(), "--needed".into(), "--noconfirm".into()];
-    if asdeps_override {
-        args.push("--asdeps".into());
-    }
-    for p in &files {
-        args.push(p.to_string_lossy().into_owned());
-    }
-    invoke::exec_pacman(cfg, &args)?;
-    // Only record install-reason flips after pacman -U succeeds — a failed
-    // transaction never installed these pkgs, so a later `pacman -D --asdeps`
-    // would error on them.
-    transitive_marks.extend(pending_marks);
-    Ok(())
-}
-
 /// Entry point for `-Sc` / `-Scc`.
 ///
 /// The depth of pacman's own cache cleanup is already encoded in `argv`;
@@ -1035,11 +1118,53 @@ pub fn cmd_clean(cfg: &Config, argv: &[String]) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assert_contains;
 
     /// Locals so `&pkgbase` lives long enough for `blocking_dep`'s `&PkgBase`
     /// argument and return value.
     fn pb(s: &str) -> PkgBase {
         PkgBase::from(s)
+    }
+
+    /// The unknown-target hint diagnoses the missing half correctly: no
+    /// suffix when full AUR data was searched, "enable it with -Sy" when the
+    /// AUR is merely not set up, "it's off in config" under pacman-only mode
+    /// (where -Sy would change nothing).
+    #[test]
+    fn unknown_targets_hint_matches_the_aur_state() {
+        let ready = unknown_targets_hint("spotify".into(), index::AurState::Ready);
+        assert_eq!(ready, "spotify");
+        let not_set_up = unknown_targets_hint("spotify".into(), index::AurState::NotSetUp);
+        assert_contains!(not_set_up, "spotify");
+        assert_contains!(not_set_up, "aurox -Sy");
+        let disabled = unknown_targets_hint("spotify".into(), index::AurState::Disabled);
+        assert_contains!(disabled, "aur = false");
+    }
+
+    /// The setup offer fires only for an enabled-but-unsynced AUR on an
+    /// interactive run: a ready index means the names are genuinely unknown,
+    /// pacman-only mode is a standing choice, and neither `--noconfirm` nor
+    /// a pipe has a human to answer the prompt. And it never re-asks a user
+    /// who just declined the same question via `-Sy <targets>`.
+    #[test]
+    fn offer_applies_only_interactive_and_not_set_up() {
+        use SetupOffer::{AlreadyDeclined, Open};
+        assert!(offer_applies(index::AurState::NotSetUp, false, true, Open));
+        assert!(!offer_applies(index::AurState::NotSetUp, true, true, Open));
+        assert!(!offer_applies(
+            index::AurState::NotSetUp,
+            false,
+            false,
+            Open
+        ));
+        assert!(!offer_applies(index::AurState::Ready, false, true, Open));
+        assert!(!offer_applies(index::AurState::Disabled, false, true, Open));
+        assert!(!offer_applies(
+            index::AurState::NotSetUp,
+            false,
+            true,
+            AlreadyDeclined
+        ));
     }
 
     /// `blocking_dep` is the resilience gate: it answers "should I skip

@@ -6,7 +6,7 @@
 //! Otherwise clap parses our aurox-owned flags + supplies auto-generated
 //! `--help`/`--version`.
 
-use crate::config::Config;
+use crate::config::ConfigHandle;
 use crate::error::Result;
 use crate::pacman::invoke;
 use crate::paths;
@@ -68,17 +68,17 @@ pub struct Cli {
 
 const AFTER_HELP: &str = "AUROX-OWNED OPERATIONS:\n\
   -S <pkg>...    install AUR packages (plan shown, one confirm, batched sudo)\n\
-  -Sy            refresh AUR mirror + rebuild index (incremental fetch)\n\
-  -Syy           force full re-clone of the AUR mirror (~8–9 min)\n\
+  -Sy            refresh AUR mirror + rebuild index (first run asks: ~2 GiB once)\n\
+  -Syy           force full re-clone of the AUR mirror (~10 min; asks first)\n\
   -Syu           pacman -Syu + AUR upgrades (plan shown, one confirm up front)\n\
-  -Ss <regex>    search AUR by name/desc/provides\n\
-  -Si <pkg>      show AUR package info\n\
+  -Ss <regex>    search repos + AUR by name/desc/provides\n\
+  -Si <pkg>      show package info (repos + AUR; repo wins a shared name)\n\
   -Sc / -Scc     remove built worktrees + pass -Sc/-Scc through to pacman\n\
   -Qu            list upgrades from repos + AUR, no sudo (dry-run for -Syu)\n\
 \n\
 YAY PARITY SHORTCUTS:\n\
   aurox                 run -Syu (refresh + upgrade)\n\
-  aurox <term>...       fuzzy AUR search → multi-select picker → install\n\
+  aurox <term>...       fuzzy repos+AUR search → shell seeded with the matches\n\
 \n\
 PASS-THROUGH (raw `pacman` — clap doesn't parse these):\n\
   -Q (except -Qu), -R, -T, -D, -F, -U, and any flags they accept\n\
@@ -92,7 +92,8 @@ Persistent settings: ~/.config/aurox/config.toml";
 
 /// Top-level entry. Returns the desired process exit code.
 pub fn run() -> Result<u8> {
-    let cfg = Config::load()?;
+    let config = ConfigHandle::load()?;
+    let cfg = config.cfg();
     paths::ensure_state_dir()?;
 
     let raw_argv: Vec<String> = std::env::args().skip(1).collect();
@@ -116,10 +117,10 @@ pub fn run() -> Result<u8> {
     // through to clap + dispatch.
     if let Some(op) = first_op_letter(&raw_argv) {
         if matches!(op, 'R' | 'T' | 'D' | 'F' | 'U') {
-            return invoke::exec_pacman(&cfg, &raw_argv);
+            return invoke::exec_pacman(cfg, &raw_argv);
         }
         if op == 'Q' && !is_plain_qu(&raw_argv) {
-            return invoke::exec_pacman(&cfg, &raw_argv);
+            return invoke::exec_pacman(cfg, &raw_argv);
         }
     }
 
@@ -129,7 +130,7 @@ pub fn run() -> Result<u8> {
         .as_deref()
         .map_or_else(|| cfg.color_mode(), parse_color_mode);
     ui::set_color(mode);
-    dispatch::dispatch(&cfg, &cli)
+    dispatch::dispatch(&config, &cli)
 }
 
 /// Decide whether argv is the aurox-owned `-Qu` form (merge of repo + AUR

@@ -1,7 +1,10 @@
-//! The `-Si` / shell-`info` block for AUR packages.
+//! Package info blocks, merged across the sync repos and the AUR.
 //!
-//! Most fields come straight from the [`IndexEntry`]; three live outside the
-//! index file and are resolved per target by [`InfoSources`]:
+//! [`InfoLookup`] is the one engine behind both `-Si` ([`cmd_info`]) and the
+//! shell's `info`. The repo block is rendered by
+//! [`SyncInfo`](crate::pacman::alpm_db::SyncInfo); the AUR block lives here,
+//! with most fields straight from the [`IndexEntry`] and three resolved live
+//! per target:
 //!
 //! * **Maintainer** — the `# Maintainer:` comment convention in the PKGBUILD
 //!   blob at the entry's indexed tip commit (the AUR RPC's Maintainer field
@@ -13,8 +16,8 @@
 
 use crate::config::Config;
 use crate::error::Result;
-use crate::index::schema::{IndexEntry, IndexFile};
-use crate::index::{load_or_resync, secondary};
+use crate::index::schema::IndexEntry;
+use crate::index::{AurIndexData, AurState};
 use crate::names::{Maintainer, PkgName, PkgTarget};
 use crate::pacman::alpm_db;
 use crate::paths;
@@ -26,101 +29,128 @@ use std::fmt::Display;
 use std::io::{self, Write};
 use tracing::debug;
 
-/// `-Si` info for one or more targets (AUR-only by design — repo packages are
-/// `pacman -Si`'s job on this path; the interactive shell merges the two).
-pub fn cmd_info(cfg: &Config, targets: &[PkgTarget]) -> Result<u8> {
-    let idx = load_or_resync(cfg, &paths::index_path())?;
-    let by = secondary::Secondary::build(&idx);
-    let sources = InfoSources::open();
-    let missing: Vec<&PkgTarget> = targets
-        .iter()
-        .filter(|t| !print_aur_info(&idx, &by, t, &sources))
-        .collect();
-    if !missing.is_empty() {
-        ui::warn(&format!(
-            "not in AUR: {}",
-            missing
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    // Pacman-style exit code: non-zero when a requested target wasn't in the AUR.
-    Ok(u8::from(!missing.is_empty()))
-}
-
-/// Look up one target (pkgname / provides / pkgbase, via [`secondary`]) against
-/// an already-loaded index and print its `-Si`-style block. `false` ⇒ not in
-/// the AUR — the caller decides how to report the miss ([`cmd_info`] warns
-/// "not in AUR"; the shell first tries the sync repos and words it
-/// accordingly). Shared so both surfaces resolve a name identically.
-pub(crate) fn print_aur_info(
-    idx: &IndexFile,
-    by: &secondary::Secondary,
-    target: &PkgTarget,
-    sources: &InfoSources,
-) -> bool {
-    match by.lookup(idx, target.as_str()) {
-        Some(entry) => {
-            print_info(entry, &sources.extras(entry));
-            true
-        }
-        None => false,
-    }
-}
-
-/// Live handles behind the block's out-of-index fields.
+/// `-Si` info for one or more targets — one [`InfoLookup`] pass.
 ///
-/// The bare AUR mirror (maintainer comment, first-submitted) and the local
-/// pacman DB (installed size). Opened best-effort once per `info` command —
-/// a source that fails to open just leaves its fields off every block,
-/// never fails the command.
-pub struct InfoSources {
-    repo: Option<gix::Repository>,
-    alpm: Option<Alpm>,
+/// The AUR side loads *empty* when not in play, so the lookup is uniform;
+/// only the final "nothing found" wording consults [`AurState`].
+/// Pacman-style exit code: non-zero when any requested target was nowhere
+/// to be found.
+pub fn cmd_info(cfg: &Config, targets: &[PkgTarget]) -> Result<u8> {
+    let data = AurIndexData::load(cfg)?;
+    let missing = InfoLookup::open(&data)?.print_all(targets);
+    if missing.is_empty() {
+        return Ok(0);
+    }
+    ui::warn(&missing_warning(
+        AurState::probe(cfg),
+        &missing,
+        "`aurox -Sy`",
+    ));
+    Ok(1)
 }
 
-impl InfoSources {
-    pub fn open() -> Self {
-        let repo = gix::open(paths::aur_repo_path())
+/// Word the "nothing found" warning honestly: only claim the AUR was
+/// consulted when its data was actually in play. `sync_hint` is the calling
+/// surface's way to sync the AUR (the CLI's `` `aurox -Sy` ``, the shell's
+/// `` `refresh` ``).
+pub(crate) fn missing_warning(aur: AurState, missing: &[&PkgTarget], sync_hint: &str) -> String {
+    let names = missing
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match aur {
+        AurState::Ready => format!("not in repos or AUR: {names}"),
+        AurState::NotSetUp => {
+            format!("not in repos: {names} (no AUR index — {sync_hint} enables AUR lookups)")
+        }
+        AurState::Disabled => {
+            format!("not in repos: {names} (AUR disabled: aur = false in config.toml)")
+        }
+    }
+}
+
+/// One merged repo + AUR info query: the loaded AUR data plus the live
+/// handles the blocks draw on. The one engine behind both `-Si`
+/// ([`cmd_info`]) and the shell's `info`, so the two surfaces can't drift.
+///
+/// The sync DBs are required — every lookup consults them first. The bare
+/// AUR mirror (behind the AUR block's maintainer / first-submitted fields)
+/// is best-effort: a mirror that fails to open just leaves those fields off
+/// every block, never fails the command.
+pub(crate) struct InfoLookup<'a> {
+    data: &'a AurIndexData,
+    alpm: Alpm,
+    mirror: Option<gix::Repository>,
+}
+
+impl<'a> InfoLookup<'a> {
+    /// Open the live handles next to the loaded AUR `data`.
+    pub(crate) fn open(data: &'a AurIndexData) -> Result<Self> {
+        let mirror = gix::open(paths::aur_repo_path())
             .inspect_err(|e| debug!(error = %e, "mirror unavailable for info extras"))
             .ok();
-        let alpm = alpm_db::open()
-            .inspect_err(|e| debug!(error = %e, "alpm unavailable for info extras"))
-            .ok();
-        Self { repo, alpm }
+        Ok(Self {
+            data,
+            alpm: alpm_db::open()?,
+            mirror,
+        })
     }
 
-    /// Resolve the extras for one entry. Each lookup is independently
-    /// best-effort: a branch whose history can't be walked still gets its
-    /// installed size, and vice versa.
+    /// Print the info block for each target in order (so multi-target output
+    /// matches pacman's) and return the targets found in neither source.
+    ///
+    /// Repo wins ties: pacman owns a name that lives in both a sync repo and
+    /// the AUR (`info cef` must describe extra/cef, not the same-named AUR
+    /// pkgbase) — the same rule as `classify` and the resolver.
+    pub(crate) fn print_all<'t>(&self, targets: &'t [PkgTarget]) -> Vec<&'t PkgTarget> {
+        targets.iter().filter(|t| !self.print_one(t)).collect()
+    }
+
+    /// One target: the sync repos first, then the AUR (pkgname / provides /
+    /// pkgbase, via [`AurIndexData::entry`]). `false` ⇒ found in neither —
+    /// the caller words the miss.
+    fn print_one(&self, target: &PkgTarget) -> bool {
+        if let Some(info) = alpm_db::SyncInfo::lookup(&self.alpm, target.bare()) {
+            info.print();
+            return true;
+        }
+        match self.data.entry(target.as_str()) {
+            Some(entry) => {
+                print_info(entry, &self.extras(entry));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Resolve the out-of-index extras for one AUR entry. Each lookup is
+    /// independently best-effort: a branch whose history can't be walked
+    /// still gets its installed size, and vice versa.
     fn extras(&self, e: &IndexEntry) -> Extras {
         let mut x = Extras::default();
         let tip = ObjectId::from(e.commit_oid);
-        if let Some(repo) = &self.repo
+        if let Some(repo) = &self.mirror
             && !tip.is_null()
         {
             x.maintainers = maintainers_at(repo, tip).unwrap_or_default();
             x.first_submitted = first_submitted(repo, tip);
         }
-        if let Some(alpm) = &self.alpm {
-            for p in &e.pkgnames {
-                if let Ok(pkg) = alpm.localdb().pkg(p.name.as_str()) {
-                    x.installed.push(InstalledMember {
-                        name: p.name.clone(),
-                        size: ByteSize::new(u64::try_from(pkg.isize()).unwrap_or(0)),
-                    });
-                }
+        for p in &e.pkgnames {
+            if let Ok(pkg) = self.alpm.localdb().pkg(p.name.as_str()) {
+                x.installed.push(InstalledMember {
+                    name: p.name.clone(),
+                    size: ByteSize::new(u64::try_from(pkg.isize()).unwrap_or(0)),
+                });
             }
         }
         x
     }
 }
 
-/// The out-of-index half of one entry's block (see [`InfoSources`]). Absent
-/// fields simply omit their lines — [`Extras::default`] renders the same
-/// block the index alone can produce.
+/// The out-of-index half of one entry's block (see [`InfoLookup::extras`]).
+/// Absent fields simply omit their lines — [`Extras::default`] renders the
+/// same block the index alone can produce.
 #[derive(Default)]
 struct Extras {
     maintainers: Vec<Maintainer>,
@@ -560,6 +590,30 @@ pkgname=foo
     #[test]
     fn maintainer_without_colon_or_value_is_skipped() {
         assert!(maintainers("# Maintainer\n# Maintainer:\n# Maintainer:   \n").is_empty());
+    }
+
+    /// The miss warning names the AUR only when its data was in play, and
+    /// points at the calling surface's sync action otherwise.
+    #[test]
+    fn missing_warning_wording_follows_aur_state() {
+        let foo = PkgTarget::new("foo");
+        let bar = PkgTarget::new("bar");
+        assert_eq!(
+            missing_warning(AurState::Ready, &[&foo, &bar], "`aurox -Sy`"),
+            "not in repos or AUR: foo, bar"
+        );
+        assert_eq!(
+            missing_warning(AurState::NotSetUp, &[&foo], "`aurox -Sy`"),
+            "not in repos: foo (no AUR index — `aurox -Sy` enables AUR lookups)"
+        );
+        assert_eq!(
+            missing_warning(AurState::NotSetUp, &[&foo], "`refresh`"),
+            "not in repos: foo (no AUR index — `refresh` enables AUR lookups)"
+        );
+        assert_eq!(
+            missing_warning(AurState::Disabled, &[&foo], "`refresh`"),
+            "not in repos: foo (AUR disabled: aur = false in config.toml)"
+        );
     }
 
     #[test]

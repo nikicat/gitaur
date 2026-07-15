@@ -1,22 +1,22 @@
-//! `aurox <term>...` — yay-style fuzzy search across the sync repos + the AUR.
+//! Package search across the sync repos + the AUR — one merged, ranked list.
 //!
-//! Wired up from [`crate::cli::dispatch`] for the no-operation-letter case.
-//! Interactively, dispatch launches the shell REPL seeded with this search
-//! (see [`crate::cli::shell`]) — there is no picker; the REPL is the one
-//! interactive surface. This module owns the *non-interactive* path (a pipe or
-//! `--noconfirm`): it merges sync-repo and AUR matches into one relevance-ranked
-//! list (see [`rank_rows`]) and prints it, installing nothing. The [`Row`] model,
-//! ranking, and the [`ui::search_table`] renderer are shared with the shell so
-//! both render matches identically.
+//! Two non-interactive surfaces live here, both wired up from
+//! [`crate::cli::dispatch`]: [`cmd_search`] is `-Ss` (pacman's plain
+//! `repo/name version` output), and [`cmd_search_install`] is the bare
+//! `aurox <term>...` shortcut in a pipe (the aligned [`ui::search_table`]).
+//! Interactively the bare shortcut launches the shell REPL seeded with the
+//! search instead (see [`crate::cli::shell`]) — there is no picker; the REPL
+//! is the one interactive surface. The [`Row`] model, ranking, and the
+//! [`ui::search_table`] renderer are shared with the shell so every surface
+//! ranks and renders matches identically.
 
 use crate::config::Config;
 use crate::context;
 use crate::error::Result;
-use crate::index::{self, IndexEntry, secondary::Secondary};
+use crate::index::{self, AurIndexData, IndexEntry};
 use crate::names::{NameMatch, PkgName, PkgTarget, RepoName, SearchTerm};
 use crate::pacman::alpm_db::{self, PacmanIndex, RepoHit};
 use crate::pacman::invoke::REPO_AUR;
-use crate::paths;
 use crate::ui;
 use crate::units::UnixTime;
 use crate::version::Version;
@@ -49,6 +49,23 @@ impl Row<'_> {
         }
     }
 
+    /// The installed package this row answers for: the repo package itself
+    /// (state already carried on the hit), or the first of an AUR pkgbase's
+    /// split pkgnames present in the local DB — checking the pkgbase name
+    /// alone would miss a split member (installed `linux-tkg-bmq` under
+    /// pkgbase `linux-tkg`). Drives the `[installed]` marker and the
+    /// `old → new` version diff in both `-Ss` and the shell table.
+    pub(crate) fn installed_name(&self, pac: &PacmanIndex) -> Option<&PkgName> {
+        match self {
+            Row::Repo(r) => r.installed.then_some(&r.name),
+            Row::Aur(e) => e
+                .pkgnames
+                .iter()
+                .map(|p| &p.name)
+                .find(|n| pac.is_installed(n)),
+        }
+    }
+
     /// The repo bucket this row belongs to (`core`, `extra`, …, or `aur`), for
     /// the shell's repo-filter selectors (`add extra`).
     pub(crate) fn repo_name(&self) -> &str {
@@ -57,6 +74,124 @@ impl Row<'_> {
             Row::Aur(_) => REPO_AUR,
         }
     }
+
+    /// The version a pick would install — the repo package's, or the AUR
+    /// entry's combined `[epoch:]pkgver-pkgrel`.
+    fn version(&self) -> Version {
+        match self {
+            Row::Repo(r) => r.version.clone(),
+            Row::Aur(e) => e.version(),
+        }
+    }
+
+    /// The row's one-line description, if its source carries one.
+    fn desc(&self) -> Option<String> {
+        match self {
+            Row::Repo(r) => r.desc.clone(),
+            Row::Aur(e) => e.display_desc().map(str::to_owned),
+        }
+    }
+}
+
+/// Compile the user's freeform terms into the regexes ranking and matching
+/// consume — the shared AND-filter semantics of every search surface.
+fn compile_terms(terms: &[SearchTerm]) -> Result<Vec<regex::Regex>> {
+    Ok(terms
+        .iter()
+        .map(SearchTerm::compile)
+        .collect::<std::result::Result<_, _>>()?)
+}
+
+/// Query both providers: sync-repo hits for `terms`, plus the loaded AUR data.
+///
+/// The two are independent I/O — an alpm DB scan vs an index mmap — so they
+/// run concurrently. The AUR side loads *empty* when not in play (see
+/// [`AurIndexData::load`]), so callers merge uniformly either way; the one
+/// wording concession is a single nudge when the AUR is enabled but not yet
+/// synced. Pacman-only mode is a standing choice — repo-only results need no
+/// nudge.
+fn gather(cfg: &Config, terms: &[SearchTerm]) -> Result<(Vec<RepoHit>, AurIndexData)> {
+    let (repo_res, aur_res) = context::join(
+        || alpm_db::search_sync(terms),
+        // `context::join` propagates the caller's context so `load_or_resync`
+        // sees `--noresync` and the right `state_dir()` even on the stolen
+        // worker thread.
+        || AurIndexData::load(cfg),
+    );
+    if index::AurState::probe(cfg) == index::AurState::NotSetUp {
+        ui::warn("no AUR index; showing repo matches only (run `aurox -Sy` to index the AUR)");
+    }
+    Ok((repo_res?, aur_res?))
+}
+
+/// Merge repo and AUR hits into one relevance-ranked list (unlike yay's fixed
+/// "repos on top", [`rank_rows`] interleaves both sources by match quality).
+fn merged_rows<'a>(
+    repo_hits: Vec<RepoHit>,
+    aur_hits: Vec<&'a IndexEntry>,
+    regexes: &[regex::Regex],
+) -> Vec<Row<'a>> {
+    let mut rows: Vec<Row<'a>> = repo_hits
+        .into_iter()
+        .map(Row::Repo)
+        .chain(aur_hits.into_iter().map(Row::Aur))
+        .collect();
+    rank_rows(&mut rows, regexes);
+    info!(rows = rows.len(), "search results");
+    rows
+}
+
+/// `-Ss <regex>...` — search the sync repos and the AUR in one ranked list,
+/// printed in pacman's plain `repo/name version` format (see
+/// [`write_search_result`]).
+///
+/// Pacman-parity exit codes: 0 when at least one package matched, 1 when
+/// none did (silently, like `pacman -Ss`) — so scripts can test for a hit.
+#[instrument(skip(cfg))]
+pub fn cmd_search(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
+    let regexes = compile_terms(terms)?;
+    let (repo_hits, aur_data) = gather(cfg, terms)?;
+    let rows = merged_rows(repo_hits, aur_data.search(&regexes), &regexes);
+    if rows.is_empty() {
+        return Ok(1);
+    }
+    let pac = PacmanIndex::build(&alpm_db::open()?);
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for row in &rows {
+        let install = ui::InstallState::from_installed(row.installed_name(&pac).is_some());
+        write_search_result(&mut out, row, install)?;
+    }
+    Ok(0)
+}
+
+/// Render one search hit in pacman's `-Ss` format to `out`: the
+/// `repo/name version` headline (` [installed]` appended pacman-style) and
+/// the indented description line, omitted when the source has none.
+///
+/// Stdout (not stderr) so `aurox -Ss foo | head` works — the equivalent
+/// `pacman -Ss` also writes results to stdout. A writer so the exact byte
+/// layout is testable without spawning a process.
+fn write_search_result<W: std::io::Write>(
+    out: &mut W,
+    row: &Row<'_>,
+    install: ui::InstallState,
+) -> std::io::Result<()> {
+    let marker = match install {
+        ui::InstallState::Installed => " [installed]",
+        ui::InstallState::NotInstalled => "",
+    };
+    writeln!(
+        out,
+        "{}/{} {}{marker}",
+        row.repo_name(),
+        row.picked(),
+        row.version()
+    )?;
+    if let Some(desc) = row.desc() {
+        writeln!(out, "    {desc}")?;
+    }
+    Ok(())
 }
 
 /// Entry point for the bare-positional shortcut in a **non-interactive** run
@@ -73,49 +208,9 @@ impl Row<'_> {
 /// auto-installing every regex hit is too dangerous without a human in the loop.
 #[instrument(skip(cfg))]
 pub fn cmd_search_install(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
-    let regexes: Vec<regex::Regex> = terms
-        .iter()
-        .map(SearchTerm::compile)
-        .collect::<std::result::Result<_, _>>()?;
-
-    // Repo + AUR searches are independent I/O — an alpm DB scan vs an index
-    // mmap. Run them concurrently and merge below.
-    let (repo_res, aur_res) = context::join(
-        || alpm_db::search_sync(terms),
-        // `context::join` propagates the caller's context so `load_or_resync`
-        // sees `--noresync` and the right `state_dir()` even on the stolen
-        // worker thread.
-        || -> Result<Option<index::IndexFile>> {
-            let path = paths::index_path();
-            if !path.exists() {
-                return Ok(None);
-            }
-            Ok(Some(index::load_or_resync(cfg, &path)?))
-        },
-    );
-    let repo_hits = repo_res?;
-    let idx = aur_res?;
-    if idx.is_none() {
-        ui::warn("no AUR index; showing repo matches only (run `aurox -Sy` to index the AUR)");
-    }
-
-    let aur_hits: Vec<&IndexEntry> = match idx.as_ref() {
-        Some(idx) => {
-            let by = Secondary::build(idx);
-            by.search(idx, &regexes)
-        }
-        None => Vec::new(),
-    };
-
-    // Repo and AUR rows share one relevance-ranked list (unlike yay's fixed
-    // "repos on top", `rank_rows` interleaves both sources by match quality).
-    let mut rows: Vec<Row<'_>> = repo_hits
-        .into_iter()
-        .map(Row::Repo)
-        .chain(aur_hits.into_iter().map(Row::Aur))
-        .collect();
-    rank_rows(&mut rows, &regexes);
-    info!(rows = rows.len(), "search results");
+    let regexes = compile_terms(terms)?;
+    let (repo_hits, aur_data) = gather(cfg, terms)?;
+    let rows = merged_rows(repo_hits, aur_data.search(&regexes), &regexes);
 
     if rows.is_empty() {
         ui::info(&format!(
@@ -147,32 +242,27 @@ pub fn cmd_search_install(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
 /// the `old → new` diff.
 pub(crate) fn search_row(row: &Row<'_>, pac: &PacmanIndex) -> ui::SearchRow {
     let name = PkgName::new(row.picked().into_inner());
-    let (available, desc) = match row {
-        Row::Repo(r) => (Some(r.version.clone()), r.desc.clone()),
-        Row::Aur(e) => (Some(e.version()), e.display_desc().map(str::to_owned)),
-    };
-    let installed = pac.is_installed(name.as_str());
+    let available = Some(row.version());
+    let installed_as = row.installed_name(pac);
     // Surface the installed version (→ an `old → new` diff) only when it's
     // actually behind the available one; a same-version row just shows the
     // version.
-    let old_ver = if installed {
-        pac.installed_version(name.as_str())
+    let old_ver = installed_as.and_then(|n| {
+        pac.installed_version(n)
             .filter(|iv| {
                 available
                     .as_ref()
                     .is_some_and(|av| iv.is_outdated(av.as_ver()))
             })
             .map(Version::from)
-    } else {
-        None
-    };
+    });
     ui::SearchRow {
         repo: RepoName::from(row.repo_name()),
         name,
-        install: ui::InstallState::from_installed(installed),
+        install: ui::InstallState::from_installed(installed_as.is_some()),
         old_ver,
         new_ver: available,
-        desc,
+        desc: row.desc(),
     }
 }
 
@@ -367,6 +457,45 @@ mod tests {
         assert_eq!(Row::Aur(&e).picked(), PkgTarget::from("bisq"));
     }
 
+    /// `[installed]` for an AUR row means "some member of this pkgbase is
+    /// installed": for a split package the pkgbase name itself is not in the
+    /// localdb, so the check must walk the pkgnames. Repo rows answer from
+    /// the state carried on the hit.
+    #[test]
+    fn installed_name_finds_split_members() {
+        let mut e = mk("linux-tkg", None, None);
+        e.pkgnames = vec![
+            Pkgname {
+                name: "linux-tkg-bmq".into(),
+                provides: Vec::new(),
+                pkgdesc: None,
+            },
+            Pkgname {
+                name: "linux-tkg-pds".into(),
+                provides: Vec::new(),
+                pkgdesc: None,
+            },
+        ];
+        let pac = PacmanIndex {
+            installed: [(PkgName::new("linux-tkg-pds"), Version::from("1-1"))].into(),
+            ..Default::default()
+        };
+        // The pkgbase name isn't installed — only the member is.
+        assert!(!pac.is_installed(&PkgName::new("linux-tkg")));
+        assert_eq!(
+            Row::Aur(&e).installed_name(&pac),
+            Some(&PkgName::new("linux-tkg-pds"))
+        );
+        assert_eq!(
+            Row::Repo(repo("firefox", None, true)).installed_name(&pac),
+            Some(&PkgName::new("firefox"))
+        );
+        assert_eq!(
+            Row::Repo(repo("firefox", None, false)).installed_name(&pac),
+            None
+        );
+    }
+
     /// Compile domain search terms into the regexes ranking consumes.
     fn compiled(terms: &[SearchTerm]) -> Vec<regex::Regex> {
         terms.iter().map(|t| t.compile().unwrap()).collect()
@@ -470,6 +599,54 @@ mod tests {
                 PkgTarget::from("claude-cli")
             ]
         );
+    }
+
+    /// Render one row through the `-Ss` writer.
+    fn rendered(row: &Row<'_>, install: ui::InstallState) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        write_search_result(&mut buf, row, install).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    /// pacman -Ss prints `repo/name version` then the indented description —
+    /// an AUR row slots into that exact layout under its `aur/` bucket.
+    #[test]
+    fn search_result_format_matches_pacman_ss() {
+        let e = mk("foo", Some("does foo"), None);
+        let out = rendered(&Row::Aur(&e), ui::InstallState::NotInstalled);
+        assert_eq!(out, "aur/foo 1.2.3-4\n    does foo\n");
+    }
+
+    /// A repo row renders under its own sync-DB bucket, same layout.
+    #[test]
+    fn search_result_renders_repo_rows_under_their_repo() {
+        let row = Row::Repo(repo("firefox", Some("a browser"), false));
+        let out = rendered(&row, ui::InstallState::NotInstalled);
+        assert_eq!(out, "extra/firefox 2.0-1\n    a browser\n");
+    }
+
+    /// Installed rows carry pacman's ` [installed]` marker on the headline.
+    #[test]
+    fn search_result_marks_installed_rows() {
+        let row = Row::Repo(repo("firefox", None, true));
+        let out = rendered(&row, ui::InstallState::Installed);
+        assert_eq!(out, "extra/firefox 2.0-1 [installed]\n");
+    }
+
+    /// Single-line output, no blank "    " for entries without a description.
+    #[test]
+    fn search_result_omits_description_block_when_none() {
+        let e = mk("bar", None, None);
+        let out = rendered(&Row::Aur(&e), ui::InstallState::NotInstalled);
+        assert_eq!(out, "aur/bar 1.2.3-4\n");
+    }
+
+    /// The AUR version comes through `IndexEntry::version`, epoch included.
+    #[test]
+    fn search_result_includes_epoch_when_present() {
+        let e = mk("baz", None, Some("2"));
+        let out = rendered(&Row::Aur(&e), ui::InstallState::NotInstalled);
+        assert_eq!(out, "aur/baz 2:1.2.3-4\n");
     }
 
     /// A split package's member pkgname counts as a name match, not a

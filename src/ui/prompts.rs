@@ -60,6 +60,50 @@ fn parse_answer(line: &str, default: bool) -> bool {
     }
 }
 
+/// The shell's first-launch answer to "sync the AUR now?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AurSetupChoice {
+    /// Run the one-time bootstrap clone right now.
+    SyncNow,
+    /// Pacman-only from now on — persisted as `aur = false` in config.toml.
+    PacmanOnly,
+    /// Pacman-only for this session; ask again next launch. The safe
+    /// default: walking away (or mashing Enter) must not start a ~2 GiB
+    /// download or write config.
+    Later,
+}
+
+/// The shell's first-launch three-way question, asked when the AUR is
+/// enabled but was never synced.
+///
+/// A plain line prompt (not dialoguer) so the same EOF/pipe semantics as
+/// [`confirm`] apply and PTY tests can drive it.
+pub fn aur_setup_prompt() -> std::io::Result<AurSetupChoice> {
+    super::info("the AUR isn't set up yet — aurox mirrors the whole AUR as one git repo");
+    note(
+        "one-time ~2 GiB download, ~2.5 GiB on disk, ~10 min; afterwards refreshes are small incremental fetches",
+    );
+    let mut out = std::io::stdout().lock();
+    write!(
+        out,
+        "sync the AUR now? [y]es / [n]o, pacman-only from now on / [L]ater, this session: "
+    )?;
+    out.flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(parse_setup_answer(&line))
+}
+
+/// Map one answer line to a [`AurSetupChoice`]: explicit y/n wins; an empty
+/// line, EOF, or anything unrecognized takes the safe `Later` default.
+fn parse_setup_answer(line: &str) -> AurSetupChoice {
+    match line.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => AurSetupChoice::SyncNow,
+        "n" | "no" => AurSetupChoice::PacmanOnly,
+        _ => AurSetupChoice::Later,
+    }
+}
+
 /// Ask the user which pkgnames of a split pkgbase to install.
 ///
 /// makepkg packages every pkgname of a split PKGBUILD in one go (there's no
@@ -103,7 +147,7 @@ pub fn select_pkgnames(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_answer;
+    use super::{AurSetupChoice, parse_answer, parse_setup_answer};
 
     #[test]
     fn explicit_answers_override_either_default() {
@@ -120,6 +164,30 @@ mod tests {
         for line in ["", "\n", "maybe", "j", "yep"] {
             assert!(parse_answer(line, true), "{line:?} with default=yes");
             assert!(!parse_answer(line, false), "{line:?} with default=no");
+        }
+    }
+
+    /// The launch question: y syncs, n goes pacman-only, and everything else
+    /// — Enter, EOF, typos, "l" — takes the safe "later" default (never a
+    /// surprise download, never a config write).
+    #[test]
+    fn setup_answers_parse_with_later_default() {
+        for line in ["y", "Y", "yes", " yes\n"] {
+            assert_eq!(
+                parse_setup_answer(line),
+                AurSetupChoice::SyncNow,
+                "{line:?}"
+            );
+        }
+        for line in ["n", "no", "NO"] {
+            assert_eq!(
+                parse_setup_answer(line),
+                AurSetupChoice::PacmanOnly,
+                "{line:?}"
+            );
+        }
+        for line in ["", "\n", "l", "later", "wat"] {
+            assert_eq!(parse_setup_answer(line), AurSetupChoice::Later, "{line:?}");
         }
     }
 }

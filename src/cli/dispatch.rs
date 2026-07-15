@@ -5,10 +5,10 @@ use crate::cli::Cli;
 use crate::cli::flags::{self, PacFlags};
 use crate::cli::search;
 use crate::cli::shell;
-use crate::config::Config;
+use crate::config::{Config, ConfigHandle};
 use crate::error::{Error, Result};
 use crate::index;
-use crate::mirror;
+use crate::mirror::{self, RefreshOutcome, RefreshReason, SkipCause};
 use crate::names::{PkgTarget, SearchTerm};
 use crate::pacman::invoke;
 use crate::ui;
@@ -17,7 +17,8 @@ use std::io::IsTerminal;
 /// Top-level routing entry — clap already pre-scanned for pacman-owned ops,
 /// so by this point `cli.args` is aurox's responsibility (`-S` family,
 /// the bare-arg yay shortcuts, or none-at-all).
-pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
+pub fn dispatch(config: &ConfigHandle, cli: &Cli) -> Result<u8> {
+    let cfg = config.cfg();
     let argv = &cli.args;
     let f = flags::parse(argv);
 
@@ -32,7 +33,7 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
         let interactive = !cli.noconfirm && std::io::stdin().is_terminal();
         if interactive {
             return shell::run(
-                cfg,
+                config,
                 build::DevelPolicy::from_enabled(cli.devel || cfg.devel),
                 &[],
             );
@@ -45,7 +46,7 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
     }
 
     match f.op {
-        Some('S') => handle_s(cfg, cli, &f, argv),
+        Some('S') => handle_s(config, cli, &f, argv),
         // Pre-scan in `cli::run` only routes the bare `-Qu` form here; every
         // other Q variant is plain pacman territory and never reaches dispatch.
         Some('Q') => build::cmd_query_upgrades(
@@ -68,7 +69,7 @@ pub fn dispatch(cfg: &Config, cli: &Cli) -> Result<u8> {
             let interactive = !cli.noconfirm && std::io::stdin().is_terminal();
             if interactive {
                 shell::run(
-                    cfg,
+                    config,
                     build::DevelPolicy::from_enabled(cli.devel || cfg.devel),
                     &terms,
                 )
@@ -93,7 +94,8 @@ fn pkg_targets(positional: &[String]) -> Vec<PkgTarget> {
 }
 
 /// Handle the `-S` family (`-S`, `-Sy`, `-Syu`, `-Ss`, `-Si`, `-Sc`).
-fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8> {
+fn handle_s(config: &ConfigHandle, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8> {
+    let cfg = config.cfg();
     // `--noconfirm` / `--asdeps` / `--devel` may appear before *or* after the
     // operation (`aurox --noconfirm -S foo` vs `aurox -S --noconfirm foo`).
     // clap's `trailing_var_arg` captures everything after `-S`, so flags that
@@ -112,7 +114,7 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
     }
 
     if f.has('s') {
-        return index::cmd_search(cfg, &search_terms(&f.positional));
+        return search::cmd_search(cfg, &search_terms(&f.positional));
     }
     if f.has('i') {
         return index::cmd_info(cfg, &pkg_targets(&f.positional));
@@ -134,10 +136,24 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
     let refresh = f.has('y');
     // Pacman convention: -Sy is incremental, -Syy forces a full re-fetch.
     // For aurox that means re-cloning the bare mirror from scratch.
-    let force_reclone = f.op_letters.iter().filter(|c| **c == 'y').count() >= 2;
+    let reason = if f.op_letters.iter().filter(|c| **c == 'y').count() >= 2 {
+        RefreshReason::ForceReclone
+    } else {
+        RefreshReason::ExplicitSync
+    };
 
+    let mut offer = build::SetupOffer::Open;
     if refresh {
-        mirror::cmd_refresh(cfg, force_reclone)?;
+        // A decline is a choice, not a failure: exit 0, remind how to opt in
+        // later. (`Disabled` already printed its own note in the consent plan.)
+        if let RefreshOutcome::AurSkipped(SkipCause::Declined | SkipCause::NonInteractive) =
+            mirror::cmd_refresh(cfg, reason)?
+        {
+            ui::note("AUR setup skipped — run `aurox -Sy` when ready");
+            // The install half below must not re-ask the question this sync
+            // just heard "no" to.
+            offer = build::SetupOffer::AlreadyDeclined;
+        }
     }
 
     if !f.positional.is_empty() {
@@ -153,7 +169,12 @@ fn handle_s(cfg: &Config, cli: &Cli, f: &PacFlags, argv: &[String]) -> Result<u8
             .cloned()
             .map(build::Target::bare)
             .collect();
-        return build::cmd_install(cfg, &targets, noconfirm, asdeps, false);
+        let opts = build::InstallOpts {
+            noconfirm,
+            asdeps,
+            gate: build::ConfirmGate::Ask,
+        };
+        return build::cmd_install(cfg, &targets, opts, offer);
     } else if !refresh {
         return Err(Error::other("no targets specified"));
     }

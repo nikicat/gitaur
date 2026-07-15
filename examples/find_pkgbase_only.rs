@@ -8,14 +8,14 @@
 //!     cargo run --release --example find_pkgbase_only
 
 use aurox::index;
-use aurox::index::secondary::Secondary;
+use aurox::index::lookup::Lookup;
 use aurox::names::{PkgBase, PkgName};
 use aurox::paths;
 use std::borrow::Borrow;
 
 fn main() {
     let idx = index::load(&paths::index_path()).expect("load index — run `aurox -Sy` first");
-    let by = Secondary::build(&idx);
+    let by = Lookup::build(&idx);
 
     let mut hits: Vec<(PkgBase, Vec<PkgName>)> = Vec::new();
     for entry in &idx.entries {

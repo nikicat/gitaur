@@ -13,7 +13,7 @@
 use crate::build::Target;
 use crate::names::{PkgBase, PkgName, PkgTarget, RepoName};
 use crate::pacman::invoke::{PkgUpgrade, REPO_AUR};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// Where a staged install came from.
@@ -58,7 +58,7 @@ pub struct StageClass {
 /// than a bare bool, so a call site reads `AurApproval::Auto`, not `true`).
 /// [`from_config`](Self::from_config) resolves the effective policy, including
 /// the legacy `review_default == "skip"` fallback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AurApproval {
     /// AUR items stage as [`Approval::NeedsReview`] (the default).

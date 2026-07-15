@@ -4,13 +4,11 @@
 
 use crate::config::Config;
 use crate::error::Result;
+use crate::index::AurIndexData;
 use crate::index::schema::IndexEntry;
-use crate::index::secondary::{AurClass, Secondary};
-use crate::index::{self, IndexFile};
-use crate::names::{PkgBase, PkgName};
+use crate::names::PkgName;
 use crate::pacman::alpm_db::{self, PacmanIndex};
 use crate::pacman::invoke::{self, PkgUpgrade};
-use crate::paths;
 use crate::ui;
 use tracing::{instrument, warn};
 
@@ -57,71 +55,25 @@ pub fn cmd_query_upgrades(cfg: &Config, devel: DevelPolicy) -> Result<u8> {
 /// rendering) and `-Syu` (feeds the interactive picker). Unprivileged —
 /// reads alpm and the AUR index file only.
 pub fn collect_upgrade_plan(cfg: &Config, devel: DevelPolicy) -> Result<Vec<PkgUpgrade>> {
-    match UpgradeSession::load(cfg)? {
-        Some(session) => session.recompute_remaining(devel),
-        // No AUR index yet (user hasn't run `-Sy`) — repo upgrades only.
-        None => Ok(invoke::query_repo_upgrades()?),
-    }
+    // With no AUR data the session loads empty and the recompute naturally
+    // yields repo upgrades only — same path either way.
+    AurIndexData::load(cfg)?.recompute_remaining(devel)
 }
 
-/// The once-per-session immutable state behind the no-arg `aurox` upgrade loop.
-///
-/// Holds the AUR index plus its secondary lookup maps, loaded exactly once.
-/// The mirror is fetched at session start and never re-fetched mid-loop, so
-/// this view is fixed for the whole session — only the localdb changes as
-/// packages get installed. Each iteration calls [`Self::recompute_remaining`],
-/// which re-snapshots alpm (cheap) and recomputes the candidate list against
-/// this frozen index.
-///
-/// `-Qu` and the non-interactive single-shot path build a session, recompute
-/// once, and drop it — see [`collect_upgrade_plan`].
-pub struct UpgradeSession {
-    idx: IndexFile,
-    by: Secondary,
-}
-
-impl UpgradeSession {
-    /// Load the AUR index + secondary maps once. `Ok(None)` when no index file
-    /// exists yet (no `-Sy` has run), leaving the caller to fall back to a
-    /// repo-only upgrade query.
-    pub fn load(cfg: &Config) -> Result<Option<Self>> {
-        let idx_path = paths::index_path();
-        if !idx_path.exists() {
-            return Ok(None);
-        }
-        let idx = index::load_or_resync(cfg, &idx_path)?;
-        let by = Secondary::build(&idx);
-        Ok(Some(Self { idx, by }))
-    }
-
-    /// The loaded AUR index — immutable for the session.
-    pub const fn index(&self) -> &IndexFile {
-        &self.idx
-    }
-
-    /// The secondary lookup maps over [`Self::index`].
-    pub const fn secondary(&self) -> &Secondary {
-        &self.by
-    }
-
-    /// The AUR pkgbase that owns a foreign localdb pkgname, or `None` when the
-    /// name isn't in the index. Lets the loop map an AUR upgrade row (keyed by
-    /// pkgname) back to the pkgbase its session badges are keyed on.
-    pub fn pkgbase_of(&self, name: &PkgName) -> Option<&PkgBase> {
-        match self.by.classify_foreign(&self.idx, name) {
-            AurClass::AsPkgname(e) | AurClass::AsProvides(e) | AurClass::AsPkgbase(e) => {
-                Some(&e.pkgbase)
-            }
-            AurClass::NotInAur => None,
-        }
-    }
-
+// The upgrade-scan half of [`AurIndexData`]'s behaviour lives here with the
+// rest of the upgrade machinery; the data type itself (load seam, lookups)
+// is `index`-domain and defined in [`crate::index`]. A deliberate second
+// inherent impl: the alternative is either dragging alpm/upgrade deps into
+// `index` or demoting this back to a free function.
+#[allow(clippy::multiple_inherent_impl)]
+impl AurIndexData {
     /// Re-snapshot the localdb and recompute the remaining upgrade candidates
-    /// (repo ∪ AUR) against the frozen index.
+    /// (repo ∪ AUR) against this frozen index — the upgrade loop calls this
+    /// each iteration; `-Qu` and the single-shot path call it once.
     ///
     /// Opens one alpm handle so both halves see one consistent localdb view —
     /// the per-iteration cost the loop pays (≈10ms), as opposed to the
-    /// once-only index load above.
+    /// once-per-session index load.
     #[instrument(skip(self))]
     pub fn recompute_remaining(&self, devel: DevelPolicy) -> Result<Vec<PkgUpgrade>> {
         // Same rootless-sync db `query_repo_upgrades` uses, so the AUR-vs-repo
@@ -129,7 +81,7 @@ impl UpgradeSession {
         let alpm = alpm_db::open_synced()?;
         let mut plan = invoke::query_repo_upgrades_in(&alpm);
         let pac = PacmanIndex::build(&alpm);
-        plan.extend(aur_upgrades(&self.idx, &self.by, &pac, devel));
+        plan.extend(aur_upgrades(self, &pac, devel));
         Ok(plan)
     }
 }
@@ -140,12 +92,13 @@ impl UpgradeSession {
 /// `-bzr`) into the list regardless of vercmp, since their `pkgver` is only
 /// refreshed by `makepkg`. Under [`DevelPolicy::Skip`] VCS pkgs are skipped
 /// (their on-disk version always looks stale).
-fn aur_upgrades(
-    idx: &IndexFile,
-    by: &Secondary,
-    pac: &PacmanIndex,
-    devel: DevelPolicy,
-) -> Vec<PkgUpgrade> {
+fn aur_upgrades(data: &AurIndexData, pac: &PacmanIndex, devel: DevelPolicy) -> Vec<PkgUpgrade> {
+    // An empty index (AUR not in play this run) can't answer anything —
+    // skip the foreign scan entirely so the per-pkg "not in AUR index"
+    // warns below don't fire for every foreign package.
+    if data.index().entries.is_empty() {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for (name, installed_ver) in pac.foreign() {
         // Cross-domain classifier: pacman has `name` as a localdb pkgname;
@@ -153,8 +106,8 @@ fn aur_upgrades(
         // unknown. The provides arm is what surfaces dotnet-style
         // renames (foreign `dotnet-runtime-7.0` matched by an AUR pkg's
         // `provides=` declaration).
-        use crate::index::secondary::AurClass;
-        let entry = match by.classify_foreign(idx, &name) {
+        use crate::index::lookup::AurClass;
+        let entry = match data.classify_foreign(&name) {
             AurClass::AsPkgname(e) => e,
             // The cross-rename path (provides/pkgbase match): the candidate
             // pkgbase isn't named after the installed pkg, it just declares it
@@ -193,7 +146,7 @@ fn aur_upgrades(
         let need = (is_vcs && devel.rebuilds_vcs()) || installed_ver.is_outdated(&aur_ver);
         if need {
             out.push(PkgUpgrade {
-                repo: invoke::REPO_AUR.into(),
+                repo: data.label().clone(),
                 name,
                 old_ver: installed_ver,
                 new_ver: aur_ver,
@@ -286,9 +239,9 @@ mod tests {
     #[test]
     fn vcs_skipped_without_devel() {
         let i = idx(vec![entry("foo-git", "foo-git", "r1.deadbeef", "1")]);
-        let s = Secondary::build(&i);
+
         let pac = pac_with_foreign(&[("foo-git", "r1.deadbeef-1")]);
-        assert!(aur_upgrades(&i, &s, &pac, DevelPolicy::Skip).is_empty());
+        assert!(aur_upgrades(&AurIndexData::from_index(i), &pac, DevelPolicy::Skip).is_empty());
     }
 
     /// Same setup but with `--devel`: the row must appear even though
@@ -296,9 +249,9 @@ mod tests {
     #[test]
     fn vcs_forced_with_devel_even_when_vercmp_equal() {
         let i = idx(vec![entry("foo-git", "foo-git", "r1.deadbeef", "1")]);
-        let s = Secondary::build(&i);
+
         let pac = pac_with_foreign(&[("foo-git", "r1.deadbeef-1")]);
-        let out = aur_upgrades(&i, &s, &pac, DevelPolicy::Rebuild);
+        let out = aur_upgrades(&AurIndexData::from_index(i), &pac, DevelPolicy::Rebuild);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, PkgName::from("foo-git"));
         assert_eq!(out[0].repo, invoke::REPO_AUR);
@@ -309,11 +262,10 @@ mod tests {
     /// `is_outdated` arm on `is_vcs`.
     #[test]
     fn non_vcs_outdated_listed_both_modes() {
-        let i = idx(vec![entry("foo", "foo", "2.0", "1")]);
-        let s = Secondary::build(&i);
+        let data = AurIndexData::from_index(idx(vec![entry("foo", "foo", "2.0", "1")]));
         let pac = pac_with_foreign(&[("foo", "1.0-1")]);
         for devel in [DevelPolicy::Skip, DevelPolicy::Rebuild] {
-            let out = aur_upgrades(&i, &s, &pac, devel);
+            let out = aur_upgrades(&data, &pac, devel);
             assert_eq!(out.len(), 1, "devel={devel:?}: expected one upgrade row");
             assert_eq!(out[0].name, PkgName::from("foo"));
             assert_eq!(out[0].old_ver, Version::from("1.0-1"));
@@ -326,11 +278,10 @@ mod tests {
     /// path (no panic when the warn-suppression branch is taken).
     #[test]
     fn foreign_not_in_aur_skipped() {
-        let i = idx(vec![]);
-        let s = Secondary::build(&i);
+        let data = AurIndexData::from_index(idx(vec![]));
         let pac = pac_with_foreign(&[("foo-debug", "1.0-1"), ("orphan-pkg", "1.0-1")]);
-        assert!(aur_upgrades(&i, &s, &pac, DevelPolicy::Skip).is_empty());
-        assert!(aur_upgrades(&i, &s, &pac, DevelPolicy::Rebuild).is_empty());
+        assert!(aur_upgrades(&data, &pac, DevelPolicy::Skip).is_empty());
+        assert!(aur_upgrades(&data, &pac, DevelPolicy::Rebuild).is_empty());
     }
 
     /// `is_transparent_upgrade_for` coverage. The principle: a pkgbase is
@@ -413,9 +364,9 @@ mod tests {
             pkgver: "2".into(),
             ..e
         }]);
-        let s = Secondary::build(&i);
+
         let pac = pac_with_foreign(&[("foo", "1-1")]);
-        let out = aur_upgrades(&i, &s, &pac, DevelPolicy::Skip);
+        let out = aur_upgrades(&AurIndexData::from_index(i), &pac, DevelPolicy::Skip);
         assert!(
             out.is_empty(),
             "conflicting pkgbase should not auto-upgrade `foo`; got: {out:?}",
@@ -432,9 +383,9 @@ mod tests {
             pkgver: "2".into(),
             ..e
         }]);
-        let s = Secondary::build(&i);
+
         let pac = pac_with_foreign(&[("foo", "1-1")]);
-        let out = aur_upgrades(&i, &s, &pac, DevelPolicy::Skip);
+        let out = aur_upgrades(&AurIndexData::from_index(i), &pac, DevelPolicy::Skip);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, PkgName::from("foo"));
     }

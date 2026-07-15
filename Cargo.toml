@@ -106,6 +106,10 @@ rkyv = { version = "0.8", features = ["bytecheck"] }
 memmap2 = "0.9"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+# Generates ConfigFile (the sparse on-disk schema) from the one Config
+# definition — every field Option-wrapped, plus the merge fn resolve() uses —
+# so the runtime and file schemas cannot drift.
+optfield = "0.4"
 dialoguer = "0.12"
 console = "0.16"
 indicatif = "0.18"

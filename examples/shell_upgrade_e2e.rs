@@ -27,7 +27,12 @@ fn has(screen: &str, needle: &str) -> bool {
 }
 
 fn main() {
+    // Never-synced state: the first-launch question comes before the banner.
+    // Enter takes the default — Later — so this whole flow doubles as the
+    // guard that a repo upgrade works without the AUR ever being set up.
     let mut pty = Pty::spawn_aurox();
+    pty.expect("three-way question", |s| s.contains("sync the AUR now?"));
+    pty.send(b"\r");
     pty.expect("shell banner", |s| s.contains("aurox shell"));
 
     // Refresh + seed the pending upgrade — only the fixture row. A bare
@@ -35,8 +40,12 @@ fn main() {
     // happens to carry, turning apply into a multi-hundred-MiB real download;
     // the unstaged candidates land in `--ignore` instead, keeping the
     // `pacman -Syu` local to the fixture repo. The repo row auto-approves and
-    // shows its old → new transition.
+    // shows its old → new transition. With the AUR unsynced ("later"), the
+    // upgrade must degrade to repo-only with a hint — never trigger the clone.
     pty.send(b"upgrade loop-repo\r");
+    pty.expect("repo-only degradation note", |s| {
+        has(s, "upgrades are repo-only")
+    });
     pty.expect("repo upgrade staged", |s| has(s, "loop-repo 1.0-1 → 2.0-1"));
 
     // Apply gates on the one-line cost summary + a transaction confirm (phase

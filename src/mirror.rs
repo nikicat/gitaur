@@ -23,9 +23,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
 pub mod clone;
+mod consent;
 pub mod fetch;
 pub mod sideband;
 pub mod worktree;
+
+use consent::AurAction;
+pub use consent::{RefreshOutcome, RefreshReason, SkipCause};
 
 /// Build the `http::Options` payload gix's curl transport downcasts in its
 /// `configure()` hook. Sets `lowSpeedLimit=1`, `lowSpeedTime=idle_timeout_secs`
@@ -90,20 +94,26 @@ impl MirrorRepo {
     }
 }
 
-/// Refresh aurox's databases: the AUR mirror always, and — unless
-/// [`Config::check_repo_updates`] is off — the official-repo sync DBs in
-/// parallel.
+/// Refresh aurox's databases: the AUR mirror — subject to the bootstrap
+/// consent gate — and, unless [`Config::check_repo_updates`] is off, the
+/// official-repo sync DBs in parallel.
 ///
 /// Both halves draw into one shared [`MultiProgress`] so the AUR fetch rows and
 /// the per-repo db-download rows line up in a single display. The repo sync is
 /// best-effort: a failure there is reported as a warning and never fails the
 /// AUR refresh (whose result is what this returns).
 ///
-/// `force_reclone` (set by `aurox -Syy`) blows away the existing bare clone and
-/// re-bootstraps from scratch, regardless of whether the current clone looks
-/// healthy. Use when the on-disk repo is suspected corrupted or you want a
-/// clean baseline.
-pub fn cmd_refresh(cfg: &Config, force_reclone: bool) -> Result<()> {
+/// `reason` says who asked (see [`RefreshReason`]): [`RefreshReason::ForceReclone`]
+/// (`aurox -Syy`) blows away the existing bare clone and re-bootstraps from
+/// scratch, and the reason also picks how consent for a needed bootstrap is
+/// obtained — the ~2 GiB clone never starts without a yes. A decline (or
+/// `aur = false` in config.toml) still refreshes the sync DBs and returns
+/// [`RefreshOutcome::AurSkipped`] so callers can hint at what was skipped.
+pub fn cmd_refresh(cfg: &Config, reason: RefreshReason) -> Result<RefreshOutcome> {
+    // Resolve consent before the progress display exists: dialoguer and
+    // indicatif both draw on the terminal, and a prompt under live progress
+    // rows gets clobbered by redraws.
+    let action = consent::plan(cfg, reason)?;
     let mp = MultiProgress::new();
     let aur = if cfg.check_repo_updates {
         // Scoped thread: the official-repo db sync (libalpm download) overlaps
@@ -111,20 +121,19 @@ pub fn cmd_refresh(cfg: &Config, force_reclone: bool) -> Result<()> {
         // draws its own rows into the shared display.
         context::scope(|s| {
             let repo = s.spawn(|| sync::refresh_sync_db(&mp));
-            let aur = refresh_aur_mirror(cfg, force_reclone, &mp);
+            let aur = run_aur_action(cfg, action, &mp);
             report_repo_sync(repo.join());
             aur
         })
     } else {
-        refresh_aur_mirror(cfg, force_reclone, &mp)
+        run_aur_action(cfg, action, &mp)
     };
     // Backstop: wipe any progress rows a mid-download error may have left
     // (each row normally clears itself on completion).
     mp.clear().ok();
-    // A successful refresh (fresh clone, incremental, or a no-op "no ref
-    // updates") just contacted the mirror; stamp it so the shell's `upgrade` can
-    // honour the refresh TTL. `-Sy`/`-Syy`/`refresh`/`upgrade` all pass through
-    // here, so the stamp reflects any fetch path, not just shell ones.
+    // A successful refresh stamps the TTL that the shell's `upgrade` honours.
+    // Deliberately stamped on `AurSkipped` too: a declined bootstrap must not
+    // re-prompt on every TTL-driven `upgrade` within the window.
     if aur.is_ok() {
         record_fetch_stamp();
     }
@@ -176,36 +185,47 @@ fn report_repo_sync(joined: std::thread::Result<Result<SyncOutcome>>) {
     }
 }
 
-/// Fetch AUR mirror updates and incrementally refresh the on-disk index,
-/// drawing progress into the shared `mp`. See [`cmd_refresh`] for the
-/// `force_reclone` semantics.
-fn refresh_aur_mirror(cfg: &Config, force_reclone: bool, mp: &MultiProgress) -> Result<()> {
-    let path = paths::aur_repo_path();
+/// Execute the consented AUR half of one refresh, drawing progress into the
+/// shared `mp`.
+fn run_aur_action(cfg: &Config, action: AurAction, mp: &MultiProgress) -> Result<RefreshOutcome> {
+    match action {
+        AurAction::Skip(cause) => Ok(RefreshOutcome::AurSkipped(cause)),
+        AurAction::Bootstrap(_) => {
+            bootstrap_aur(cfg, mp)?;
+            Ok(RefreshOutcome::Refreshed)
+        }
+        AurAction::Fetch => {
+            fetch_aur(cfg, mp)?;
+            Ok(RefreshOutcome::Refreshed)
+        }
+    }
+}
 
-    if force_reclone && path.exists() {
-        ui::warn("re-clone forced (-Syy); removing existing mirror");
+/// Full bootstrap: wipe whatever is on disk (an interrupted clone or a
+/// force-recloned mirror), clone from scratch, build the index, seed the
+/// commit-graph. Consent — including for the wipe — was already obtained in
+/// [`consent::plan`], which also announced what is about to happen.
+fn bootstrap_aur(cfg: &Config, mp: &MultiProgress) -> Result<()> {
+    let path = paths::aur_repo_path();
+    if path.exists() {
         std::fs::remove_dir_all(&path)?;
     }
+    clone::bootstrap_clone(cfg, &path, mp)?;
+    ui::info("building index");
+    let mirror = MirrorRepo::open(&path)?;
+    let idx = index::build::full_build(cfg, &mirror)?;
+    index::save(&idx, &paths::index_path())?;
+    ui::info("index built");
+    // Seed the commit-graph so the first incremental `-Sy` negotiates fast.
+    // Fresh clone: no delta, so walk every ref (`--reachable`).
+    mirror.write_commit_graph(None);
+    Ok(())
+}
 
-    if !is_bootstrapped(&path) {
-        if path.exists() {
-            ui::warn("previous bootstrap was interrupted; redoing clone");
-            std::fs::remove_dir_all(&path)?;
-        } else if !force_reclone {
-            ui::info("first run: cloning AUR mirror (this takes a few minutes)");
-        }
-        clone::bootstrap_clone(cfg, &path, mp)?;
-        ui::info("building index");
-        let mirror = MirrorRepo::open(&path)?;
-        let idx = index::build::full_build(cfg, &mirror)?;
-        index::save(&idx, &paths::index_path())?;
-        ui::info("index built");
-        // Seed the commit-graph so the first incremental `-Sy` negotiates fast.
-        // Fresh clone: no delta, so walk every ref (`--reachable`).
-        mirror.write_commit_graph(None);
-        return Ok(());
-    }
-
+/// Fetch AUR mirror updates and incrementally refresh the on-disk index,
+/// drawing progress into the shared `mp`.
+fn fetch_aur(cfg: &Config, mp: &MultiProgress) -> Result<()> {
+    let path = paths::aur_repo_path();
     ui::info("refreshing AUR mirror");
     let mirror = MirrorRepo::open(&path)?;
     let idx_path = paths::index_path();

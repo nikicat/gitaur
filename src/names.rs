@@ -167,7 +167,7 @@ impl fmt::Display for SearchTerm {
 /// AUR pkg `dotnet-core-7.0-bin` claims to
 /// satisfy. The cross-domain bridge between the two — "is this `PkgName`
 /// lexically the same as some pkg's `VirtualName`?" — lives in
-/// [`crate::index::secondary::Secondary::classify_foreign`].
+/// [`crate::index::lookup::Lookup::classify_foreign`].
 #[derive(
     Archive, Serialize, Deserialize, Debug, Clone, Default, Hash, PartialEq, Eq, PartialOrd, Ord,
 )]
@@ -537,8 +537,8 @@ impl From<&PkgName> for PkgTarget {
 impl PkgTarget {
     /// Strip any pacman dep-style version constraint (`>=`, `<=`, `=`,
     /// `<`, `>`) plus the version expression after it. Returns the bare
-    /// name suitable for lookup against `Secondary` / `PacmanIndex`.
-    /// Mirrors [`crate::index::secondary::strip_version_constraint`]; kept
+    /// name suitable for lookup against `Lookup` / `PacmanIndex`.
+    /// Mirrors [`crate::index::lookup::strip_version_constraint`]; kept
     /// here so `PkgTarget` owns its own normalisation rather than callers
     /// reaching into a different module.
     pub fn bare(&self) -> &str {

@@ -88,7 +88,7 @@ fn bootstrapped_with_corrupt_index() -> (TempDir, ScopedStateRoot, Config) {
     // download into an empty dir on every run. Off keeps the test hermetic.
     cfg.check_repo_updates = false;
 
-    mirror::cmd_refresh(&cfg, false).expect("initial bootstrap must succeed");
+    bootstrap(&cfg);
     let idx_path = paths::index_path();
     std::fs::write(&idx_path, b"this is not a valid rkyv archive at all").unwrap();
     assert!(
@@ -97,6 +97,22 @@ fn bootstrapped_with_corrupt_index() -> (TempDir, ScopedStateRoot, Config) {
     );
 
     (td, guard, cfg)
+}
+
+/// Run the initial bootstrap clone with the consent prompt auto-approved:
+/// `cmd_refresh` now asks before a bootstrap, and an interactively-run
+/// `cargo test` (stdin is a TTY) would block on that prompt. The caller's
+/// opts are restored right after — the tests pin what they need themselves
+/// (e.g. `--noresync`).
+fn bootstrap(cfg: &Config) {
+    let saved = runopts::get();
+    runopts::set(RunOpts {
+        noconfirm: true,
+        ..saved
+    });
+    mirror::cmd_refresh(cfg, mirror::RefreshReason::ExplicitSync)
+        .expect("initial bootstrap must succeed");
+    runopts::set(saved);
 }
 
 #[test]
@@ -208,7 +224,7 @@ fn cmd_refresh_rebuilds_when_existing_index_is_unreadable() {
     // First refresh: bootstraps the state_dir/aur clone and writes a fresh
     // index. This sets up `incremental_fetch`'s refspec config for the
     // recovery-path call below.
-    mirror::cmd_refresh(&cfg, false).expect("initial bootstrap must succeed");
+    bootstrap(&cfg);
     let idx_path = paths::index_path();
     assert!(idx_path.exists(), "bootstrap must write index.bin");
 
@@ -222,8 +238,10 @@ fn cmd_refresh_rebuilds_when_existing_index_is_unreadable() {
     );
 
     // Second refresh: bare is bootstrapped, fetch returns no updates, the
-    // existing index fails to load → recovery branch fires.
-    mirror::cmd_refresh(&cfg, false).expect("cmd_refresh must recover from a bad index");
+    // existing index fails to load → recovery branch fires. The mirror is
+    // Ready, so no consent prompt is involved.
+    mirror::cmd_refresh(&cfg, mirror::RefreshReason::ExplicitSync)
+        .expect("cmd_refresh must recover from a bad index");
 
     let idx = index::load(&idx_path).expect("rebuilt index must be loadable");
     assert_eq!(idx.entries.len(), 2, "both fixture branches indexed");

@@ -17,8 +17,8 @@
 use aurox::build::Target;
 use aurox::config::defaults::default_config;
 use aurox::error::Result;
+use aurox::index::AurIndexData;
 use aurox::index::build::full_build;
-use aurox::index::secondary::Secondary;
 use aurox::mirror::MirrorRepo;
 use aurox::names::{PkgBase, PkgName, PkgTargetSetExt};
 use aurox::pacman::alpm_db::PacmanIndex;
@@ -73,7 +73,7 @@ fn pkgbase_only_target_expands_with_pkgbase_target_and_direct_pkgnames() {
     let cfg = default_config();
     let mirror = MirrorRepo::open(&bare).unwrap();
     let idx = full_build(&cfg, &mirror).unwrap();
-    let by = Secondary::build(&idx);
+    let aur = AurIndexData::from_index(idx);
     let pac = PacmanIndex::default();
 
     let mut select_called = false;
@@ -83,8 +83,7 @@ fn pkgbase_only_target_expands_with_pkgbase_target_and_direct_pkgnames() {
         assert_eq!(pkgnames, &[PkgName::from("bisq-desktop")]);
         Ok(pkgnames.to_vec())
     };
-    let expanded =
-        expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["bisq"]), &mut select).unwrap();
+    let expanded = expand_pkgbase_targets(&aur, &pac, &ts(&["bisq"]), &mut select).unwrap();
     assert!(
         select_called,
         "selector must run even for single-pkgname pkgbase so callers can log/notice it",
@@ -107,7 +106,7 @@ fn pkgbase_only_target_expands_with_pkgbase_target_and_direct_pkgnames() {
     // End-to-end: resolver accepts the pkgbase, plan has one stratum, and
     // the caller-side direct_pkgnames merge lets install_stratum recognise
     // bisq-desktop as Explicit.
-    let mut plan = resolve(&cfg, &idx, Some(&by), &pac, &expanded.targets).unwrap();
+    let mut plan = resolve(&aur, &pac, &expanded.targets).unwrap();
     plan.direct_targets
         .extend(expanded.direct_pkgnames.into_iter().map(Into::into));
     assert_eq!(plan.aur_strata, vec![vec![PkgBase::from("bisq")]]);
@@ -135,7 +134,7 @@ fn split_pkgbase_partial_selection_constrains_build_pipeline() {
     let cfg = default_config();
     let mirror = MirrorRepo::open(&bare).unwrap();
     let idx = full_build(&cfg, &mirror).unwrap();
-    let by = Secondary::build(&idx);
+    let aur = AurIndexData::from_index(idx);
     let pac = PacmanIndex::default();
 
     // User picks only two of the three split pkgnames.
@@ -147,14 +146,8 @@ fn split_pkgbase_partial_selection_constrains_build_pipeline() {
             PkgName::from("linux-headers-multi-extras"),
         ])
     };
-    let expanded = expand_pkgbase_targets(
-        &idx,
-        Some(&by),
-        &pac,
-        &ts(&["linux-headers-multi"]),
-        &mut select,
-    )
-    .unwrap();
+    let expanded =
+        expand_pkgbase_targets(&aur, &pac, &ts(&["linux-headers-multi"]), &mut select).unwrap();
 
     assert_eq!(
         expanded.targets,
@@ -179,7 +172,7 @@ fn split_pkgbase_partial_selection_constrains_build_pipeline() {
         "partial selection must be recorded so the install filter can apply it",
     );
 
-    let mut plan = resolve(&cfg, &idx, Some(&by), &pac, &expanded.targets).unwrap();
+    let mut plan = resolve(&aur, &pac, &expanded.targets).unwrap();
     plan.pkgname_selections = expanded.selections;
     plan.direct_targets
         .extend(expanded.direct_pkgnames.into_iter().map(Into::into));
@@ -227,7 +220,7 @@ fn provides_target_rewrites_to_providing_pkgname_with_selection() {
     let cfg = default_config();
     let mirror = MirrorRepo::open(&bare).unwrap();
     let idx = full_build(&cfg, &mirror).unwrap();
-    let by = Secondary::build(&idx);
+    let aur = AurIndexData::from_index(idx);
     let pac = PacmanIndex::default();
 
     let mut selector_invoked = false;
@@ -235,8 +228,7 @@ fn provides_target_rewrites_to_providing_pkgname_with_selection() {
         selector_invoked = true;
         Ok(vec![])
     };
-    let expanded =
-        expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["bisq"]), &mut select).unwrap();
+    let expanded = expand_pkgbase_targets(&aur, &pac, &ts(&["bisq"]), &mut select).unwrap();
 
     assert!(
         !selector_invoked,
@@ -258,7 +250,7 @@ fn provides_target_rewrites_to_providing_pkgname_with_selection() {
         "scoped provides records a one-pkgname install-filter constraint",
     );
 
-    let mut plan = resolve(&cfg, &idx, Some(&by), &pac, &expanded.targets).unwrap();
+    let mut plan = resolve(&aur, &pac, &expanded.targets).unwrap();
     plan.pkgname_selections = expanded.selections;
     plan.direct_targets
         .extend(expanded.direct_pkgnames.into_iter().map(Into::into));
@@ -300,7 +292,7 @@ fn pkgname_collision_with_another_pkgbase_does_not_leak_into_plan() {
     let dir = TempDir::new().unwrap();
     // Order matters: alphabetically `commit-mono-font` < `otf-commit-mono`,
     // so the standalone pkgbase wins the HashMap insert race in
-    // Secondary::build — same alignment as the real AUR mirror.
+    // Lookup::build — same alignment as the real AUR mirror.
     let bare = build_mirror(
         dir.path(),
         &[
@@ -323,18 +315,12 @@ fn pkgname_collision_with_another_pkgbase_does_not_leak_into_plan() {
     let cfg = default_config();
     let mirror = MirrorRepo::open(&bare).unwrap();
     let idx = full_build(&cfg, &mirror).unwrap();
-    let by = Secondary::build(&idx);
+    let aur = AurIndexData::from_index(idx);
     let pac = PacmanIndex::default();
 
     let mut select = |_pb: &PkgBase, pns: &[PkgName]| -> Result<Vec<PkgName>> { Ok(pns.to_vec()) };
-    let expanded = expand_pkgbase_targets(
-        &idx,
-        Some(&by),
-        &pac,
-        &ts(&["commit-mono-font"]),
-        &mut select,
-    )
-    .unwrap();
+    let expanded =
+        expand_pkgbase_targets(&aur, &pac, &ts(&["commit-mono-font"]), &mut select).unwrap();
 
     assert_eq!(
         expanded.targets,
@@ -349,7 +335,7 @@ fn pkgname_collision_with_another_pkgbase_does_not_leak_into_plan() {
         ],
     );
 
-    let mut plan = resolve(&cfg, &idx, Some(&by), &pac, &expanded.targets).unwrap();
+    let mut plan = resolve(&aur, &pac, &expanded.targets).unwrap();
     plan.direct_targets
         .extend(expanded.direct_pkgnames.into_iter().map(Into::into));
 
@@ -388,7 +374,7 @@ fn pkgname_target_skips_selector_even_when_pkgbase_could_match() {
     let cfg = default_config();
     let mirror = MirrorRepo::open(&bare).unwrap();
     let idx = full_build(&cfg, &mirror).unwrap();
-    let by = Secondary::build(&idx);
+    let aur = AurIndexData::from_index(idx);
     let pac = PacmanIndex::default();
 
     let mut calls = 0;
@@ -396,8 +382,7 @@ fn pkgname_target_skips_selector_even_when_pkgbase_could_match() {
         calls += 1;
         Ok(n.to_vec())
     };
-    let expanded =
-        expand_pkgbase_targets(&idx, Some(&by), &pac, &ts(&["cower"]), &mut select).unwrap();
+    let expanded = expand_pkgbase_targets(&aur, &pac, &ts(&["cower"]), &mut select).unwrap();
     assert_eq!(expanded.targets, vec!["cower".to_owned()]);
     assert_eq!(calls, 0, "selector must not run on pkgname hits");
 }

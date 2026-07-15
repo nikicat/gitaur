@@ -6,7 +6,7 @@
 //! design and phasing.
 //!
 //! **Phase 4 status:** the session is hoisted at start (the AUR index +
-//! secondary maps via [`UpgradeSession`], a sorted name universe for
+//! lookup maps via [`AurIndexData`], a sorted name universe for
 //! globs/completion, and the sync-repo name set for coarse classification) and
 //! is *reloaded* on `upgrade`. The cart is live: `add` / `drop` / `remove` /
 //! `clear` stage a [`cart::Cart`]; `upgrade` refreshes + seeds the available
@@ -23,15 +23,16 @@
 //! so the cart mutations and the approval gate are exercised without a
 //! terminal, index, or `makepkg`.
 
-use crate::build::{self, ConfirmGate, DevelPolicy, InstallOpts, UpgradeSession, review};
+use crate::build::{self, ConfirmGate, DevelPolicy, InstallOpts, review};
 use crate::cli::dispatch;
 use crate::cli::search::{Row, rank_rows, search_row};
-use crate::config::Config;
+use crate::config::{Config, ConfigHandle};
 use crate::error::{Error, Result};
-use crate::index::{self, IndexEntry};
+use crate::index::info::{self, InfoLookup};
+use crate::index::{self, AurIndexData, IndexEntry};
 use crate::mirror::{self, MirrorRepo};
 use crate::names::{PkgBase, PkgName, PkgTarget, RepoName, RepoRank, SearchTerm};
-use crate::pacman::alpm_db::{self, PacmanIndex, SyncInfo};
+use crate::pacman::alpm_db::{self, PacmanIndex};
 use crate::pacman::invoke::{self, PkgUpgrade, REPO_AUR};
 use crate::pacman::preflight;
 use crate::paths;
@@ -140,8 +141,10 @@ pub trait ShellEnv {
     /// Re-fetch the mirror + index and reload the session (fresh data for
     /// `search`/`info`/classification/completion) **without** seeding the cart —
     /// `upgrade` is the stage-the-upgrades variant; `refresh` is just the
-    /// re-fetch.
-    fn refresh(&mut self) -> Result<()>;
+    /// re-fetch. The outcome says whether the AUR half actually refreshed or
+    /// was skipped (bootstrap declined / AUR disabled), so the dispatch core
+    /// can word the result.
+    fn refresh(&mut self) -> Result<mirror::RefreshOutcome>;
     /// Run a combined repo + AUR search; returns rows for the numbered list.
     fn search(&mut self, terms: &[SearchTerm]) -> Result<Vec<ListItem>>;
     /// Print `-Si`-style info for the already-resolved targets.
@@ -156,6 +159,9 @@ pub trait ShellEnv {
     /// Whether AUR items stage pre-approved — the effective `aur_approval`
     /// policy (see [`AurApproval::from_config`](cart::AurApproval::from_config)).
     fn aur_policy(&self) -> AurApproval;
+    /// Where the AUR half stands this session — wording only (e.g. `add`'s
+    /// unknown-name nudge); data flow stays uniform through the empty index.
+    fn aur_state(&self) -> index::AurState;
     /// The pkgbase a staged AUR target resolves to, for the reviewed set fed
     /// into the build pipeline. `None` when it isn't a known AUR package.
     fn pkgbase_of(&self, target: &PkgTarget) -> Option<PkgBase>;
@@ -175,9 +181,27 @@ pub trait ShellEnv {
     fn system_usage(&mut self) -> system::Report;
     /// `system prune`: delete the re-derivable caches (mirror, index, sync
     /// dbs, build trees) behind a y/N confirm. `Ok(None)` = user declined.
-    /// Returns the bytes freed. The in-memory session stays loaded — search
+    /// Returns the bytes freed. The in-memory AUR data stays loaded — search
     /// and info keep working from it until a `refresh` re-fetches everything.
     fn system_prune(&mut self) -> Result<Option<ByteSize>>;
+}
+
+/// Word one `refresh` outcome — the AUR half only. The repo-database half
+/// reports for itself from inside [`mirror::cmd_refresh`] (refreshed / up to
+/// date / failed) and doesn't run at all when `check_repo_updates` is off,
+/// so any claim about it here would double-report at best and lie at worst.
+const fn refresh_message(outcome: mirror::RefreshOutcome) -> &'static str {
+    match outcome {
+        mirror::RefreshOutcome::Refreshed => "mirror + index refreshed",
+        mirror::RefreshOutcome::AurSkipped(
+            mirror::SkipCause::Declined
+            | mirror::SkipCause::NonInteractive
+            | mirror::SkipCause::NotSetUp,
+        ) => "AUR setup skipped — run `refresh` again when ready",
+        mirror::RefreshOutcome::AurSkipped(mirror::SkipCause::Disabled) => {
+            "AUR refresh skipped (aur = false in config.toml)"
+        }
+    }
 }
 
 /// `system <show|prune>` — the maintenance group. A free function rather than
@@ -324,7 +348,7 @@ impl State {
                 // Re-fetch + reload the session; the cart is left untouched
                 // (`upgrade` is the seed-the-cart variant).
                 match env.refresh() {
-                    Ok(()) => env.print("mirror + index refreshed"),
+                    Ok(outcome) => env.print(refresh_message(outcome)),
                     Err(e) => env.print(&format!("refresh: {e}")),
                 }
                 Flow::Continue
@@ -463,27 +487,34 @@ impl State {
         let policy = env.aur_policy();
         let before = self.cart.clone();
         let mut changed = false;
+        let mut any_unknown = false;
         for t in targets {
-            match env.classify(&t) {
-                Some(StageClass { source, repo }) => {
-                    let name = t.as_str().to_owned();
-                    // Show the concrete repo (`core`/`extra`) when known, else
-                    // the coarse source label.
-                    let label = repo
-                        .clone()
-                        .map_or_else(|| source.label().to_owned(), RepoName::into_inner);
-                    match self.cart.add(CartItem::new(t, source, repo, policy)) {
-                        StageResult::Staged => {
-                            env.print(&format!("staged {name} ({label})"));
-                            changed = true;
-                        }
-                        StageResult::AlreadyStaged => {
-                            env.print(&format!("{name} is already staged"));
-                        }
-                    }
+            let Some(StageClass { source, repo }) = env.classify(&t) else {
+                env.print(&format!("unknown package `{}` — not staged", t.as_str()));
+                any_unknown = true;
+                continue;
+            };
+            let name = t.as_str().to_owned();
+            // Show the concrete repo (`core`/`extra`) when known, else the
+            // coarse source label.
+            let label = repo
+                .clone()
+                .map_or_else(|| source.label().to_owned(), RepoName::into_inner);
+            match self.cart.add(CartItem::new(t, source, repo, policy)) {
+                StageResult::Staged => {
+                    env.print(&format!("staged {name} ({label})"));
+                    changed = true;
                 }
-                None => env.print(&format!("unknown package `{}` — not staged", t.as_str())),
+                StageResult::AlreadyStaged => {
+                    env.print(&format!("{name} is already staged"));
+                }
             }
+        }
+        // With the AUR enabled but unsynced, "unknown" may just mean "only in
+        // the AUR" — one nudge for the whole batch. Pacman-only mode is a
+        // standing choice and stays quiet.
+        if any_unknown && env.aur_state() == index::AurState::NotSetUp {
+            env.print("unknown names may be in the AUR — `refresh` syncs it (one-time ~2 GiB)");
         }
         // Keep the resulting transaction on screen so the user needn't `show`
         // after every stage (post-5c UX). Skipped when nothing actually changed
@@ -1189,7 +1220,10 @@ const TOPICS: &[(Verb, &str)] = &[
         Verb::Refresh,
         "refresh\n  \
          Re-fetch the AUR mirror and reload the index — fresh data for\n  \
-         search / info / upgrade / completion. Leaves the cart untouched.",
+         search / info / upgrade / completion. Leaves the cart untouched.\n  \
+         If the AUR was never synced (you answered \"later\" at launch),\n  \
+         this runs the one-time ~2 GiB clone — typing it is the consent,\n  \
+         so there is no second question.",
     ),
     (
         Verb::System,
@@ -1198,7 +1232,8 @@ const TOPICS: &[(Verb, &str)] = &[
          category's disk usage (AUR mirror, package index, repo db snapshot,\n  \
          build worktrees, logs, …). `system prune` deletes the re-derivable\n  \
          caches after a y/N confirm — the next `refresh` / build recreates\n  \
-         them; build metrics and shell history are never touched.",
+         them (pruning the AUR mirror means the next sync re-asks before the\n  \
+         full re-clone); build metrics and shell history are never touched.",
     ),
     (
         Verb::Help,
@@ -1225,37 +1260,93 @@ fn help_topic(topic: &str) -> String {
         )
 }
 
+/// The pre-prompt banner: what this session covers. Pure so the wording is
+/// testable. Runs *after* the first-launch question, so `NotSetUp` here means
+/// the user chose "later" — one reminder line, not a re-pitch (the question
+/// already spelled out the cost). Pacman-only mode gets a marker instead of a
+/// nag: `aur = false` is a standing choice, not a missing step.
+fn startup_lines(aur: index::AurState) -> Vec<&'static str> {
+    match aur {
+        index::AurState::Ready => {
+            vec!["aurox shell — type `help` for commands, `quit` to leave"]
+        }
+        index::AurState::NotSetUp => vec![
+            "aurox shell — type `help` for commands, `quit` to leave",
+            "pacman-only this session — `refresh` syncs the AUR anytime",
+        ],
+        index::AurState::Disabled => {
+            vec!["aurox shell (pacman-only) — type `help` for commands, `quit` to leave"]
+        }
+    }
+}
+
+/// The shell's first-launch question, asked while the AUR is enabled but was
+/// never synced: sync now / pacman-only from now on / later.
+///
+/// Persistence is minimal by construction — "yes" persists as the mirror +
+/// index artifact itself, "no" as an `aur = false` line written through
+/// [`ConfigHandle::update`] (the one place aurox edits its own config, which
+/// also flips the in-memory view so the rest of the session sees the
+/// choice), "later" as nothing at all (asked again next launch).
+fn first_launch_setup(mut config: ConfigHandle) -> Result<ConfigHandle> {
+    if index::AurState::probe(config.cfg()) != index::AurState::NotSetUp {
+        return Ok(config);
+    }
+    match ui::aur_setup_prompt().map_err(|e| Error::other(format!("setup prompt: {e}")))? {
+        ui::AurSetupChoice::SyncNow => {
+            // Consent was just given — ShellRefresh runs the bootstrap
+            // without a second question.
+            mirror::cmd_refresh(config.cfg(), mirror::RefreshReason::ShellRefresh)?;
+        }
+        ui::AurSetupChoice::PacmanOnly => {
+            config.update(|c| c.aur = Some(false))?;
+            ui::note(&format!(
+                "pacman-only mode saved (`aur = false` in {}) — delete the line and `refresh` to opt back in",
+                config.path().display()
+            ));
+        }
+        ui::AurSetupChoice::Later => {}
+    }
+    Ok(config)
+}
+
 /// Run the interactive shell. Returns the desired process exit code.
 ///
 /// `initial_search` seeds the session: when launched via the bare-positional
 /// shortcut (`aurox <term>…`), dispatch passes the typed terms here and the shell
 /// runs one `search` before the prompt loop — identical to starting the shell
 /// and typing `search <term>…`. Empty for the plain no-arg `aurox` launch.
-#[instrument(skip(cfg))]
-pub fn run(cfg: &Config, devel: DevelPolicy, initial_search: &[SearchTerm]) -> Result<u8> {
+#[instrument(skip(config))]
+pub fn run(config: &ConfigHandle, devel: DevelPolicy, initial_search: &[SearchTerm]) -> Result<u8> {
     info!(devel = ?devel, terms = initial_search.len(), "shell session start");
-    // Once per session: load the AUR index (+ secondary maps) and the name
+    // First-launch question (no-op unless the AUR is enabled-but-unsynced).
+    // Owns a local handle so a "pacman-only" answer takes effect immediately.
+    let config = first_launch_setup(config.clone())?;
+    let cfg = config.cfg();
+    // Once per session: load the AUR index (+ lookup maps) and the name
     // universe. Not repeated per command; `refresh` (later phase) re-fetches.
-    let session = UpgradeSession::load(cfg)?;
-    let caches = build_universe(session.as_ref());
+    // The AUR data loads empty (not absent) when the AUR isn't in play.
+    let aur_state = index::AurState::probe(cfg);
+    let aur_data = AurIndexData::load(cfg)?;
+    let caches = build_universe(&aur_data);
     debug!(
         names = caches.universe.len(),
         sync = caches.sync.len(),
-        has_index = session.is_some(),
+        aur = ?aur_state,
         "shell session loaded"
     );
     let mut env = RealEnv {
         cfg,
         devel,
-        session,
+        aur_data,
+        aur_state,
         caches,
         view: None,
     };
     let mut state = State::default();
 
-    env.print("aurox shell — type `help` for commands, `quit` to leave");
-    if env.session.is_none() {
-        env.print("no AUR index yet — run `refresh` to enable AUR search/info");
+    for line in startup_lines(aur_state) {
+        env.print(line);
     }
 
     // Seed the session with the launch-time search (`aurox <term>…`): run it once
@@ -1333,13 +1424,11 @@ struct NameCaches {
 
 /// Build the [`NameCaches`] for a session. A missing index or unreadable alpm
 /// just yields smaller caches, never an error.
-fn build_universe(session: Option<&UpgradeSession>) -> NameCaches {
+fn build_universe(aur_data: &AurIndexData) -> NameCaches {
     let mut universe: Vec<PkgTarget> = Vec::new();
-    if let Some(s) = session {
-        let by = s.secondary();
-        universe.extend(by.by_name.keys().map(PkgTarget::from));
-        universe.extend(by.by_pkgbase.keys().map(PkgTarget::from));
-    }
+    let by = aur_data.lookup();
+    universe.extend(by.by_name.keys().map(PkgTarget::from));
+    universe.extend(by.by_pkgbase.keys().map(PkgTarget::from));
     let mut sync = HashMap::new();
     if let Ok(alpm) = alpm_db::open() {
         for db in alpm.syncdbs() {
@@ -1372,12 +1461,18 @@ fn cart_targets(state: &State) -> Vec<PkgTarget> {
         .collect()
 }
 
-/// Production [`ShellEnv`]: the loaded session + stdout, bridging `upgrade` to
+/// Production [`ShellEnv`]: the loaded AUR data + stdout, bridging `upgrade` to
 /// the existing loop.
 struct RealEnv<'a> {
     cfg: &'a Config,
     devel: DevelPolicy,
-    session: Option<UpgradeSession>,
+    /// The loaded AUR data — *empty* (never absent) when the AUR isn't in
+    /// play, so every command takes one uniform path. See
+    /// [`AurIndexData::load`].
+    aur_data: AurIndexData,
+    /// Wording-only snapshot of why the session might be empty (banner,
+    /// hints). Never drives data flow.
+    aur_state: index::AurState,
     caches: NameCaches,
     /// Cached resolution of the cart's package set for `show` — see
     /// [`CachedTxn`]. `None` until the first render, after a reload, or after an
@@ -1455,18 +1550,30 @@ impl ShellEnv for RealEnv<'_> {
         // `refresh_max_age_secs` is skipped (the session still reloads), so
         // back-to-back `upgrade`s don't each pay a network round-trip. The
         // explicit `refresh` command forces a fetch.
-        self.reload(upgrade::FetchPolicy::WhenStale)?;
-        match &self.session {
-            Some(session) => session.recompute_remaining(self.devel),
-            // No AUR index even after a refresh: repo upgrades are still
-            // queryable straight from the synced db.
-            None => invoke::query_repo_upgrades(),
+        let outcome = self.reload(upgrade::FetchPolicy::WhenStale)?;
+        // `upgrade` never bootstraps (the user's launch-time "later" stands),
+        // so its fetch skips an unsynced AUR — degrade to repo-only below,
+        // but say so: a silent half answer reads as "nothing to upgrade in
+        // the AUR". (`Disabled` is the user's standing choice: no note.)
+        if let Some(mirror::RefreshOutcome::AurSkipped(
+            mirror::SkipCause::NotSetUp
+            | mirror::SkipCause::Declined
+            | mirror::SkipCause::NonInteractive,
+        )) = outcome
+        {
+            ui::note("AUR not synced — upgrades are repo-only; `refresh` syncs it");
         }
+        // With empty AUR data the recompute naturally yields repo upgrades
+        // only — no separate fallback path.
+        self.aur_data.recompute_remaining(self.devel)
     }
 
-    fn refresh(&mut self) -> Result<()> {
-        // `refresh` is the always-fetch command — it ignores the TTL.
-        self.reload(upgrade::FetchPolicy::Always)
+    fn refresh(&mut self) -> Result<mirror::RefreshOutcome> {
+        // `refresh` is the always-fetch command — it ignores the TTL, so the
+        // reload always carries an outcome.
+        Ok(self
+            .reload(upgrade::FetchPolicy::Always)?
+            .unwrap_or(mirror::RefreshOutcome::Refreshed))
     }
 
     fn search(&mut self, terms: &[SearchTerm]) -> Result<Vec<ListItem>> {
@@ -1478,10 +1585,11 @@ impl ShellEnv for RealEnv<'_> {
             .into_iter()
             .map(Row::Repo)
             .collect();
-        if let Some(session) = &self.session {
-            let aur = session.secondary().search(session.index(), &regexes);
-            rows.extend(aur.into_iter().map(Row::Aur));
-        }
+        let aur = self
+            .aur_data
+            .lookup()
+            .search(self.aur_data.index(), &regexes);
+        rows.extend(aur.into_iter().map(Row::Aur));
         // Rank the merged repo+AUR list best-first (name-prefix > substring >
         // description; shorter names win; AUR ties break freshest-first).
         // `State::search` prints this reversed, so row 1 — the best match — lands
@@ -1509,53 +1617,14 @@ impl ShellEnv for RealEnv<'_> {
     }
 
     fn show_info(&mut self, targets: &[PkgTarget]) -> Result<()> {
-        // Repo wins ties — the same rule as `classify`: pacman owns a name
-        // that lives in both a sync repo and the AUR (`info cef` must describe
-        // extra/cef, not the same-named AUR pkgbase). Targets are handled in
-        // the order given so multi-target output matches pacman's.
-        let mut alpm = None;
-        // Lazy like `alpm`: opened at the first AUR target, reused for the
-        // rest of the command (mirror + localdb handles behind the AUR
-        // block's maintainer / first-submitted / installed-size fields).
-        let mut aur_sources = None;
-        let mut missing: Vec<&PkgTarget> = Vec::new();
-        for t in targets {
-            if self.caches.sync.contains_key(t.bare()) {
-                // One handle for the whole command, opened at the first repo
-                // target — repo info works even without an AUR index.
-                if alpm.is_none() {
-                    alpm = Some(alpm_db::open()?);
-                }
-                if let Some(info) = alpm.as_ref().and_then(|a| SyncInfo::lookup(a, t.bare())) {
-                    info.print();
-                    continue;
-                }
-                // The startup cache said repo but the live DBs disagree (a
-                // `pacman -Sy` ran since) — fall through to the AUR lookup.
-            }
-            if let Some(session) = &self.session
-                && index::print_aur_info(
-                    session.index(),
-                    session.secondary(),
-                    t,
-                    aur_sources.get_or_insert_with(index::info::InfoSources::open),
-                )
-            {
-                continue;
-            }
-            missing.push(t);
-        }
+        // The shared repo-then-AUR lookup (`-Si` runs the same one); only the
+        // miss wording is the shell's — its sync verb is `refresh`.
+        let missing = InfoLookup::open(&self.aur_data)?.print_all(targets);
         if !missing.is_empty() {
-            if self.session.is_none() {
-                ui::warn("no AUR index; run `aurox -Sy` first");
-            }
-            ui::warn(&format!(
-                "not in repos or AUR: {}",
-                missing
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+            ui::warn(&info::missing_warning(
+                self.aur_state,
+                &missing,
+                "`refresh`",
             ));
         }
         Ok(())
@@ -1574,10 +1643,9 @@ impl ShellEnv for RealEnv<'_> {
                 repo: Some(repo.clone()),
             });
         }
-        let session = self.session.as_ref()?;
-        session
-            .secondary()
-            .lookup(session.index(), target.as_str())
+        self.aur_data
+            .lookup()
+            .lookup(self.aur_data.index(), target.as_str())
             .map(|_| StageClass {
                 source: Source::Aur,
                 repo: None,
@@ -1591,20 +1659,20 @@ impl ShellEnv for RealEnv<'_> {
         AurApproval::from_config(self.cfg.aur_approval, &self.cfg.review_default)
     }
 
+    fn aur_state(&self) -> index::AurState {
+        self.aur_state
+    }
+
     fn pkgbase_of(&self, target: &PkgTarget) -> Option<PkgBase> {
-        let session = self.session.as_ref()?;
-        session
-            .secondary()
-            .lookup(session.index(), target.as_str())
+        self.aur_data
+            .lookup()
+            .lookup(self.aur_data.index(), target.as_str())
             .map(|e| e.pkgbase.clone())
     }
 
     fn review(&mut self, target: &PkgTarget) -> Result<ReviewOutcome> {
-        let Some(session) = &self.session else {
-            ui::warn("no AUR index; nothing to review");
-            return Ok(ReviewOutcome::Skipped);
-        };
-        let Some(entry) = session.secondary().lookup(session.index(), target.as_str()) else {
+        let aur_data = &self.aur_data;
+        let Some(entry) = aur_data.entry(target.as_str()) else {
             ui::warn(&format!("{}: not an AUR package", target.as_str()));
             return Ok(ReviewOutcome::Skipped);
         };
@@ -1620,18 +1688,18 @@ impl ShellEnv for RealEnv<'_> {
         let pac = PacmanIndex::build(&alpm);
         let counterpart = pac.counterpart_with_hint(entry, None);
 
-        match review::review(
-            &mirror,
-            &pkgbase,
-            &new_ver,
-            counterpart.as_ref(),
-            &wt,
-            self.cfg.review_history_scan_max,
-            // The shell drives one interactive review per call; the
-            // "approve all" fast path is the dispatch loop's job (it decides
-            // whether to call this at all), so a single review always prompts.
-            review::Prompting::Prompt,
-        ) {
+        let request = review::ReviewRequest {
+            mirror: &mirror,
+            pkgbase: &pkgbase,
+            new_ver: &new_ver,
+            counterpart: counterpart.as_ref(),
+            wt: &wt,
+            history_scan_max: self.cfg.review_history_scan_max,
+        };
+        // The shell drives one interactive review per call; the "approve
+        // all" fast path is the dispatch loop's job (it decides whether to
+        // call this at all), so a single review always prompts.
+        match request.review(review::Prompting::Prompt) {
             Ok(review::Outcome::Approved) => Ok(ReviewOutcome::Approved),
             Ok(review::Outcome::ApprovedAll) => Ok(ReviewOutcome::ApprovedAll),
             Ok(review::Outcome::Skipped) => Ok(ReviewOutcome::Skipped),
@@ -1675,12 +1743,7 @@ impl ShellEnv for RealEnv<'_> {
         // the cached resolution is stale once apply runs whatever its outcome;
         // drop it so the next `show` re-resolves against the new system state.
         self.view = None;
-        let Some(session) = self.session.as_ref() else {
-            ui::warn("no AUR index loaded; cannot apply");
-            return Ok(ApplyOutcome::Failed {
-                installed: Vec::new(),
-            });
-        };
+        let aur_data = &self.aur_data;
         let pac = upgrade::system_pac()?;
 
         // Preflight the repo-upgrade lane before anything is asked of the user:
@@ -1692,11 +1755,11 @@ impl ShellEnv for RealEnv<'_> {
         if !cart.repo_upgrades().is_empty() {
             upgrade::resync_repo_dbs(self.cfg);
         }
-        let repo_sel = self.repo_upgrade_selection(session, cart)?;
+        let repo_sel = self.repo_upgrade_selection(aur_data, cart)?;
         let blockers = if repo_sel.repo.is_empty() {
             Vec::new()
         } else {
-            match sysupgrade_gate(session, cart, &repo_sel)? {
+            match sysupgrade_gate(aur_data, cart, &repo_sel)? {
                 Some(blockers) => blockers,
                 None => return Ok(ApplyOutcome::Declined),
             }
@@ -1710,19 +1773,27 @@ impl ShellEnv for RealEnv<'_> {
             .install_targets()
             .into_iter()
             .partition(|t| blockers.iter().any(|b| b == t.spec.as_str()));
-        let blocker_plan = self.resolve_plan(session, &pac, &blocker_targets)?;
-        let main_plan = self.resolve_plan(session, &pac, &main_targets)?;
+        let blocker_plan = self.resolve_plan(aur_data, &pac, &blocker_targets)?;
+        let main_plan = self.resolve_plan(aur_data, &pac, &main_targets)?;
 
         // No table redraw — `show` is where the user looked. `apply` gates on the
         // one-line cost summary plus a single confirm (phase 5a).
         let size_pac = upgrade::synced_pac()?;
-        let roots = txn_roots(cart, session, &size_pac);
+        let roots = txn_roots(cart, aur_data, &size_pac);
         let (repo_deps, aur_deps) = merged_dep_rows(main_plan.as_ref(), blocker_plan.as_ref());
         let removals: Vec<PkgName> = cart.removals().to_vec();
-        let metrics = upgrade::preview_metrics(session, &roots, main_plan.as_ref());
-        ui::info(&ui::cost_summary(
-            &roots, &repo_deps, &aur_deps, &removals, &size_pac, &metrics,
-        ));
+        let metrics = upgrade::preview_metrics(aur_data, &roots, main_plan.as_ref());
+        ui::info(
+            &ui::ChangeSet {
+                roots: &roots,
+                repo_deps: &repo_deps,
+                aur_deps: &aur_deps,
+                removals: &removals,
+                pac: &size_pac,
+                metrics: &metrics,
+            }
+            .summary(),
+        );
         if !ui::confirm("Proceed with this transaction?", false)
             .map_err(|e| Error::other(format!("confirm: {e}")))?
         {
@@ -1735,18 +1806,23 @@ impl ShellEnv for RealEnv<'_> {
             asdeps: false,
             gate: ConfirmGate::AlreadyConfirmed,
         };
+        let ctx = build::InstallCtx {
+            cfg: self.cfg,
+            aur: aur_data,
+            pac: &pac,
+        };
 
         // Blocker rebuilds first — installing them is what unblocks the repo
         // lane (the rebuilt packages no longer carry the dependency the
         // sysupgrade would break).
         let mut report = build::RunReport::default();
         if let Some(plan) = &blocker_plan {
-            report = build::apply_plan(self.cfg, session.index(), &pac, plan, opts, &mut reviewed)?;
+            report = ctx.apply_plan(plan, opts, &mut reviewed)?;
             if !report.all_landed() {
                 // The blocker didn't land, so the repo lane would fail exactly
                 // as preflighted — stop before it runs. The repo rows haven't
                 // run either, so they stay staged (`repo_landed = false`).
-                return Ok(cart_apply_outcome(&report, cart, session, false));
+                return Ok(cart_apply_outcome(&report, cart, aur_data, false));
             }
         }
 
@@ -1760,11 +1836,10 @@ impl ShellEnv for RealEnv<'_> {
         // Build + install the main AUR (and any fresh-install) half. Already
         // gated by the confirm above, so `apply_plan` doesn't re-ask.
         if let Some(plan) = &main_plan {
-            let main_report =
-                build::apply_plan(self.cfg, session.index(), &pac, plan, opts, &mut reviewed)?;
+            let main_report = ctx.apply_plan(plan, opts, &mut reviewed)?;
             report.absorb(main_report);
         }
-        let outcome = cart_apply_outcome(&report, cart, session, true);
+        let outcome = cart_apply_outcome(&report, cart, aur_data, true);
         if !matches!(outcome, ApplyOutcome::Succeeded) {
             return Ok(outcome);
         }
@@ -1776,7 +1851,7 @@ impl ShellEnv for RealEnv<'_> {
         let installed_removals: Vec<&PkgName> = cart
             .removals()
             .iter()
-            .filter(|n| pac.is_installed(n.as_str()))
+            .filter(|n| pac.is_installed(n))
             .collect();
         if !installed_removals.is_empty() {
             // Stringify only here, at pacman's argv boundary.
@@ -1811,9 +1886,10 @@ impl ShellEnv for RealEnv<'_> {
         if !ui::confirm_default_no(&prompt)? {
             return Ok(None);
         }
-        // The in-memory session (mmap of the now-deleted index) stays valid and
-        // loaded on purpose: search/info keep answering from it, and the next
-        // `refresh`/`upgrade` re-bootstraps the mirror + index from scratch.
+        // The in-memory AUR data (mmap of the now-deleted index) stays valid
+        // and loaded on purpose: search/info keep answering from it, and the
+        // next `refresh`/`upgrade` re-bootstraps the mirror + index from
+        // scratch.
         system::prune().map(Some)
     }
 }
@@ -1824,9 +1900,7 @@ impl RealEnv<'_> {
     /// installed packages, keyed by pkgname). Empty when there's no session or no
     /// such rows, in which case the table's build column stays blank.
     fn search_metrics(&self, rows: &[ui::SearchRow]) -> ui::PreviewMetrics {
-        let Some(session) = &self.session else {
-            return ui::PreviewMetrics::empty();
-        };
+        let aur_data = &self.aur_data;
         let roots: Vec<ui::TxnRoot> = rows
             .iter()
             .filter(|r| r.install.installed() && r.repo.rank() == RepoRank::Aur)
@@ -1842,21 +1916,24 @@ impl RealEnv<'_> {
         if roots.is_empty() {
             return ui::PreviewMetrics::empty();
         }
-        upgrade::preview_metrics(session, &roots, None)
+        upgrade::preview_metrics(aur_data, &roots, None)
     }
 
     /// Re-fetch the mirror + index (subject to `policy`'s TTL) and reload the
     /// session in place, rebuilding the name caches so fresh data backs
     /// subsequent `search`/`info`/classification + completion. Shared by
     /// `upgrade` (which then recomputes candidates) and `refresh` (which stops
-    /// here). Invalidates the `show` resolution cache — the mirror/db data it was
-    /// resolved against may have just changed.
-    fn reload(&mut self, policy: upgrade::FetchPolicy) -> Result<()> {
-        let session = upgrade::refresh_and_reload(self.cfg, policy)?;
-        self.caches = build_universe(session.as_ref());
-        self.session = session;
+    /// here); both consume the returned outcome (`None` when the TTL skipped
+    /// the fetch) to word what the refresh actually did. Invalidates the `show`
+    /// resolution cache — the mirror/db data it was resolved against may have
+    /// just changed.
+    fn reload(&mut self, policy: upgrade::FetchPolicy) -> Result<Option<mirror::RefreshOutcome>> {
+        let reload = upgrade::refresh_and_reload(self.cfg, policy)?;
+        self.caches = build_universe(&reload.data);
+        self.aur_data = reload.data;
+        self.aur_state = index::AurState::probe(self.cfg);
         self.view = None;
-        Ok(())
+        Ok(reload.outcome)
     }
 
     /// Build the unified change-set table for `show` from the cached resolution,
@@ -1867,26 +1944,23 @@ impl RealEnv<'_> {
     /// rows — `show` must never abort.
     fn transaction_view(&mut self, cart: &Cart) -> Result<ui::Table> {
         self.ensure_view(cart)?;
-        let session = self
-            .session
-            .as_ref()
-            .ok_or_else(|| Error::other("no AUR index loaded"))?;
+        let aur_data = &self.aur_data;
         let r = &self
             .view
             .as_ref()
             .expect("ensure_view populated the cache on Ok")
             .resolved;
-        let roots = txn_roots(cart, session, &r.size_pac);
+        let roots = txn_roots(cart, aur_data, &r.size_pac);
         let removals: Vec<PkgName> = cart.removals().to_vec();
-        Ok(ui::transaction_table(
-            &roots,
-            &r.repo_deps,
-            &r.aur_deps,
-            &removals,
-            &r.size_pac,
-            &r.metrics,
-            ui::Paint::detect(),
-        ))
+        Ok(ui::ChangeSet {
+            roots: &roots,
+            repo_deps: &r.repo_deps,
+            aur_deps: &r.aur_deps,
+            removals: &removals,
+            pac: &r.size_pac,
+            metrics: &r.metrics,
+        }
+        .table(ui::Paint::detect()))
     }
 
     /// Ensure [`Self::view`] holds a resolution valid for `cart`, re-resolving
@@ -1910,20 +1984,17 @@ impl RealEnv<'_> {
     /// two alpm opens + the metrics store), recomputed only on a package-set
     /// change or a reload/apply.
     fn resolve_view(&self, cart: &Cart) -> Result<ResolvedTxn> {
-        let session = self
-            .session
-            .as_ref()
-            .ok_or_else(|| Error::other("no AUR index loaded"))?;
+        let aur_data = &self.aur_data;
         let pac = upgrade::system_pac()?;
-        let plan = self.resolve_plan(session, &pac, &cart.install_targets())?;
+        let plan = self.resolve_plan(aur_data, &pac, &cart.install_targets())?;
         // Sizes from the freshly-synced db (the new versions' real download cost).
         let size_pac = upgrade::synced_pac()?;
         let (repo_deps, aur_deps) = upgrade::dep_rows(plan.as_ref());
         // Roots feed only the (approval-independent) build-time overlay here; the
         // render re-derives approval-aware roots from the live cart.
-        let roots = txn_roots(cart, session, &size_pac);
-        let metrics = upgrade::preview_metrics(session, &roots, plan.as_ref());
-        let preflight = self.preview_preflight(session, cart);
+        let roots = txn_roots(cart, aur_data, &size_pac);
+        let metrics = upgrade::preview_metrics(aur_data, &roots, plan.as_ref());
+        let preflight = self.preview_preflight(aur_data, cart);
         Ok(ResolvedTxn {
             size_pac,
             repo_deps,
@@ -1940,13 +2011,13 @@ impl RealEnv<'_> {
     /// preflight consumer).
     fn preview_preflight(
         &self,
-        session: &UpgradeSession,
+        aur_data: &AurIndexData,
         cart: &Cart,
     ) -> Vec<upgrade::PreflightNote> {
         if cart.repo_upgrades().is_empty() {
             return Vec::new();
         }
-        let sel = match self.repo_upgrade_selection(session, cart) {
+        let sel = match self.repo_upgrade_selection(aur_data, cart) {
             Ok(sel) => sel,
             Err(e) => {
                 debug!(error = %e, "preview preflight skipped (upgrade selection failed)");
@@ -1957,7 +2028,7 @@ impl RealEnv<'_> {
             return Vec::new();
         }
         match preflight::sysupgrade(&sel.repo_skipped) {
-            Ok(issues) => upgrade::preflight_notes(issues, session, cart),
+            Ok(issues) => upgrade::preflight_notes(issues, aur_data, cart),
             Err(e) => {
                 debug!(error = %e, "preview preflight skipped (could not run prepare)");
                 Vec::new()
@@ -1971,22 +2042,19 @@ impl RealEnv<'_> {
     /// subset is empty (a repo-upgrade-only or removal-only cart / phase).
     fn resolve_plan(
         &self,
-        session: &UpgradeSession,
+        aur_data: &AurIndexData,
         pac: &PacmanIndex,
         targets: &[build::Target],
     ) -> Result<Option<Plan>> {
         if targets.is_empty() {
             return Ok(None);
         }
-        let plan = build::resolve_targets(
-            self.cfg,
-            session.index(),
-            Some(session.secondary()),
+        let ctx = build::InstallCtx {
+            cfg: self.cfg,
+            aur: aur_data,
             pac,
-            targets,
-            false,
-        )?;
-        Ok(Some(plan))
+        };
+        Ok(Some(ctx.resolve_targets(targets, false)?))
     }
 
     /// Turn the staged repo upgrades into the partial-`-Syu` selection: the
@@ -1995,7 +2063,7 @@ impl RealEnv<'_> {
     /// wrong packages.
     fn repo_upgrade_selection(
         &self,
-        session: &UpgradeSession,
+        aur_data: &AurIndexData,
         cart: &Cart,
     ) -> Result<UpgradeSelection> {
         let staged: HashSet<PkgName> = cart
@@ -2005,7 +2073,7 @@ impl RealEnv<'_> {
             .collect();
         let mut repo = Vec::new();
         let mut repo_skipped = Vec::new();
-        for u in session
+        for u in aur_data
             .recompute_remaining(self.devel)?
             .into_iter()
             .filter(|u| u.repo != REPO_AUR)
@@ -2040,17 +2108,14 @@ impl RealEnv<'_> {
 fn cart_apply_outcome(
     report: &build::RunReport,
     cart: &Cart,
-    session: &UpgradeSession,
+    aur_data: &AurIndexData,
     repo_landed: bool,
 ) -> ApplyOutcome {
     if report.all_landed() {
         return ApplyOutcome::Succeeded;
     }
     let installed = landed_install_specs(cart, &report.installed, repo_landed, |it| {
-        session
-            .secondary()
-            .lookup(session.index(), it.spec())
-            .map(|e| e.pkgbase.clone())
+        aur_data.entry(it.spec()).map(|e| e.pkgbase.clone())
     });
     ApplyOutcome::Failed { installed }
 }
@@ -2084,7 +2149,7 @@ fn landed_install_specs(
 /// that resolve flagged breakage and must install ahead of the repo lane.
 /// `Ok(None)` means the user declined at the override prompt.
 fn sysupgrade_gate(
-    session: &UpgradeSession,
+    aur_data: &AurIndexData,
     cart: &Cart,
     sel: &UpgradeSelection,
 ) -> Result<Option<Vec<PkgName>>> {
@@ -2103,7 +2168,7 @@ fn sysupgrade_gate(
     // The same structured events the passthrough lane logs, then the
     // human-facing notes with remediation.
     preflight::log_issues(&issues);
-    let notes = upgrade::preflight_notes(issues, session, cart);
+    let notes = upgrade::preflight_notes(issues, aur_data, cart);
     let mut blockers = Vec::new();
     let mut blocking = false;
     for note in &notes {
@@ -2159,19 +2224,19 @@ const fn approval_cell(approval: Approval) -> ui::ApprovalCell {
 /// Build the numbered root rows for the unified table from the (sorted) cart,
 /// resolving each row's version pair and AUR age. `size_pac` is the synced
 /// snapshot — it carries the new repo versions for fresh repo installs.
-fn txn_roots(cart: &Cart, session: &UpgradeSession, size_pac: &PacmanIndex) -> Vec<ui::TxnRoot> {
+fn txn_roots(cart: &Cart, aur_data: &AurIndexData, size_pac: &PacmanIndex) -> Vec<ui::TxnRoot> {
     let now = SystemTime::now();
     cart.items()
         .iter()
         .map(|it| {
-            let (old_ver, new_ver) = row_versions(it, session, size_pac);
+            let (old_ver, new_ver) = row_versions(it, aur_data, size_pac);
             ui::TxnRoot {
                 repo: it.repo_label(),
                 approval: approval_cell(it.approval),
                 name: PkgName::from(it.spec()),
                 old_ver,
                 new_ver,
-                age: aur_age(it, session, now),
+                age: aur_age(it, aur_data, now),
             }
         })
         .collect()
@@ -2183,17 +2248,14 @@ fn txn_roots(cart: &Cart, session: &UpgradeSession, size_pac: &PacmanIndex) -> V
 /// leaves the version cell blank but aligned).
 fn row_versions(
     it: &CartItem,
-    session: &UpgradeSession,
+    aur_data: &AurIndexData,
     size_pac: &PacmanIndex,
 ) -> (Option<Version>, Option<Version>) {
     if let Some(u) = &it.upgrade {
         return (Some(u.old_ver.clone()), Some(u.new_ver.clone()));
     }
     let new = match it.source {
-        Source::Aur => session
-            .secondary()
-            .lookup(session.index(), it.spec())
-            .map(IndexEntry::version),
+        Source::Aur => aur_data.entry(it.spec()).map(IndexEntry::version),
         Source::Repo => size_pac.sync_version(it.spec()).map(Version::from),
     };
     (None, new)
@@ -2203,11 +2265,11 @@ fn row_versions(
 /// for the table's age column. `None` for repo rows, when there's no matching
 /// index entry, or when the commit time is unrecorded (the
 /// [`crate::units::UnixTime`] sentinel in archives predating the field).
-fn aur_age(it: &CartItem, session: &UpgradeSession, now: SystemTime) -> Option<Duration> {
+fn aur_age(it: &CartItem, aur_data: &AurIndexData, now: SystemTime) -> Option<Duration> {
     if it.source != Source::Aur {
         return None;
     }
-    let entry = session.secondary().lookup(session.index(), it.spec())?;
+    let entry = aur_data.entry(it.spec())?;
     now.duration_since(entry.commit_time.system_time()?).ok()
 }
 
@@ -2240,7 +2302,7 @@ fn flat_cart_lines(cart: &Cart, err: &Error) -> Vec<String> {
 mod tests {
     use super::*;
 
-    use crate::assert_regex;
+    use crate::{assert_contains, assert_regex};
     use std::collections::HashMap;
 
     /// The fake env's captured output: every `print`ed line, in order.
@@ -2274,6 +2336,10 @@ mod tests {
         /// The whole transcript as one string, for cross-line substring checks.
         fn joined(&self) -> String {
             self.0.join("\n")
+        }
+        /// How many printed lines contain `needle` — for once-per-batch checks.
+        fn count_containing(&self, needle: &str) -> usize {
+            self.0.iter().filter(|l| l.contains(needle)).count()
         }
     }
 
@@ -2321,6 +2387,10 @@ mod tests {
         /// `None` = the user declined the prompt.
         prune_outcome: Option<ByteSize>,
         prune_calls: CallCount,
+        /// What `refresh` reports; `None` ⇒ a full `Refreshed`.
+        refresh_outcome: Option<mirror::RefreshOutcome>,
+        /// What `aur_state` reports; `None` ⇒ `Ready` (no nudges).
+        aur_state: Option<index::AurState>,
     }
 
     impl ShellEnv for FakeEnv {
@@ -2331,9 +2401,11 @@ mod tests {
             self.upgrades.bump();
             Ok(self.upgrade_candidates.clone())
         }
-        fn refresh(&mut self) -> Result<()> {
+        fn refresh(&mut self) -> Result<mirror::RefreshOutcome> {
             self.refreshes.bump();
-            Ok(())
+            Ok(self
+                .refresh_outcome
+                .unwrap_or(mirror::RefreshOutcome::Refreshed))
         }
         fn search(&mut self, _terms: &[SearchTerm]) -> Result<Vec<ListItem>> {
             Ok(self.search_result.clone())
@@ -2355,6 +2427,10 @@ mod tests {
         }
         fn aur_policy(&self) -> AurApproval {
             self.policy
+        }
+        fn aur_state(&self) -> index::AurState {
+            // Most dispatch tests don't care; `Ready` keeps them nudge-free.
+            self.aur_state.unwrap_or(index::AurState::Ready)
         }
         fn pkgbase_of(&self, target: &PkgTarget) -> Option<PkgBase> {
             Some(PkgBase::from(target.as_str()))
@@ -2567,6 +2643,65 @@ mod tests {
         assert!(env.lines.contains("refreshed"));
     }
 
+    /// A declined bootstrap is worded as a skip (with the retry hint), not as
+    /// a full "mirror + index refreshed".
+    #[test]
+    fn refresh_decline_words_the_skip() {
+        let mut env = FakeEnv {
+            refresh_outcome: Some(mirror::RefreshOutcome::AurSkipped(
+                mirror::SkipCause::Declined,
+            )),
+            ..FakeEnv::default()
+        };
+        State::default().dispatch(&command::parse("refresh"), &mut env);
+        assert!(env.lines.contains("AUR setup skipped"));
+        assert!(!env.lines.contains("mirror + index refreshed"));
+    }
+
+    /// Pacman-only mode: `refresh` words the AUR skip and claims nothing
+    /// about the repo half — that half reports for itself from inside
+    /// `cmd_refresh`, and doesn't run at all with `check_repo_updates` off.
+    #[test]
+    fn refresh_disabled_words_the_skip_without_repo_claims() {
+        let mut env = FakeEnv {
+            refresh_outcome: Some(mirror::RefreshOutcome::AurSkipped(
+                mirror::SkipCause::Disabled,
+            )),
+            ..FakeEnv::default()
+        };
+        State::default().dispatch(&command::parse("refresh"), &mut env);
+        assert!(
+            env.lines
+                .contains("AUR refresh skipped (aur = false in config.toml)")
+        );
+        assert!(!env.lines.contains("refreshed"));
+    }
+
+    /// The pre-prompt banner: a ready session gets the one-liner, a "later"
+    /// answer gets one reminder line (the launch question already pitched
+    /// the cost), and pacman-only mode is marked instead of nagged.
+    #[test]
+    fn startup_banner_variants() {
+        let ready = startup_lines(index::AurState::Ready);
+        assert_eq!(ready.len(), 1, "ready session banners one line: {ready:?}");
+
+        let later = startup_lines(index::AurState::NotSetUp);
+        assert_eq!(
+            later.len(),
+            2,
+            "one reminder line, not a re-pitch: {later:?}"
+        );
+        assert_contains!(later[1], "`refresh`");
+
+        let pacman_only = startup_lines(index::AurState::Disabled);
+        assert_eq!(
+            pacman_only.len(),
+            1,
+            "pacman-only mode must not nag: {pacman_only:?}"
+        );
+        assert_contains!(pacman_only[0], "(pacman-only)");
+    }
+
     #[test]
     fn system_without_action_prints_usage_and_never_prunes() {
         // The safety the two-word group exists for: neither a bare `system`
@@ -2662,6 +2797,34 @@ mod tests {
         state.dispatch(&command::parse("add nope"), &mut env);
         assert!(state.cart.is_empty());
         assert!(env.lines.contains("unknown package"));
+        // With a ready index "unknown" is authoritative — no AUR speculation.
+        assert!(!env.lines.contains("may be in the AUR"));
+    }
+
+    /// With the AUR enabled but unsynced, an unknown `add` target may simply
+    /// live there: one nudge per batch points at `refresh` (never a prompt —
+    /// staging must stay cheap). Pacman-only mode keeps the standing silence.
+    #[test]
+    fn add_unknown_nudges_at_the_aur_only_when_not_set_up() {
+        let mut env = FakeEnv {
+            aur_state: Some(index::AurState::NotSetUp),
+            ..FakeEnv::default()
+        };
+        let mut state = State::default();
+        state.dispatch(&command::parse("add nope nada"), &mut env);
+        assert!(env.lines.contains("may be in the AUR"));
+        assert_eq!(
+            env.lines.count_containing("may be in the AUR"),
+            1,
+            "one nudge for the whole batch"
+        );
+
+        let mut env = FakeEnv {
+            aur_state: Some(index::AurState::Disabled),
+            ..FakeEnv::default()
+        };
+        state.dispatch(&command::parse("add nope"), &mut env);
+        assert!(!env.lines.contains("may be in the AUR"));
     }
 
     #[test]
