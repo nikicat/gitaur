@@ -46,8 +46,14 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+          # Exact-key only — deliberately no restore-keys fallback. Caches are
+          # immutable, so a fallback seeds every post-lock-bump save from the
+          # previous cache's target/, whose stale artifacts are never pruned:
+          # the cache grows monotonically (4.8 GiB → 5.7 GiB compressed by
+          # 2026-07-15) until merely *restoring* it fills the runner disk and
+          # kills the job with ENOSPC. A lock bump now pays one cold build and
+          # saves a fresh, single-build-sized cache instead.
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
 
       - name: rustfmt
         run: cargo fmt --all -- --check
