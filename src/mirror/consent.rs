@@ -1,7 +1,7 @@
 //! Consent gate for the AUR bootstrap clone.
 //!
 //! The first AUR touch needs a full clone of the AUR monorepo — a ~2 GiB
-//! download that takes ~8–9 minutes — and `-Syy` re-downloads it on purpose.
+//! download that takes ~10 minutes — and `-Syy` re-downloads it on purpose.
 //! Neither ever starts silently: every path that could trigger a bootstrap
 //! funnels through [`plan`], which announces the cost and asks first.
 //! Incremental fetches of an existing mirror never prompt, and `aur = false`
@@ -293,7 +293,7 @@ fn announce(kind: BootstrapKind) {
         BootstrapKind::FirstRun => {
             ui::info("first-time AUR setup — aurox mirrors the whole AUR as one git repo");
             ui::note(
-                "~2 GiB download, ~2.5 GiB on disk, ~8-9 min — one-time; refreshes afterwards are small incremental fetches",
+                "~2 GiB download, ~2.5 GiB on disk, ~10 min — one-time; refreshes afterwards are small incremental fetches",
             );
             ui::note("enables AUR search, info, install, and upgrades");
             ui::note(&format!(
@@ -303,10 +303,10 @@ fn announce(kind: BootstrapKind) {
         }
         BootstrapKind::InterruptedRedo => {
             ui::warn("previous bootstrap was interrupted; the clone must restart from scratch");
-            ui::note("~2 GiB download, ~8-9 min");
+            ui::note("~2 GiB download, ~10 min");
         }
         BootstrapKind::ForcedReclone => {
-            ui::info("-Syy re-clones the AUR mirror from scratch: ~2 GiB download, ~8-9 min");
+            ui::info("-Syy re-clones the AUR mirror from scratch: ~2 GiB download, ~10 min");
         }
     }
 }

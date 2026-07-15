@@ -31,7 +31,13 @@ fn has(screen: &str, needle: &str) -> bool {
 }
 
 fn main() {
+    // The rebuild fix lives in the AUR, so this scenario needs the index:
+    // answer the first-launch question with "y" — the SyncNow branch — and
+    // let the mock-mirror bootstrap run before the banner. (The old flow
+    // relied on `upgrade` bootstrapping silently; that trap is gone.)
     let mut pty = Pty::spawn_aurox();
+    pty.expect("three-way question", |s| s.contains("sync the AUR now?"));
+    pty.send(b"y\r");
     pty.expect("shell banner", |s| s.contains("aurox shell"));
 
     // 1. Seed the upgrades — only the two fixture candidates (the container

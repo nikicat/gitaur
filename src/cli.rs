@@ -68,8 +68,8 @@ pub struct Cli {
 
 const AFTER_HELP: &str = "AUROX-OWNED OPERATIONS:\n\
   -S <pkg>...    install AUR packages (plan shown, one confirm, batched sudo)\n\
-  -Sy            refresh AUR mirror + rebuild index (incremental fetch)\n\
-  -Syy           force full re-clone of the AUR mirror (~8–9 min)\n\
+  -Sy            refresh AUR mirror + rebuild index (first run asks: ~2 GiB once)\n\
+  -Syy           force full re-clone of the AUR mirror (~10 min; asks first)\n\
   -Syu           pacman -Syu + AUR upgrades (plan shown, one confirm up front)\n\
   -Ss <regex>    search repos + AUR by name/desc/provides\n\
   -Si <pkg>      show package info (repos + AUR; repo wins a shared name)\n\

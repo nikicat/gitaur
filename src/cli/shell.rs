@@ -1219,7 +1219,10 @@ const TOPICS: &[(Verb, &str)] = &[
         Verb::Refresh,
         "refresh\n  \
          Re-fetch the AUR mirror and reload the index — fresh data for\n  \
-         search / info / upgrade / completion. Leaves the cart untouched.",
+         search / info / upgrade / completion. Leaves the cart untouched.\n  \
+         If the AUR was never synced (you answered \"later\" at launch),\n  \
+         this runs the one-time ~2 GiB clone — typing it is the consent,\n  \
+         so there is no second question.",
     ),
     (
         Verb::System,
@@ -1228,7 +1231,8 @@ const TOPICS: &[(Verb, &str)] = &[
          category's disk usage (AUR mirror, package index, repo db snapshot,\n  \
          build worktrees, logs, …). `system prune` deletes the re-derivable\n  \
          caches after a y/N confirm — the next `refresh` / build recreates\n  \
-         them; build metrics and shell history are never touched.",
+         them (pruning the AUR mirror means the next sync re-asks before the\n  \
+         full re-clone); build metrics and shell history are never touched.",
     ),
     (
         Verb::Help,

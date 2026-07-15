@@ -22,6 +22,19 @@ cd aurox
 cargo install --path . --locked
 ```
 
+## First run
+
+aurox mirrors the whole AUR as one git repo: a one-time **~2 GiB download
+(~2.5 GiB on disk, ~10 min)**; afterwards refreshes are small incremental
+fetches. Nothing downloads without a yes — the shell asks a three-way question
+at first launch (**sync now** / **no, pacman-only from now on** / **later,
+this session**), `aurox -Sy` announces the cost and confirms, and
+`aurox -S <aur-pkg>` without the mirror offers to set it up on the spot.
+
+Until the mirror exists — or permanently, with `aur = false` in config.toml —
+everything degrades to the official repos: search/info show repo results,
+upgrades are repo-only, and unknown install targets say how to enable the AUR.
+
 ## Usage
 
 `aurox` accepts pacman's flag syntax. Operations it doesn't own (`-Q`, `-R`, `-T`, `-D`, `-F`, `-U`, and `-Su` system upgrades) are forwarded to `pacman` unchanged, so you can use it as a drop-in replacement.
@@ -30,11 +43,11 @@ cargo install --path . --locked
 | --------------------- | ------------------------------------------------------------- |
 | `aurox`                | Open the interactive shell (search · stage · `upgrade` · `apply`) |
 | `aurox -S <pkg>...`    | Install AUR packages (recursive deps, batched sudo)           |
-| `aurox -Sy`            | Incremental fetch of the AUR mirror                           |
-| `aurox -Syy`           | Force a full re-clone (~8–9 min)                              |
+| `aurox -Sy`            | Incremental fetch of the AUR mirror (first run: asks, then clones) |
+| `aurox -Syy`           | Force a full re-clone (~10 min; asks first)                  |
 | `aurox -Syu`           | Forwarded to `pacman -Syu` — AUR upgrades live in the shell's `upgrade` |
-| `aurox -Ss <regex>`    | Search the AUR by name / desc / provides                      |
-| `aurox -Si <pkg>`      | Show package info                                             |
+| `aurox -Ss <regex>`    | Search repos + AUR by name / desc / provides                  |
+| `aurox -Si <pkg>`      | Show package info (repos + AUR; repo wins a shared name)      |
 | `aurox -Sc` / `-Scc`   | Remove built worktrees + pass `-Sc`/`-Scc` through to `pacman` |
 | `aurox -Rns <pkg>`     | Forwarded to `pacman` unchanged                               |
 
@@ -57,6 +70,7 @@ RUST_LOG=aurox=debug aurox -Sy
 Optional `~/.config/aurox/config.toml`. All fields default to sensible values:
 
 ```toml
+aur                  = true        # false = pacman-only mode: no mirror, no prompts
 mirror_url           = "https://github.com/archlinux/aur.git"
 build_dir            = "~/.local/state/aurox/pkgs"
 index_threads        = 4
@@ -73,6 +87,11 @@ aur_approval         = "review"    # or "auto" — auto stages AUR pkgs pre-appr
 The shell's approval gate: `review` (default) makes every staged AUR package
 need `review`/`approve` before `apply` runs it; `auto` stages them pre-approved.
 If unset, `review_default = "skip"` still auto-approves (legacy behavior).
+
+`aur = false` opts out of the AUR half entirely (the shell's first-launch
+question writes it for you if you answer "no"): search, info, install, and
+upgrades run against the official repos only, and nothing ever asks about the
+mirror. Delete the line and run `refresh` (or `aurox -Sy`) to opt back in.
 
 ## Layout on disk
 
