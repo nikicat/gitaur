@@ -125,7 +125,9 @@ fn gather(cfg: &Config, terms: &[SearchTerm]) -> Result<(Vec<RepoHit>, AurIndexD
 }
 
 /// Merge repo and AUR hits into one relevance-ranked list (unlike yay's fixed
-/// "repos on top", [`rank_rows`] interleaves both sources by match quality).
+/// "repos on top", [`rank_rows`] interleaves both sources by match quality),
+/// ordered best-**last** so the strongest hit lands nearest the prompt — the
+/// same bottom-up convention as the shell's numbered list.
 fn merged_rows<'a>(
     repo_hits: Vec<RepoHit>,
     aur_hits: Vec<&'a IndexEntry>,
@@ -137,6 +139,7 @@ fn merged_rows<'a>(
         .chain(aur_hits.into_iter().map(Row::Aur))
         .collect();
     rank_rows(&mut rows, regexes);
+    rows.reverse();
     info!(rows = rows.len(), "search results");
     rows
 }
@@ -194,8 +197,8 @@ fn write_search_result<W: std::io::Write>(
 ///
 /// `terms` are the freeform regex fragments the user typed, combined as an AND
 /// filter (same semantics as `-Ss`). Sync-repo and AUR matches are merged into
-/// one relevance-ranked list ([`rank_rows`]) and printed best-first — so
-/// `aurox foo | head` surfaces the strongest hits. Nothing is installed:
+/// one relevance-ranked list ([`merged_rows`]) and printed best-last, so the
+/// strongest hit ends nearest the prompt. Nothing is installed:
 /// auto-installing every regex hit is too dangerous without a human in the loop.
 #[instrument(skip(cfg))]
 pub fn cmd_search_install(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
