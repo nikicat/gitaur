@@ -2,14 +2,14 @@
 # The shell upgrade table's already-built column (ports the retired
 # 06_loop_built_tag now that the picker is gone).
 #
-# When an AUR upgrade candidate's *new*-version artifact already sits in its
-# build worktree — the leftover of a build that completed earlier but wasn't
-# installed — the staged row must carry the `built` tag: a `pacman -U` would
-# reuse the cached `.pkg.tar.zst` instead of rebuilding. The detection is a
-# read-only mirror of `prepare_one`'s idempotency check, so this proves the
-# real worktree path + artifact filename + index version line up end to end.
-# The shell is interactive, so the assertion lives in the shell_built_tag_e2e
-# PTY driver; here we stage the state.
+# When an AUR upgrade candidate's *new*-version `.pkg.tar.zst` already sits
+# in its build directory — the leftover of a build that finished earlier but
+# was never installed — the staged row must carry the `built` tag: installing
+# would reuse that file instead of rebuilding. The tag comes from the same
+# already-built check the build pipeline uses, so the tag being right proves
+# the directory path, the artifact filename, and the indexed version all
+# agree. The shell is interactive, so the assertion lives in the
+# shell_built_tag_e2e PTY driver; this script only sets up the state.
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 

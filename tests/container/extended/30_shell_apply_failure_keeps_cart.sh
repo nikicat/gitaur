@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # A failing build inside a shell `apply` must not lose the transaction: the
-# same-stratum survivor (test-trivial) still builds + installs (smoke/28's
-# isolation contract, surfaced in the shell), the fold drops the landed row
-# and keeps ONLY the offender (test-fail-build) staged, and the shell is back
-# at a live prompt for `drop` + retry — never a restart. Driven by the
-# shell_apply_failure_e2e PTY driver; the end state lands here.
+# other package in the batch (test-trivial) still builds + installs
+# (smoke/28's contract, surfaced in the shell), the cart then drops the row
+# that installed and keeps ONLY the failed one (test-fail-build) staged, and
+# the shell is back at a live prompt for `drop` + retry — never a restart.
+# Driven by the shell_apply_failure_e2e PTY driver; the end state is
+# asserted here.
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 

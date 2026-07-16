@@ -2,12 +2,13 @@
 //! `tests/container/extended/29_shell_upgrade_split_sibling.sh` (ports the
 //! retired smoke/44, the google-cloud-cli regression, onto the shell path).
 //!
-//! test-syu-split-foreign-cli is installed foreign at 1.0; its pkgbase
-//! test-syu-split-foreign (2.0) also packages -daemon and -desktop. The shell
-//! `upgrade` seeds the row named by the foreign pkgname, whose hint must ride
-//! through resolve → `Plan.pkgname_selections` → the install filter so `apply`
-//! lands ONLY the picked sibling — the `.sh` asserts -daemon/-desktop stayed
-//! out of localdb (the original bug installed every sibling makepkg produced).
+//! test-syu-split-foreign-cli is installed at 1.0 with no repo or AUR entry
+//! of its own; its AUR pkgbase test-syu-split-foreign (2.0) builds three
+//! packages from one PKGBUILD: -cli, -daemon, -desktop. The user only has
+//! (and only asked to upgrade) -cli, so even though makepkg produces all
+//! three, `apply` must install just that one — the `.sh` asserts -daemon and
+//! -desktop stayed out of localdb. The original bug installed every package
+//! makepkg produced.
 
 use pty_harness::{Pty, has};
 

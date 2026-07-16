@@ -302,14 +302,15 @@ impl ShellEnv for RealEnv<'_> {
         let pkgbase = entry.pkgbase.clone();
         let new_ver = entry.version();
 
-        // Materialise the worktree + resolve the installed counterpart exactly
-        // like `build::prepare_one`, so the diff base and review header match
-        // what `apply` would show — including the hint: a target that names a
-        // pkgname/provides rather than the pkgbase (an upgrade row's foreign
-        // pkgname, a hinted `add`) is the user's installed-package intent, the
-        // same rule `expand_pkgbase_targets` applies when recording hints for
-        // apply. Unhinted, the walk lands on the first-declared installed
-        // provides — the wrong label for the multi-provides shape.
+        // Materialise the worktree + resolve the installed counterpart (the
+        // installed package this build will replace) exactly like
+        // `build::prepare_one`, so the diff base and review header match what
+        // `apply` would show. The hint matters: when the target names a
+        // pkgname or provides entry rather than the pkgbase, that name says
+        // WHICH installed package the user means. Without it the lookup just
+        // takes the first installed name from the provides list, and the
+        // header labels the wrong package. Same rule `expand_pkgbase_targets`
+        // applies when recording hints for apply.
         let mirror = MirrorRepo::open(&paths::aur_repo_path())?;
         let wt = mirror::worktree::add_or_reset(&mirror, &pkgbase, &paths::pkg_worktree(&pkgbase))?;
         let alpm = alpm_db::open()?;
@@ -720,11 +721,12 @@ impl RealEnv<'_> {
 }
 
 /// Fold a build [`RunReport`](build::RunReport) into the cart-apply outcome. A
-/// The counterpart hint for a standalone shell `review`: a target that names
-/// a pkgname/provides rather than the pkgbase itself carries the user's
-/// installed-package intent, so it hints the counterpart walk — the same rule
-/// `expand_pkgbase_targets` applies when recording hints for `apply`. A
-/// target naming the pkgbase is unhinted (nothing more specific was said).
+/// Which installed package does the user mean by `review <target>`? When the
+/// target names a pkgname or a provides entry (anything other than the
+/// pkgbase itself), that name is the answer — return it as the hint for the
+/// installed-counterpart lookup, the same rule `expand_pkgbase_targets`
+/// applies when recording hints for `apply`. A target naming the pkgbase
+/// says nothing more specific, so no hint.
 fn review_hint(pkgbase: &PkgBase, target: &PkgTarget) -> Option<PkgName> {
     let name = PkgName::from(target.as_str());
     (!pkgbase.matches_pkgname(&name)).then_some(name)
@@ -941,12 +943,11 @@ mod tests {
 
     use crate::cli::shell::testenv::up;
 
-    /// The shell `review` counterpart hint follows the apply-side rule: a
-    /// target naming a pkgname/provides (the multi-provides upgrade row's
-    /// foreign pkgname) hints the walk; one naming the pkgbase itself does
-    /// not. Regression: unhinted, `counterpart_with_hint` lands on the
-    /// first-declared installed provides — the dotnet-runtime wrong-label
-    /// bug, resurfacing in the shell's review header.
+    /// A `review` target that names a pkgname/provides becomes the hint —
+    /// it says which installed package the user means. One naming the
+    /// pkgbase itself yields none. Without the hint,
+    /// `counterpart_with_hint` takes the first installed name from the
+    /// provides list, and the review header labels the wrong package.
     #[test]
     fn review_hint_carries_foreign_name_not_pkgbase() {
         let pkgbase = PkgBase::from("test-syu-hint-new");

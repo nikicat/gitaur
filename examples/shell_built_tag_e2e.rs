@@ -2,13 +2,14 @@
 //! by `tests/container/extended/27_shell_upgrade_aur_built_tag.sh` (ports the
 //! retired `06_loop_built_tag` now that the picker is gone).
 //!
-//! The `.sh` stages an installed-but-outdated foreign AUR package whose
-//! *new*-version artifact already sits in the build worktree — the leftover of
-//! a build that completed earlier but wasn't installed. The shell's `upgrade`
-//! stages the candidate and its unified transaction table must flag the row
-//! `built` (the read-only mirror of `prepare_one`'s idempotency check), proving
-//! worktree path + artifact filename + index version line up end to end. The
-//! render is the whole assertion — no apply.
+//! The `.sh` sets up an installed-but-outdated AUR package whose *new*-version
+//! `.pkg.tar.zst` already sits in its build directory — the leftover of a
+//! build that finished earlier but was never installed. The shell's `upgrade`
+//! stages the candidate, and its table must mark the row `built`: installing
+//! would reuse that file instead of rebuilding. The tag comes from the same
+//! already-built check the build pipeline uses, so the tag being right proves
+//! the directory path, the artifact filename, and the indexed version all
+//! agree. The render is the whole assertion — nothing is applied.
 
 use pty_harness::{Pty, has};
 

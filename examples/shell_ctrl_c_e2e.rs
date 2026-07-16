@@ -4,10 +4,11 @@
 //! test-sleep-build's `build()` prints a sentinel then sleeps. Once the
 //! sentinel is on screen, ^C goes down the PTY — the real keystroke, so the
 //! kernel delivers SIGINT to aurox's foreground process group. aurox must
-//! catch it (extended/02 pins the forward-to-makepkg mechanics on the `-S`
-//! path), mark the build interrupted, fold the empty report — cart kept for
-//! retry — and land back at a live prompt; `quit` then exits 0. The `.sh`
-//! asserts nothing installed and no orphaned sleep survived.
+//! catch it (extended/02 pins the -S path's half: the signal is forwarded on
+//! to makepkg's process group), report the build as interrupted, keep the
+//! cart staged for a retry, and land back at a live prompt; `quit` then
+//! exits 0. The `.sh` asserts nothing installed and no orphaned sleep
+//! process survived.
 
 use pty_harness::Pty;
 

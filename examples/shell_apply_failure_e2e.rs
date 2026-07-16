@@ -1,12 +1,13 @@
 //! End-to-end driver for the shell's apply-failure resume, used by
 //! `tests/container/extended/30_shell_apply_failure_keeps_cart.sh`.
 //!
-//! Two same-stratum AUR packages: test-trivial builds, test-fail-build's
-//! `build()` returns 1. `apply` must isolate the failure (smoke/28's contract,
-//! surfaced in the shell): the survivor still installs behind the sudo gate,
-//! the fold drops the landed row and keeps ONLY the offender staged, and the
-//! shell is back at a live prompt — `drop` the offender and the cart is empty,
-//! no restart. The `.sh` asserts the end state in localdb.
+//! Two independent AUR packages built in the same batch: test-trivial builds
+//! fine, test-fail-build's `build()` returns 1. `apply` must contain the
+//! failure (smoke/28's contract, surfaced in the shell): the survivor still
+//! installs behind the sudo gate, then the cart drops the row that installed
+//! and keeps ONLY the failed one staged, with the shell back at a live
+//! prompt — `drop` the failed row and the cart is empty, no restart needed.
+//! The `.sh` asserts the end state in localdb.
 
 use pty_harness::Pty;
 
@@ -34,7 +35,7 @@ fn main() {
     });
     pty.expect("sudo gate for the survivor", |s| s.contains("Continue?"));
     pty.send(b"\r");
-    pty.expect("partial-failure fold", |s| {
+    pty.expect("partial-failure summary", |s| {
         s.contains("apply partly failed") && s.contains("1 installed (dropped)")
     });
 

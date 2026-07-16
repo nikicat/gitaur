@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Shell upgrade of a foreign split sibling installs ONLY the picked sibling —
-# the google-cloud-cli regression, ported from the retired smoke/44 (which
-# drove the removed `-Syu` picker path).
+# Shell upgrade of one package out of a split PKGBUILD installs ONLY that
+# package — the google-cloud-cli regression, ported from the retired
+# smoke/44 (which drove the removed `-Syu` picker path).
 #
-# test-syu-split-foreign-cli is installed foreign at 1.0; its pkgbase
-# test-syu-split-foreign (2.0) also packages -daemon and -desktop. The shell
-# `upgrade` seeds the row named by the foreign pkgname; that hint must ride
-# through resolve → Plan.pkgname_selections → the install filter, or `apply`
-# would land every sibling makepkg produced (all three used to end up in
-# localdb). Driven by the shell_split_sibling_e2e PTY driver.
+# test-syu-split-foreign-cli is installed at 1.0 with no repo or AUR entry of
+# its own; its AUR pkgbase test-syu-split-foreign (2.0) builds three packages
+# from one PKGBUILD: -cli, -daemon, -desktop. The user only has -cli, so even
+# though makepkg produces all three, `apply` must install just that one — the
+# broken path installed every package makepkg produced. Driven by the
+# shell_split_sibling_e2e PTY driver.
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
