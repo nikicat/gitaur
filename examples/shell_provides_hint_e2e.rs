@@ -1,20 +1,24 @@
-//! End-to-end driver for the shell upgrade's provides-hint plumbing, used by
+//! End-to-end driver for a shell upgrade of a package the user knows by a
+//! different name, used by
 //! `tests/container/extended/28_shell_upgrade_provides_hint.sh` (ports the
 //! retired smoke/33, which drove the removed `-Syu` picker path).
 //!
-//! The dotnet-runtime shape: two foreign virtuals installed, both declared as
-//! `provides=` by AUR pkgbase test-syu-hint-new (newer declared first) —
-//!   * test-syu-hint-newer at 9.0, vercmp-newer than the pkgbase's 2.0, so it
-//!     must NOT become an upgrade candidate;
-//!   * test-syu-hint-older at 1.0, outdated, so `upgrade` seeds it — named by
-//!     the *foreign pkgname*, which is the hint.
+//! Setup — the dotnet-runtime story: two installed packages exist in no repo
+//! and have no AUR entry of their own ("foreign"). Their only upgrade path is
+//! AUR package test-syu-hint-new, which lists both in `provides=`, the newer
+//! one first:
+//!   * test-syu-hint-newer, installed at 9.0 — newer than the AUR package's
+//!     2.0, so no upgrade may be offered for it;
+//!   * test-syu-hint-older, installed at 1.0 — outdated, so `upgrade` stages
+//!     it, listed under that name (the name the user knows).
 //!
-//! The observable hint assertion is the review header: hinted, it labels the
-//! transition `[provides test-syu-hint-older]` (the row the user acted on);
-//! unhinted, the walk lands on the first-declared installed provides and the
-//! header shows `[provides test-syu-hint-newer]` — the original wrong-label
-//! bug. Then the review approves, `apply` builds + installs, and the `.sh`
-//! asserts the pkgbase landed while the vercmp-newer foreign stayed untouched.
+//! `review` must then describe the upgrade in the same terms: its header
+//! reads `[provides test-syu-hint-older]` — "this build stands in for the
+//! test-syu-hint-older you have installed". The bug this guards against: the
+//! lookup ignores which row the user acted on and just takes the first
+//! installed name from the provides list, labelling the upgrade
+//! `[provides test-syu-hint-newer]`. After approving, `apply` builds and
+//! installs; the `.sh` checks the resulting system state.
 
 use pty_harness::{Pty, has};
 
@@ -22,10 +26,11 @@ fn main() {
     let mut pty = Pty::spawn_aurox();
     pty.expect("shell banner", |s| s.contains("aurox shell"));
 
-    // Glob-seed both hint fixtures: only the outdated one is a candidate, so
-    // exactly one row stages. The screen holds just the banner + this table,
-    // so a bare name-absence check is safe here (later screens carry the
-    // PKGBUILD text, whose provides array names -newer legitimately).
+    // `upgrade` with a glob covering both fixtures: only the outdated one is
+    // an upgrade candidate, so exactly one row is staged. At this point the
+    // screen holds just the banner + this table, so checking that "-newer"
+    // appears nowhere is safe (later screens print the PKGBUILD, whose
+    // provides= array legitimately names it).
     pty.send(b"upgrade test-syu-hint-*\r");
     pty.expect("older staged by its foreign pkgname", |s| {
         has(s, "test-syu-hint-older 1.0-1 → 2.0-1")
@@ -33,19 +38,19 @@ fn main() {
     let screen = pty.screen();
     assert!(
         !screen.contains("test-syu-hint-newer"),
-        "vercmp-newer foreign must not seed an upgrade row\n--- screen ---\n{screen}\n--- end ---"
+        "no upgrade may be offered for the already-newer package\n--- screen ---\n{screen}\n--- end ---"
     );
 
-    // The review header must carry the hinted counterpart.
+    // The review header must name the package the user acted on.
     pty.send(b"review test-syu-hint-older\r");
-    pty.expect("hinted provides annotation", |s| {
+    pty.expect("header names the user's package", |s| {
         has(s, "[provides test-syu-hint-older]")
     });
     let screen = pty.screen();
     assert!(
         !has(&screen, "[provides test-syu-hint-newer]"),
-        "review header shows the first-declared provides — the hint didn't reach \
-         the counterpart walk\n--- screen ---\n{screen}\n--- end ---"
+        "review header names the wrong installed package (the first one in \
+         the provides list, not the one the user acted on)\n--- screen ---\n{screen}\n--- end ---"
     );
     pty.expect("review prompt", |s| s.contains("(y)es"));
     pty.send(b"y\r");
@@ -56,13 +61,19 @@ fn main() {
     pty.send(b"apply\r");
     pty.expect("sudo gate", |s| s.contains("Continue?"));
     pty.send(b"\r");
-    // The built pkgname (the pkgbase) differs from the user's target spec
-    // (the foreign pkgname), so the install-reason pass doesn't recognise it
-    // as a direct target and demotes it via a second elevated
-    // `pacman -D --asdeps` — its gate needs an answer too.
-    pty.expect("asdeps reason gate", |s| s.contains("pacman -D --asdeps"));
-    pty.send(b"\r");
+    // Expect exactly one sudo prompt. The regression would add a second one:
+    // the built name (test-syu-hint-new) doesn't match the typed name
+    // (test-syu-hint-older), and without the hint check the package gets
+    // mis-marked "installed as a dependency" via an elevated
+    // `pacman -D --asdeps` — whose prompt would stall this expect.
     pty.expect("apply finished", |s| s.contains("done"));
+    let screen = pty.screen();
+    assert!(
+        !screen.contains("pacman -D --asdeps"),
+        "the package the user asked for (under its installed counterpart's \
+         name) must stay explicitly installed, not be marked as a \
+         dependency\n--- screen ---\n{screen}\n--- end ---"
+    );
 
     pty.send(b"quit\r");
     pty.finish_clean();

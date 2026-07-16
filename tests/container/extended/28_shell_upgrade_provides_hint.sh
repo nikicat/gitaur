@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
-# The shell upgrade's provides-hint plumbing — the dotnet-runtime shape, ported
-# from the retired smoke/33 (which drove the removed `-Syu` picker path):
+# Shell upgrade of a package the user knows by a different name — the
+# dotnet-runtime story, ported from the retired smoke/33 (which drove the
+# removed `-Syu` picker path).
 #
-#   * test-syu-hint-newer installed foreign at 9.0 (vercmp-newer than the AUR
-#     pkgbase's 2.0) — must NOT seed an upgrade row;
-#   * test-syu-hint-older installed foreign at 1.0 — `upgrade` seeds it, named
-#     by the foreign pkgname (the hint);
-#   * pkgbase test-syu-hint-new declares provides=(newer older), newer FIRST.
+# Two installed packages exist in no repo and have no AUR entry of their own
+# ("foreign"). Their only upgrade path is AUR package test-syu-hint-new,
+# which lists both in provides=, the newer one first:
+#   * test-syu-hint-newer at 9.0 — newer than the AUR package's 2.0, so no
+#     upgrade may be offered for it;
+#   * test-syu-hint-older at 1.0 — outdated, so `upgrade` stages it under
+#     that name.
 #
-# The hint must reach the counterpart walk: the shell_provides_hint_e2e driver
-# asserts the review header reads `[provides test-syu-hint-older]` — unhinted,
-# the walk picks the first-declared installed provides (-newer), the original
-# wrong-label bug. Then review-approve → apply, and the end state lands here.
+# The shell_provides_hint_e2e driver asserts the review header names the
+# package the user acted on (`[provides test-syu-hint-older]`); the broken
+# lookup ignored that and took the first installed name from the provides
+# list (-newer). After review-approve → apply, the system state is checked
+# here.
 source /work/tests/container/lib.sh
 bootstrap; reset_state
 
@@ -33,21 +37,26 @@ if ! AUROX="$AUROX" "$driver" >"$out" 2>&1; then
 fi
 grep -qF 'SHELL_PROVIDES_HINT_E2E_OK' "$out" || { echo "driver did not report success" >&2; cat "$out" >&2; exit 1; }
 
-# The pkgbase build landed…
+# The AUR package landed and is marked "Explicitly installed". The user asked
+# for it (under the name of the installed package it replaces); marking it
+# "installed as a dependency" instead would let a later orphan cleanup
+# (pacman -Rns $(pacman -Qtdq)) remove it.
 assert_pkg_installed test-syu-hint-new
+assert_pkg_explicit  test-syu-hint-new
 ver=$(pacman -Q test-syu-hint-new | awk '{print $2}')
 [[ "$ver" == "2.0-1" ]] || { echo "expected test-syu-hint-new at 2.0-1, got $ver" >&2; exit 1; }
 
-# …and the vercmp-newer foreign was left alone.
+# …and the already-newer package was left alone.
 ver=$(pacman -Q test-syu-hint-newer | awk '{print $2}')
 [[ "$ver" == "9.0-1" ]] || { echo "test-syu-hint-newer must stay at 9.0-1, got $ver" >&2; exit 1; }
 
-# The deep plumbing signal: the hint diverged from the unhinted walk (older
-# vs first-declared newer), and the divergence warning is in the session's
-# execution log (the file layer records debug+ regardless of console filter).
+# Extra internal signal: when the user's chosen name changes the outcome of
+# the installed-counterpart lookup, aurox logs a warning about it. That
+# warning must be in the session's execution log (the log file records
+# debug+ even when console logging is off).
 log=$(ls -t "$STATE_DIR"/logs/aurox-*.log 2>/dev/null | head -1)
 [[ -n "$log" ]] && grep -q 'counterpart hint diverged from unhinted lookup' "$log" || {
-    echo "log missing the hint-divergence warning — the hint didn't reach the walk" >&2
+    echo "log missing the hint-divergence warning — the user's name never reached the lookup" >&2
     [[ -n "$log" ]] && { echo "---- $log ----" >&2; tail -50 "$log" >&2; }
     exit 1
 }

@@ -420,6 +420,7 @@ impl InstallCtx<'_> {
         let mirror = MirrorRepo::open(&paths::aur_repo_path())?;
         let mut run = PipelineRun {
             direct: &plan.direct_targets,
+            hints: &plan.counterpart_hints,
             asdeps: opts.asdeps,
             transitive_marks: Vec::new(),
             report: RunReport::default(),
@@ -713,11 +714,48 @@ struct PipelineRun<'a> {
     /// The user-named targets — a built pkgname matching one of these stays
     /// Explicit (`PkgTargetSetExt::contains_pkgname` is the probe).
     direct: &'a HashSet<PkgTarget>,
+    /// `Plan::counterpart_hints`: pkgbase → the name of the installed
+    /// package it upgrades/replaces. Lets [`built_pkg_is_direct`] recognise
+    /// a package the user asked for under its old (installed) name.
+    hints: &'a HashMap<PkgBase, PkgName>,
     /// `--asdeps`: every built pkg installs as a dep, nothing stays Explicit.
     asdeps: bool,
     /// Pkgnames to flip to `--asdeps` once the whole run lands.
     transitive_marks: Vec<PkgName>,
     report: RunReport,
+}
+
+/// Decide the pacman install reason for one built package: `true` keeps it
+/// "explicitly installed", `false` marks it "installed as a dependency"
+/// (which later orphan cleanups like `pacman -Rns $(pacman -Qtdq)` may
+/// remove).
+///
+/// A built package counts as explicit in two cases:
+///
+/// * its name is one of the command-line targets; or
+/// * the user typed the name of an installed package, and this build is
+///   that package's upgrade under a *different* name (a rename, or a
+///   `provides` match). Example: `-S dotnet-runtime-7.0` builds
+///   `dotnet-core-7.0-bin` — the typed name and the built name never
+///   match. The resolver records the pairing in `hints` (pkgbase → the
+///   installed name it replaces), so we also accept a built package whose
+///   pkgbase's hint is a command-line target. The user asked for this
+///   package; they just knew it by its old name.
+///
+/// Everything else is a dependency: packages the resolver pulled in, and
+/// split-package siblings the user didn't name. (Typing a bare pkgbase
+/// records no hint — see `record_target_hint` — so the second rule never
+/// fires for those siblings.)
+fn built_pkg_is_direct(
+    direct: &HashSet<PkgTarget>,
+    hints: &HashMap<PkgBase, PkgName>,
+    pkgbase: &PkgBase,
+    pkgname: &PkgName,
+) -> bool {
+    direct.contains_pkgname(pkgname)
+        || hints
+            .get(pkgbase)
+            .is_some_and(|hint| direct.contains_pkgname(hint))
 }
 
 impl PipelineRun<'_> {
@@ -788,10 +826,8 @@ impl PipelineRun<'_> {
                         f.display(),
                     ))
                 })?;
-                // `direct` is `HashSet<PkgTarget>`; `contains_pkgname` is the
-                // single Borrow<str> probe site (cross-domain string match
-                // between the user's typed targets and the built pkgname).
-                let is_direct = !asdeps_override && self.direct.contains_pkgname(&pkgname);
+                let is_direct = !asdeps_override
+                    && built_pkg_is_direct(self.direct, self.hints, &b.pkgbase, &pkgname);
                 if !is_direct {
                     pending_marks.push(pkgname);
                 }
@@ -1128,6 +1164,50 @@ mod tests {
     /// argument and return value.
     fn pb(s: &str) -> PkgBase {
         PkgBase::from(s)
+    }
+
+    /// Four cases for the install-reason decision: named on the command line
+    /// → explicit; built under a different name than the user typed but
+    /// linked to it by a hint → explicit; a hint the user never typed →
+    /// dependency; no hint at all → dependency.
+    #[test]
+    fn built_pkg_direct_follows_names_and_counterpart_hints() {
+        let direct: HashSet<PkgTarget> =
+            std::iter::once(PkgTarget::new("dotnet-runtime-7.0")).collect();
+        let mut hints: HashMap<PkgBase, PkgName> = HashMap::new();
+        hints.insert("dotnet-core-7.0-bin".into(), "dotnet-runtime-7.0".into());
+        hints.insert("other-base".into(), "never-typed".into());
+
+        // Built under a different name than the user typed, but the hint
+        // links them: explicit.
+        assert!(built_pkg_is_direct(
+            &direct,
+            &hints,
+            &pb("dotnet-core-7.0-bin"),
+            &"dotnet-core-7.0-bin".into(),
+        ));
+        // Name typed on the command line: explicit, no hint needed.
+        assert!(built_pkg_is_direct(
+            &direct,
+            &hints,
+            &pb("dotnet-runtime-7.0"),
+            &"dotnet-runtime-7.0".into(),
+        ));
+        // Has a hint, but the user never typed that name: a dependency…
+        assert!(!built_pkg_is_direct(
+            &direct,
+            &hints,
+            &pb("other-base"),
+            &"other-tool".into(),
+        ));
+        // …and with no hint at all (e.g. a split sibling of a target named
+        // by its pkgbase): also a dependency.
+        assert!(!built_pkg_is_direct(
+            &direct,
+            &hints,
+            &pb("split-base"),
+            &"split-daemon".into(),
+        ));
     }
 
     /// The unknown-target hint diagnoses the missing half correctly: no
