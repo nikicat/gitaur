@@ -2,7 +2,7 @@
 # When `pacman -U` fails on a conflict, the execution log must carry enough
 # detail to post-mortem the failure without re-running. The diagnostic chain
 # in invoke.rs lands two signals in $STATE_DIR/logs/aurox-*.log:
-#   1. libalpm pre-flight: a `preflight: conflict detected` WARN with
+#   1. libalpm pre-flight: a `preflight: conflict detected` debug event with
 #      structured pkg1=/pkg2= fields (we run trans_prepare ourselves so the
 #      offending pair is queryable in the log, not buried in pacman's prompt).
 #   2. Captured pacman stdout+stderr on failure: ANSI-stripped, includes the

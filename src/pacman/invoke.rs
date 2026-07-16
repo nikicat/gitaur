@@ -104,6 +104,10 @@ pub fn exec_pacman(cfg: &Config, argv: &[String]) -> Result<u8> {
         ("pacman", argv.to_vec())
     };
     if escalate {
+        // A remove that libalpm already knows can't prepare gets refused
+        // here, before the user answers "Continue?" and types a password
+        // for a transaction pacman is certain to reject.
+        preflight_remove(argv)?;
         confirm_escalation(program, &spawn_args)?;
     }
     debug!(program, args = ?spawn_args, "spawning pacman");
@@ -267,6 +271,54 @@ fn confirm_escalation(program: &str, spawn_args: &[String]) -> Result<()> {
         return Err(Error::UserAbort);
     }
     Ok(())
+}
+
+/// Gate a `-R…` invocation on [`preflight::remove`], *before* the escalation
+/// prompt: a remove that fails to prepare is deterministically doomed (same
+/// localdb, and pacman has no override prompt for dependency breakage — it
+/// just exits 1 after the sudo password), so asking "Continue?" first would
+/// only collect a consent and a password for a guaranteed failure.
+///
+/// On a flagged removal this prints what pacman would have printed —
+/// `:: removing X breaks dependency 'd' required by Y` per problem — and
+/// refuses with the prepare-failure summary; unresolvable targets refuse as
+/// [`Error::UnknownTargets`]. The `-R` modifiers travel into the simulation
+/// via [`preflight::RemoveRequest`], so pacman's own escape hatches
+/// (`-Rdd` skips dep checks, `-Rc` cascades the dependents) preflight clean
+/// and proceed. Everything else is best-effort like [`preflight_pacman`]:
+/// an unparseable argv or an alpm failure skips the gate and leaves pacman
+/// the authority.
+fn preflight_remove(argv: &[String]) -> Result<()> {
+    let Some(req) = preflight::RemoveRequest::from_argv(argv) else {
+        return Ok(());
+    };
+    let issues = match preflight::remove(&req) {
+        Ok(issues) => issues,
+        Err(e) => {
+            debug!(error = %e, "remove preflight skipped (could not run prepare)");
+            return Ok(());
+        }
+    };
+    if issues.is_empty() {
+        return Ok(());
+    }
+    preflight::log_issues(&issues);
+    let missing: Vec<&str> = issues
+        .iter()
+        .filter_map(|i| match i {
+            preflight::Issue::TargetNotFound { target } => Some(target.as_str()),
+            _ => None,
+        })
+        .collect();
+    if !missing.is_empty() {
+        return Err(Error::UnknownTargets(missing.join(", ")));
+    }
+    for issue in &issues {
+        ui::info(&issue.to_string());
+    }
+    Err(Error::other(
+        "failed to prepare transaction (could not satisfy dependencies); pacman was not run",
+    ))
 }
 
 /// Run the read-only [`preflight`] matching the imminent pacman invocation —
