@@ -1,73 +1,13 @@
 # Extended-tier test suite — rare combinations, edge cases, regression bait.
-# Each entry is a planned test file. Add the .sh, follow the smoke-tier
+#
+# Planned-test backlog. Empty since 2026-07-16: the original backlog is fully
+# landed (see the numbered tests in this directory — each header says what it
+# pins and, for ports, which retired test it replaces), covered elsewhere, or
+# retired; `git log -- tests/container/extended/.scope` has the disposition
+# notes.
+#
+# To plan a test: add a `- name.sh (what it pins)` line under a section
+# header here, then land it as an `NN_name.sh` following the smoke-tier
 # pattern (source lib.sh; bootstrap; reset_state; aurox …; assert_*).
-#
-# PKGBUILD-driven cases:
-#   - provides_virtual_resolves.sh       (`-S myvirt` → test-provides-virt)
-#   - install_hook_runs.sh               (post_install scriptlet)
-#   - cycle_in_aur_deps_errors.sh        (test-cycle-a ↔ test-cycle-b)
-#   - split_pkg_with_intra_dep.sh        (transitive within split)
-#   - split_pkg_partial_install.sh       (`-S test-split-core` alone)
-#   (graduated to smoke: epoch_dominates_version → smoke/40,
-#    vcs_pkg_skipped_without_devel → smoke/41,
-#    vcs_pkg_picked_up_with_devel → smoke/42)
-#
-# Resolver / planner:
-#   - dep_constraint_versioned.sh        (`depends=('foo>=2')`)
-#   - dep_constraint_excluded.sh         (`depends=('foo<2')`)
-#   - duplicate_targets_dedup.sh
-#   - target_with_version_constraint.sh  (`aurox -S foo>=1`)
-#   - asdeps_overrides_direct.sh         (`-S --asdeps` even for direct)
-#
-# State / idempotency:
-#   - rebuild_after_artifact_deleted.sh  (cached .pkg.tar.zst removed → rebuild)
-#   - declined_install_keeps_artifacts.sh
-#   - sc_clears_worktrees.sh             (-Sc)
-#   (graduated to smoke: rebuild_cached_skips → smoke/43)
-#
-# Refresh:
-#   - sy_incremental_fetch.sh            (delta only)
-#   - syy_force_reclone.sh
-#   - mirror_unreachable.sh              (move /srv/mock-aur away mid-test)
-#
-# UX / flags:
-#   - noconfirm_skips_prompts.sh
-#   - color_never_strips_ansi.sh
-#   - color_always_keeps_ansi.sh
-#   - help_for_unknown_op.sh
-#
-# Pacman pass-through:
-#   - rns_removes_with_deps.sh
-#   - syu_calls_pacman_first.sh
-#   - u_install_local_file.sh
-#
-# Concurrency:
-#   - parallel_invocations_serialized.sh (state lock)
-#
-# Failure modes:
-#   - makepkg_fails_stops_pipeline.sh    (PKGBUILD with `exit 1` in build())
-#   - missing_dep_errors_with_hint.sh
-#   - corrupt_index_recoverable.sh       (truncate index.bin, expect -Sy fix)
-#
-# Shell (REPL):
-#   (landed: 07_shell_cart_apply.sh — add → gate → approve → apply, via the
-#    shell_cart_e2e PTY driver)
-#   (landed: 04_shell_upgrade_repo.sh — upgrade → preview+size-guard → apply, via
-#    the shell_upgrade_e2e PTY driver; folds in the retired 05 size guard)
-#   (landed: 08_shell_search_seed.sh — bare-term launch `aurox <term>` opens the
-#    shell seeded with that search; add-by-number stages it, via the
-#    shell_search_seed_e2e PTY driver)
-#   (landed: 10_shell_info_repo.sh — `info` describes a sync-repo name from the
-#    sync DBs (repo wins over a same-named AUR entry) and an AUR-only name from
-#    the index, via the shell_info_e2e PTY driver)
-#   - shell_upgrade_aur_built_tag.sh     (AUR upgrade with a pre-built artifact →
-#       the apply preview's change-set row carries `built`; ports the retired
-#       06_loop_built_tag now that the picker is gone)
-#   - shell_upgrade_provides_hint.sh     (foreign virtual @ provides → shell
-#       `upgrade` seeds it with the foreign-pkgname hint; ports retired smoke 33,
-#       which drove the removed `-Syu` flag upgrade path)
-#   - shell_upgrade_split_picked_sibling.sh (foreign split sibling → `upgrade` +
-#       `apply` installs only the picked sibling; ports retired smoke 44)
-#   - shell_apply_failure_keeps_cart.sh  (failing build → cart kept → drop → apply)
-#   - shell_ctrl_c_bails_to_prompt.sh    (SIGINT mid-build returns to the prompt)
-#   - shell_remove_stages_uninstall.sh   (`remove` → pacman -R at apply)
+# Interactive shell flows need a PTY driver example (examples/shell_*_e2e.rs,
+# via pty_harness) that the .sh invokes — see 27–32 for the shape.

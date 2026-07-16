@@ -33,6 +33,12 @@ FOREIGN_PKGS="${FOREIGN_PKGS:-/srv/foreign-pkgs}"
 # update_refs / packed-refs code paths run unchanged.
 init_mock_aur() {
     git init --bare --quiet "$MOCK_AUR"
+    # A dangling HEAD (git's bare-init default is refs/heads/master; we seed
+    # `main`) breaks gix's update-refs pass on the first incremental fetch
+    # that actually carries updates (extended/18). The real archlinux/aur
+    # monorepo never dangles — GitHub always resolves a repo's default
+    # branch — so point HEAD at the seed branch to stay faithful.
+    git --git-dir="$MOCK_AUR" symbolic-ref HEAD refs/heads/main
     local seed
     seed="$(mktemp -d)"
     pushd "$seed" >/dev/null

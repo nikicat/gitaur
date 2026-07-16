@@ -302,14 +302,21 @@ impl ShellEnv for RealEnv<'_> {
         let pkgbase = entry.pkgbase.clone();
         let new_ver = entry.version();
 
-        // Materialise the worktree + resolve the installed counterpart exactly
-        // like `build::prepare_one`, so the diff base and review header match
-        // what `apply` would show. Fresh `add` targets are unhinted.
+        // Materialise the worktree + resolve the installed counterpart (the
+        // installed package this build will replace) exactly like
+        // `build::prepare_one`, so the diff base and review header match what
+        // `apply` would show. The hint matters: when the target names a
+        // pkgname or provides entry rather than the pkgbase, that name says
+        // WHICH installed package the user means. Without it the lookup just
+        // takes the first installed name from the provides list, and the
+        // header labels the wrong package. Same rule `expand_pkgbase_targets`
+        // applies when recording hints for apply.
         let mirror = MirrorRepo::open(&paths::aur_repo_path())?;
         let wt = mirror::worktree::add_or_reset(&mirror, &pkgbase, &paths::pkg_worktree(&pkgbase))?;
         let alpm = alpm_db::open()?;
         let pac = PacmanIndex::build(&alpm);
-        let counterpart = pac.counterpart_with_hint(entry, None);
+        let hint = review_hint(&pkgbase, target);
+        let counterpart = pac.counterpart_with_hint(entry, hint.as_ref());
 
         let request = review::ReviewRequest {
             mirror: &mirror,
@@ -714,6 +721,17 @@ impl RealEnv<'_> {
 }
 
 /// Fold a build [`RunReport`](build::RunReport) into the cart-apply outcome. A
+/// Which installed package does the user mean by `review <target>`? When the
+/// target names a pkgname or a provides entry (anything other than the
+/// pkgbase itself), that name is the answer — return it as the hint for the
+/// installed-counterpart lookup, the same rule `expand_pkgbase_targets`
+/// applies when recording hints for `apply`. A target naming the pkgbase
+/// says nothing more specific, so no hint.
+fn review_hint(pkgbase: &PkgBase, target: &PkgTarget) -> Option<PkgName> {
+    let name = PkgName::from(target.as_str());
+    (!pkgbase.matches_pkgname(&name)).then_some(name)
+}
+
 /// fully-clean report succeeds (the caller clears the whole cart); any failure,
 /// dep-skip, or interrupt is a partial [`ApplyOutcome::Failed`] carrying the
 /// staged install rows that *did* land — so the cart drops them and keeps only
@@ -924,6 +942,23 @@ mod tests {
     use super::*;
 
     use crate::cli::shell::testenv::up;
+
+    /// A `review` target that names a pkgname/provides becomes the hint —
+    /// it says which installed package the user means. One naming the
+    /// pkgbase itself yields none. Without the hint,
+    /// `counterpart_with_hint` takes the first installed name from the
+    /// provides list, and the review header labels the wrong package.
+    #[test]
+    fn review_hint_carries_foreign_name_not_pkgbase() {
+        let pkgbase = PkgBase::from("test-syu-hint-new");
+        let foreign = PkgTarget::new("test-syu-hint-older");
+        assert_eq!(
+            review_hint(&pkgbase, &foreign),
+            Some(PkgName::from("test-syu-hint-older"))
+        );
+        let canonical = PkgTarget::new("test-syu-hint-new");
+        assert_eq!(review_hint(&pkgbase, &canonical), None);
+    }
 
     #[test]
     fn landed_install_specs_keeps_repo_and_installed_aur_only() {

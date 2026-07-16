@@ -1,0 +1,14 @@
+# AUR fixture whose dependency resolves nowhere — not a sync-DB name, not
+# an AUR pkgbase/pkgname, not a provides. Pins the resolver's missing-dep
+# error path end to end (extended/25).
+pkgname=test-missing-dep
+pkgver=1.0
+pkgrel=1
+pkgdesc='aurox test fixture: depends on a name that resolves nowhere'
+arch=('any')
+license=('MIT')
+depends=('no-such-package-xyz')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

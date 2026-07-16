@@ -19,6 +19,7 @@ shell's change-set preview already shows repo `download_size` from the syncdb
 (see `src/ui/change_set.rs`, UPDATE_LOOP phase 2). -->
 
 _Feature roadmaps live in the per-feature plan docs: shell phases 5–6 in
-`shell-ui.md`, GPG key import in `gpg-key-auto-import.md`, the `-Syu`
+`shell-ui.md`, GPG key import in `gpg-key-auto-import.md`, and the `-Syu`
 discoverability + `-Qf`/`-G` ideas in `../COMPARISON.md`'s "Open design
-questions", and the test backlog in `../../tests/container/extended/.scope`._
+questions". The container-test backlog (`../../tests/container/extended/.scope`)
+is fully landed as of 2026-07-16; new planned tests go back in that file._

@@ -160,6 +160,15 @@ impl Pty {
     }
 }
 
+/// Whitespace-insensitive containment: table columns pad to the widest staged
+/// row and long lines wrap on the 100-col vt100 grid, so a literal
+/// `1.0-1 → 2.0-1` match breaks whenever padding widths or the wrap position
+/// shift. Compacting both sides makes the match immune to both.
+pub fn has(screen: &str, needle: &str) -> bool {
+    let compact = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace()).collect() };
+    compact(screen).contains(&compact(needle))
+}
+
 fn pump_for(parser: &mut Parser, rx: &mpsc::Receiver<Vec<u8>>, dur: Duration) {
     let deadline = Instant::now() + dur;
     loop {

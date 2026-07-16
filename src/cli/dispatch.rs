@@ -54,7 +54,7 @@ pub fn dispatch(config: &ConfigHandle, cli: &Cli) -> Result<u8> {
             build::DevelPolicy::from_enabled(cli.devel || cfg.devel || f.has_long("devel")),
         ),
         Some(other) => Err(Error::other(format!(
-            "unsupported aurox op `-{other}` (pacman pass-through goes via the pre-scan, this dispatch is `-S` / `-Qu` only)"
+            "unsupported aurox op `-{other}`; see `aurox --help` for supported operations"
         ))),
         // yay parity: `aurox <term>...` with no operation letter is a fuzzy
         // search across the sync repos + AUR index. Interactively this launches
