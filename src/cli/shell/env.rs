@@ -304,12 +304,18 @@ impl ShellEnv for RealEnv<'_> {
 
         // Materialise the worktree + resolve the installed counterpart exactly
         // like `build::prepare_one`, so the diff base and review header match
-        // what `apply` would show. Fresh `add` targets are unhinted.
+        // what `apply` would show — including the hint: a target that names a
+        // pkgname/provides rather than the pkgbase (an upgrade row's foreign
+        // pkgname, a hinted `add`) is the user's installed-package intent, the
+        // same rule `expand_pkgbase_targets` applies when recording hints for
+        // apply. Unhinted, the walk lands on the first-declared installed
+        // provides — the wrong label for the multi-provides shape.
         let mirror = MirrorRepo::open(&paths::aur_repo_path())?;
         let wt = mirror::worktree::add_or_reset(&mirror, &pkgbase, &paths::pkg_worktree(&pkgbase))?;
         let alpm = alpm_db::open()?;
         let pac = PacmanIndex::build(&alpm);
-        let counterpart = pac.counterpart_with_hint(entry, None);
+        let hint = review_hint(&pkgbase, target);
+        let counterpart = pac.counterpart_with_hint(entry, hint.as_ref());
 
         let request = review::ReviewRequest {
             mirror: &mirror,
@@ -714,6 +720,16 @@ impl RealEnv<'_> {
 }
 
 /// Fold a build [`RunReport`](build::RunReport) into the cart-apply outcome. A
+/// The counterpart hint for a standalone shell `review`: a target that names
+/// a pkgname/provides rather than the pkgbase itself carries the user's
+/// installed-package intent, so it hints the counterpart walk — the same rule
+/// `expand_pkgbase_targets` applies when recording hints for `apply`. A
+/// target naming the pkgbase is unhinted (nothing more specific was said).
+fn review_hint(pkgbase: &PkgBase, target: &PkgTarget) -> Option<PkgName> {
+    let name = PkgName::from(target.as_str());
+    (!pkgbase.matches_pkgname(&name)).then_some(name)
+}
+
 /// fully-clean report succeeds (the caller clears the whole cart); any failure,
 /// dep-skip, or interrupt is a partial [`ApplyOutcome::Failed`] carrying the
 /// staged install rows that *did* land — so the cart drops them and keeps only
@@ -924,6 +940,24 @@ mod tests {
     use super::*;
 
     use crate::cli::shell::testenv::up;
+
+    /// The shell `review` counterpart hint follows the apply-side rule: a
+    /// target naming a pkgname/provides (the multi-provides upgrade row's
+    /// foreign pkgname) hints the walk; one naming the pkgbase itself does
+    /// not. Regression: unhinted, `counterpart_with_hint` lands on the
+    /// first-declared installed provides — the dotnet-runtime wrong-label
+    /// bug, resurfacing in the shell's review header.
+    #[test]
+    fn review_hint_carries_foreign_name_not_pkgbase() {
+        let pkgbase = PkgBase::from("test-syu-hint-new");
+        let foreign = PkgTarget::new("test-syu-hint-older");
+        assert_eq!(
+            review_hint(&pkgbase, &foreign),
+            Some(PkgName::from("test-syu-hint-older"))
+        );
+        let canonical = PkgTarget::new("test-syu-hint-new");
+        assert_eq!(review_hint(&pkgbase, &canonical), None);
+    }
 
     #[test]
     fn landed_install_specs_keeps_repo_and_installed_aur_only() {
