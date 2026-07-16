@@ -49,17 +49,38 @@ use std::borrow::Borrow;
 use std::fmt;
 use std::path::Path;
 
-/// Where a search regex matched a package name — at its start or inside it.
+/// Where a search regex matched a package name — spanning all of it, at its
+/// start, or inside it. Declaration order is match quality, best first.
 ///
 /// The position-aware companion to [`PkgName::matches_regex`]: search ranking
-/// tiers a name-prefix hit above a mere substring one, so it needs the
-/// *position*, not just a yes/no.
+/// tiers a whole-name or name-prefix hit above a mere substring one, so it
+/// needs the *position*, not just a yes/no.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NameMatch {
+    /// The regex matched the entire name, first char to last.
+    Exact,
     /// The regex matched starting at the first character.
     Prefix,
     /// The regex matched, but not at the start.
     Inside,
+}
+
+/// Classify where `r` matches `s` — the one site computing match position for
+/// every name newtype's `regex_anchor` (and [`PkgTarget::bare_anchor`]).
+///
+/// Uses the leftmost match (`Regex::find`), so a non-greedy pattern that
+/// *could* span the whole name may classify as `Prefix` — it degrades to a
+/// lower quality, never a higher one.
+fn anchor_of(s: &str, r: &Regex) -> Option<NameMatch> {
+    r.find(s).map(|m| {
+        if m.start() == 0 && m.end() == s.len() {
+            NameMatch::Exact
+        } else if m.start() == 0 {
+            NameMatch::Prefix
+        } else {
+            NameMatch::Inside
+        }
+    })
 }
 
 /// One pacman pkgname (the entity `pacman -Q` reports, the unit of a
@@ -157,7 +178,8 @@ impl fmt::Display for SearchTerm {
     }
 }
 
-/// A virtual name declared in an AUR pkg's `provides=` array — **not** a pkgname.
+/// A virtual name declared in a pkg's `provides=` array — an AUR `.SRCINFO`
+/// or a sync-repo package — **not** a pkgname.
 ///
 /// It's a "this package satisfies the name X" claim, and multiple pkgs can
 /// declare the same virtual. Distinct from [`PkgName`] at the type level
@@ -186,6 +208,16 @@ pub struct VirtualName(String);
 /// scan, never from the rkyv index.
 #[derive(Debug, Clone, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RepoName(String);
+
+/// One pacman package-group label (`gnome`, `base-devel`) — the `groups=`
+/// membership libalpm's `-Ss` search also matches against.
+///
+/// Typed so a group label can't be passed where a package name is expected
+/// (they share lexical shape — there's a `base-devel` group and packages
+/// named after groups). Not archived: group names come from the live alpm
+/// sync DBs, never from the rkyv index.
+#[derive(Debug, Clone, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GroupName(String);
 
 macro_rules! impl_name_wrapper {
     ($ty:ident) => {
@@ -216,18 +248,12 @@ macro_rules! impl_name_wrapper {
             pub fn matches_regex(&self, r: &Regex) -> bool {
                 r.is_match(&self.0)
             }
-            /// Where `r` matches this name — anchored at the start, inside, or
-            /// not at all (`None`). The position-aware companion to
-            /// [`Self::matches_regex`]; search ranking uses it to rank a
-            /// name-prefix hit above a substring one.
+            /// Where `r` matches this name — the whole name, anchored at the
+            /// start, inside, or not at all (`None`). The position-aware
+            /// companion to [`Self::matches_regex`]; search ranking uses it to
+            /// rank a name-prefix hit above a substring one.
             pub fn regex_anchor(&self, r: &Regex) -> Option<NameMatch> {
-                r.find(&self.0).map(|m| {
-                    if m.start() == 0 {
-                        NameMatch::Prefix
-                    } else {
-                        NameMatch::Inside
-                    }
-                })
+                anchor_of(&self.0, r)
             }
             /// Prefix test as a domain operation — keeps cluster/family
             /// checks (e.g. `python38-*`) from reaching into the inner
@@ -308,6 +334,7 @@ impl_name_wrapper!(PkgBase);
 impl_name_wrapper!(PkgTarget);
 impl_name_wrapper!(VirtualName);
 impl_name_wrapper!(RepoName);
+impl_name_wrapper!(GroupName);
 
 /// A package's one-line human description (`pkgdesc`).
 ///
@@ -550,6 +577,13 @@ impl PkgTarget {
         self.0.trim()
     }
 
+    /// Where `r` matches this dep-spec's *bare* name (version constraint
+    /// stripped) — what search classifies `provides=` entries with, so
+    /// `myvirt=2.5` still counts as [`NameMatch::Exact`] for `^myvirt$`.
+    pub fn bare_anchor(&self, r: &Regex) -> Option<NameMatch> {
+        anchor_of(self.bare(), r)
+    }
+
     /// Cross-identity bridge: "does this dep-spec's bare name name the
     /// given identifier?" Encapsulates the single `Borrow<str>` step
     /// between the typed dep-spec (`provides=`/`conflicts=`/`replaces=` in
@@ -638,6 +672,38 @@ impl PkgBase {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// `regex_anchor` classifies the full position ladder: whole-span,
+    /// start-anchored, interior, and no match. Compiled through
+    /// [`SearchTerm::compile`] — the same path real queries take.
+    #[test]
+    fn regex_anchor_distinguishes_exact_prefix_inside() {
+        let re = SearchTerm::new("virt").compile().unwrap();
+        assert_eq!(
+            PkgName::new("virt").regex_anchor(&re),
+            Some(NameMatch::Exact)
+        );
+        assert_eq!(
+            PkgName::new("virtualbox").regex_anchor(&re),
+            Some(NameMatch::Prefix)
+        );
+        assert_eq!(
+            PkgName::new("libvirt-glib").regex_anchor(&re),
+            Some(NameMatch::Inside)
+        );
+        assert_eq!(PkgName::new("qemu").regex_anchor(&re), None);
+    }
+
+    /// `bare_anchor` strips the version constraint before classifying, so a
+    /// versioned provides spec still counts as an exact whole-name hit (the
+    /// raw `regex_anchor` on the full spec would miss entirely).
+    #[test]
+    fn bare_anchor_matches_constraint_stripped_name() {
+        let re = SearchTerm::new("^myvirt$").compile().unwrap();
+        let spec = PkgTarget::new("myvirt=2.5");
+        assert_eq!(spec.bare_anchor(&re), Some(NameMatch::Exact));
+        assert_eq!(spec.regex_anchor(&re), None);
+    }
 
     /// An optdepends line splits at the first `": "` — not at a bare `:`,
     /// which can appear inside the dep half as an epoch constraint. `Display`

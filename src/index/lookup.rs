@@ -205,7 +205,8 @@ impl Lookup {
         idx.entries.get(*i as usize)
     }
 
-    /// Linear regex search across pkgname + pkgdesc, parallelised over entries.
+    /// Linear regex search across pkgnames, descriptions, and provides,
+    /// parallelised over entries.
     pub fn search<'a>(&self, idx: &'a IndexFile, regexes: &[regex::Regex]) -> Vec<&'a IndexEntry> {
         idx.entries
             .par_iter()

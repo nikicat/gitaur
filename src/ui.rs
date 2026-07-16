@@ -27,7 +27,7 @@ pub use progress::{
     promote_count_bar, spinner, tick,
 };
 pub use prompts::{AurSetupChoice, aur_setup_prompt, confirm, confirm_default_no, select_pkgnames};
-pub use search_table::{InstallState, SearchRow, search_result, search_table};
+pub use search_table::{InstallState, MatchNote, SearchRow, search_result, search_table};
 pub use tables::{Paint, Table, UpgradeSelection, install_table, pkg_list, upgrade_table};
 
 use crate::units::ByteSize;

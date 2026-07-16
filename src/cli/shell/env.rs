@@ -9,7 +9,7 @@ use super::upgrade;
 use super::{ListItem, ShellEnv, State};
 use crate::build::{self, ConfirmGate, DevelPolicy, InstallOpts, review};
 use crate::cli::dispatch;
-use crate::cli::search::{Row, rank_rows, search_row};
+use crate::cli::search::{Row, rank_rows};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::index::info::{self, InfoLookup};
@@ -213,28 +213,29 @@ impl ShellEnv for RealEnv<'_> {
             .lookup()
             .search(self.aur_data.index(), &regexes);
         rows.extend(aur.into_iter().map(Row::Aur));
-        // Rank the merged repo+AUR list best-first (name-prefix > substring >
-        // description; shorter names win; AUR ties break freshest-first).
-        // `State::search` prints this reversed, so row 1 — the best match — lands
-        // right above the prompt.
-        rank_rows(&mut rows, &regexes);
+        // Rank the merged repo+AUR list best-first (the `MatchTier` ladder;
+        // shorter names win; AUR ties break freshest-first). `State::search`
+        // prints this reversed, so row 1 — the best match — lands right above
+        // the prompt.
+        let ranked = rank_rows(rows, &regexes);
 
         // Resolve installed state + versions against the live pacman DBs and
         // render the aligned table (installed rows emphasized, with an `old → new`
         // diff + build-time estimate). The build-time overlay is filled only for
-        // the installed AUR rows.
+        // the installed AUR rows. The match-site annotation is part of the
+        // rendered line, so it survives in the remembered `ListItem.label`.
         let pac = upgrade::system_pac()?;
-        let search_rows: Vec<ui::SearchRow> = rows.iter().map(|r| search_row(r, &pac)).collect();
+        let search_rows: Vec<ui::SearchRow> = ranked.iter().map(|r| r.search_row(&pac)).collect();
         let metrics = self.search_metrics(&search_rows);
         let table = ui::search_table(&search_rows, &pac, &metrics);
         Ok(table
             .lines()
             .iter()
-            .zip(&rows)
+            .zip(&ranked)
             .map(|(line, r)| ListItem {
-                target: r.picked(),
+                target: r.row.picked(),
                 label: line.clone(),
-                repo: Some(RepoName::from(r.repo_name())),
+                repo: Some(RepoName::from(r.row.repo_name())),
             })
             .collect())
     }
