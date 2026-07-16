@@ -1,7 +1,7 @@
 //! Package search across the sync repos + the AUR — one merged, ranked list.
 //!
 //! Two non-interactive surfaces live here, both wired up from
-//! [`crate::cli::dispatch`]: [`cmd_search`] is `-Ss` (pacman's plain
+//! [`crate::cli::dispatch`]: [`cmd_search`] is `-Ss` (pacman's
 //! `repo/name version` output), and [`cmd_search_install`] is the bare
 //! `aurox <term>...` shortcut in a pipe (the aligned [`ui::search_table`]).
 //! Interactively the bare shortcut launches the shell REPL seeded with the
@@ -125,7 +125,9 @@ fn gather(cfg: &Config, terms: &[SearchTerm]) -> Result<(Vec<RepoHit>, AurIndexD
 }
 
 /// Merge repo and AUR hits into one relevance-ranked list (unlike yay's fixed
-/// "repos on top", [`rank_rows`] interleaves both sources by match quality).
+/// "repos on top", [`rank_rows`] interleaves both sources by match quality),
+/// ordered best-**last** so the strongest hit lands nearest the prompt — the
+/// same bottom-up convention as the shell's numbered list.
 fn merged_rows<'a>(
     repo_hits: Vec<RepoHit>,
     aur_hits: Vec<&'a IndexEntry>,
@@ -137,13 +139,15 @@ fn merged_rows<'a>(
         .chain(aur_hits.into_iter().map(Row::Aur))
         .collect();
     rank_rows(&mut rows, regexes);
+    rows.reverse();
     info!(rows = rows.len(), "search results");
     rows
 }
 
-/// `-Ss <regex>...` — search the sync repos and the AUR in one ranked list,
-/// printed in pacman's plain `repo/name version` format (see
-/// [`write_search_result`]).
+/// `-Ss <regex>...` — search the sync repos and the AUR in one ranked list.
+///
+/// Printed in pacman's `repo/name version` format, colored per pacman's own
+/// `-Ss` palette when color is on (see [`ui::search_result`]).
 ///
 /// Pacman-parity exit codes: 0 when at least one package matched, 1 when
 /// none did (silently, like `pacman -Ss`) — so scripts can test for a hit.
@@ -156,18 +160,18 @@ pub fn cmd_search(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
         return Ok(1);
     }
     let pac = PacmanIndex::build(&alpm_db::open()?);
+    let paint = ui::Paint::detect();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for row in &rows {
-        let install = ui::InstallState::from_installed(row.installed_name(&pac).is_some());
-        write_search_result(&mut out, row, install)?;
+        write_search_result(&mut out, row, &pac, paint)?;
     }
     Ok(0)
 }
 
-/// Render one search hit in pacman's `-Ss` format to `out`: the
-/// `repo/name version` headline (` [installed]` appended pacman-style) and
-/// the indented description line, omitted when the source has none.
+/// Write one search hit in pacman's `-Ss` format to `out` — layout and
+/// palette in [`ui::search_result`]; [`search_row`] resolves the row's
+/// installed state against `pac`.
 ///
 /// Stdout (not stderr) so `aurox -Ss foo | head` works — the equivalent
 /// `pacman -Ss` also writes results to stdout. A writer so the exact byte
@@ -175,21 +179,11 @@ pub fn cmd_search(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
 fn write_search_result<W: std::io::Write>(
     out: &mut W,
     row: &Row<'_>,
-    install: ui::InstallState,
+    pac: &PacmanIndex,
+    paint: ui::Paint,
 ) -> std::io::Result<()> {
-    let marker = match install {
-        ui::InstallState::Installed => " [installed]",
-        ui::InstallState::NotInstalled => "",
-    };
-    writeln!(
-        out,
-        "{}/{} {}{marker}",
-        row.repo_name(),
-        row.picked(),
-        row.version()
-    )?;
-    if let Some(desc) = row.desc() {
-        writeln!(out, "    {desc}")?;
+    for line in ui::search_result(&search_row(row, pac), paint).lines() {
+        writeln!(out, "{line}")?;
     }
     Ok(())
 }
@@ -203,8 +197,8 @@ fn write_search_result<W: std::io::Write>(
 ///
 /// `terms` are the freeform regex fragments the user typed, combined as an AND
 /// filter (same semantics as `-Ss`). Sync-repo and AUR matches are merged into
-/// one relevance-ranked list ([`rank_rows`]) and printed best-first — so
-/// `aurox foo | head` surfaces the strongest hits. Nothing is installed:
+/// one relevance-ranked list ([`merged_rows`]) and printed best-last, so the
+/// strongest hit ends nearest the prompt. Nothing is installed:
 /// auto-installing every regex hit is too dangerous without a human in the loop.
 #[instrument(skip(cfg))]
 pub fn cmd_search_install(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
@@ -236,32 +230,23 @@ pub fn cmd_search_install(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
     Ok(0)
 }
 
-/// Resolve one ranked [`Row`] into a [`ui::SearchRow`] for the aligned table:
-/// its display name, available version, description, and — against `pac` — its
-/// installed state and (when an upgrade is available) the installed version for
-/// the `old → new` diff.
+/// Resolve one ranked [`Row`] into a [`ui::SearchRow`]: its display name,
+/// available version, description, and — against `pac` — the installed state
+/// carrying the localdb version, the same lookup `pacman -Ss` bases its
+/// `[installed: X]` marker on. The table's `old → new` diff derives from that
+/// state in the renderer ([`ui::SearchRow::upgrade_from`]).
 pub(crate) fn search_row(row: &Row<'_>, pac: &PacmanIndex) -> ui::SearchRow {
-    let name = PkgName::new(row.picked().into_inner());
-    let available = Some(row.version());
-    let installed_as = row.installed_name(pac);
-    // Surface the installed version (→ an `old → new` diff) only when it's
-    // actually behind the available one; a same-version row just shows the
-    // version.
-    let old_ver = installed_as.and_then(|n| {
-        pac.installed_version(n)
-            .filter(|iv| {
-                available
-                    .as_ref()
-                    .is_some_and(|av| iv.is_outdated(av.as_ver()))
-            })
-            .map(Version::from)
-    });
+    let install = row
+        .installed_name(pac)
+        .and_then(|n| pac.installed.get(n))
+        .map_or(ui::InstallState::NotInstalled, |iv| {
+            ui::InstallState::Installed(iv.clone())
+        });
     ui::SearchRow {
         repo: RepoName::from(row.repo_name()),
-        name,
-        install: ui::InstallState::from_installed(installed_as.is_some()),
-        old_ver,
-        new_ver: available,
+        name: PkgName::new(row.picked().into_inner()),
+        install,
+        new_ver: Some(row.version()),
         desc: row.desc(),
     }
 }
@@ -601,10 +586,13 @@ mod tests {
         );
     }
 
-    /// Render one row through the `-Ss` writer.
-    fn rendered(row: &Row<'_>, install: ui::InstallState) -> String {
+    /// Render one row through the `-Ss` writer, plain paint — the byte layout
+    /// pinned here; the ANSI form is pinned in `ui::search_table`'s tests.
+    /// Installed state (and its version) resolves against `pac`, the same
+    /// localdb lookup pacman bases its marker on.
+    fn rendered(row: &Row<'_>, pac: &PacmanIndex) -> String {
         let mut buf: Vec<u8> = Vec::new();
-        write_search_result(&mut buf, row, install).unwrap();
+        write_search_result(&mut buf, row, pac, ui::Paint::Plain).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -613,7 +601,7 @@ mod tests {
     #[test]
     fn search_result_format_matches_pacman_ss() {
         let e = mk("foo", Some("does foo"), None);
-        let out = rendered(&Row::Aur(&e), ui::InstallState::NotInstalled);
+        let out = rendered(&Row::Aur(&e), &PacmanIndex::default());
         assert_eq!(out, "aur/foo 1.2.3-4\n    does foo\n");
     }
 
@@ -621,23 +609,39 @@ mod tests {
     #[test]
     fn search_result_renders_repo_rows_under_their_repo() {
         let row = Row::Repo(repo("firefox", Some("a browser"), false));
-        let out = rendered(&row, ui::InstallState::NotInstalled);
+        let out = rendered(&row, &PacmanIndex::default());
         assert_eq!(out, "extra/firefox 2.0-1\n    a browser\n");
     }
 
-    /// Installed rows carry pacman's ` [installed]` marker on the headline.
+    /// Installed rows carry pacman's ` [installed]` marker on the headline
+    /// when the localdb version matches the listed one.
     #[test]
     fn search_result_marks_installed_rows() {
+        let mut pac = PacmanIndex::default();
+        pac.installed
+            .insert("firefox".into(), Version::from("2.0-1"));
         let row = Row::Repo(repo("firefox", None, true));
-        let out = rendered(&row, ui::InstallState::Installed);
+        let out = rendered(&row, &pac);
         assert_eq!(out, "extra/firefox 2.0-1 [installed]\n");
+    }
+
+    /// A localdb version differing from the listed one rides in the marker,
+    /// pacman-style: ` [installed: X]`.
+    #[test]
+    fn search_result_marks_installed_version_drift() {
+        let mut pac = PacmanIndex::default();
+        pac.installed
+            .insert("firefox".into(), Version::from("1.9-1"));
+        let row = Row::Repo(repo("firefox", None, true));
+        let out = rendered(&row, &pac);
+        assert_eq!(out, "extra/firefox 2.0-1 [installed: 1.9-1]\n");
     }
 
     /// Single-line output, no blank "    " for entries without a description.
     #[test]
     fn search_result_omits_description_block_when_none() {
         let e = mk("bar", None, None);
-        let out = rendered(&Row::Aur(&e), ui::InstallState::NotInstalled);
+        let out = rendered(&Row::Aur(&e), &PacmanIndex::default());
         assert_eq!(out, "aur/bar 1.2.3-4\n");
     }
 
@@ -645,7 +649,7 @@ mod tests {
     #[test]
     fn search_result_includes_epoch_when_present() {
         let e = mk("baz", None, Some("2"));
-        let out = rendered(&Row::Aur(&e), ui::InstallState::NotInstalled);
+        let out = rendered(&Row::Aur(&e), &PacmanIndex::default());
         assert_eq!(out, "aur/baz 2:1.2.3-4\n");
     }
 

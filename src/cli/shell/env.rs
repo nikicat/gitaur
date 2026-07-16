@@ -536,7 +536,7 @@ impl RealEnv<'_> {
                 repo: r.repo.clone(),
                 approval: ui::ApprovalCell::Approved,
                 name: r.name.clone(),
-                old_ver: r.old_ver.clone(),
+                old_ver: r.upgrade_from().cloned(),
                 new_ver: r.new_ver.clone(),
                 age: None,
             })

@@ -4,6 +4,13 @@
 gitoxide/Rust-oxide ox; its predecessor name `gaur` — another wild ox — was
 taken on the AUR).
 
+## Commits
+
+**Never `git commit` without explicit approval.** In every session, no
+exceptions (background jobs, "trivial" fixes, follow-up commits included):
+finish the chunk, run the tests, summarize the diff, then ask and **wait**
+for the user's explicit go-ahead before committing.
+
 ## Design conventions
 
 Hard-won rules from review; hold new code to these.
