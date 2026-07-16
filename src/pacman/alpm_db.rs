@@ -10,7 +10,8 @@ use crate::error::{Error, Result};
 use crate::index::info::{Label, field, list_field, multiline_field};
 use crate::index::schema::IndexEntry;
 use crate::names::{
-    Arch, Maintainer, OptDep, PkgDesc, PkgName, PkgTarget, RepoName, SearchTerm, Url,
+    Arch, GroupName, Maintainer, OptDep, PkgDesc, PkgName, PkgTarget, RepoName, SearchTerm, Url,
+    VirtualName,
 };
 use crate::units::{ByteSize, UnixTime};
 use crate::version::{Ver, Version};
@@ -79,10 +80,18 @@ pub struct RepoHit {
     pub version: Version,
     pub desc: Option<String>,
     pub installed: bool,
+    /// Bare `provides=` names (constraint already parsed off by alpm) —
+    /// part of libalpm's search surface, so ranking and the match-site
+    /// annotation must see them too.
+    pub provides: Vec<VirtualName>,
+    /// Group memberships — `db.search` matches these, so a group-only hit
+    /// must be classifiable or it renders as an unexplained row.
+    pub groups: Vec<GroupName>,
 }
 
 /// Search every sync repo for packages matching all `terms` (pacman `-Ss`
-/// AND semantics over name + description), returning owned hits.
+/// AND semantics over name, description, provides, **and** groups —
+/// libalpm's full search surface), returning owned hits.
 ///
 /// Mirrors `pacman -Ss`: the first sync DB (pacman.conf order) that carries a
 /// pkgname wins, so a name shadowed in a later repo isn't listed twice. Used
@@ -115,6 +124,12 @@ pub fn search_sync(terms: &[SearchTerm]) -> Result<Vec<RepoHit>> {
                 version: Version::from(p.version()),
                 desc: p.desc().map(str::to_owned),
                 installed: installed.contains(p.name()),
+                provides: p
+                    .provides()
+                    .iter()
+                    .map(|d| VirtualName::new(d.name()))
+                    .collect(),
+                groups: p.groups().iter().map(GroupName::new).collect(),
             });
         }
     }
@@ -511,6 +526,12 @@ impl PacmanIndex {
     /// dep instead of staging a redundant install of a different concrete pkg.
     /// On a sync-providers tie we pick the first one we saw (DB declaration
     /// order from `pacman.conf`); pacman would prompt, we don't.
+    ///
+    /// For repo-target deps (`Plan::disclosed_repo_deps`) that pick is a
+    /// *prediction*: aurox never installs those — the plan row must name the
+    /// provider the requirer's own `pacman -S --noconfirm` will choose, which
+    /// is pacman's default of option 1, the first provider in DB order. Keep
+    /// the two in lockstep or the disclosure lies.
     pub fn resolve_concrete(&self, name: &str) -> Option<(&PkgName, bool)> {
         if let Some((n, _)) = self.installed.get_key_value(name) {
             return Some((n, true));

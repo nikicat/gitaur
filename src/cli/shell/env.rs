@@ -9,7 +9,7 @@ use super::upgrade;
 use super::{ListItem, ShellEnv, State};
 use crate::build::{self, ConfirmGate, DevelPolicy, InstallOpts, review};
 use crate::cli::dispatch;
-use crate::cli::search::{Row, rank_rows, search_row};
+use crate::cli::search::{Row, rank_rows};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::index::info::{self, InfoLookup};
@@ -213,18 +213,19 @@ impl ShellEnv for RealEnv<'_> {
             .lookup()
             .search(self.aur_data.index(), &regexes);
         rows.extend(aur.into_iter().map(Row::Aur));
-        // Rank the merged repo+AUR list best-first (name-prefix > substring >
-        // description; shorter names win; AUR ties break freshest-first).
-        // `State::search` prints this reversed, so row 1 — the best match — lands
-        // right above the prompt.
-        rank_rows(&mut rows, &regexes);
+        // Rank the merged repo+AUR list best-first (the `MatchTier` ladder;
+        // shorter names win; AUR ties break freshest-first). `State::search`
+        // prints this reversed, so row 1 — the best match — lands right above
+        // the prompt.
+        let ranked = rank_rows(rows, &regexes);
 
         // Resolve installed state + versions against the live pacman DBs and
         // render the aligned table (installed rows emphasized, with an `old → new`
         // diff + build-time estimate). The build-time overlay is filled only for
-        // the installed AUR rows.
+        // the installed AUR rows. The match-site annotation renders in the
+        // printed table; the remembered list carries only selector data.
         let pac = upgrade::system_pac()?;
-        let search_rows: Vec<ui::SearchRow> = rows.iter().map(|r| search_row(r, &pac)).collect();
+        let search_rows: Vec<ui::SearchRow> = ranked.iter().map(|r| r.search_row(&pac)).collect();
         let metrics = self.search_metrics(&search_rows);
         let table = ui::search_table(
             &search_rows,
@@ -233,16 +234,16 @@ impl ShellEnv for RealEnv<'_> {
             ui::RowNumbers::Numbered,
             ui::Paint::detect(),
         );
-        let items = rows
+        let items = ranked
             .iter()
             .map(|r| ListItem {
-                target: r.picked(),
-                repo: Some(RepoName::from(r.repo_name())),
+                target: r.row.picked(),
+                repo: Some(RepoName::from(r.row.repo_name())),
             })
             .collect();
-        // `rows` borrows the session's AUR data, so it must be done before
+        // `ranked` borrows the session's AUR data, so it must be done before
         // printing takes `&mut self`.
-        drop(rows);
+        drop(ranked);
         // The table is best-first (row 1 = best), each row carrying its `№`
         // cell. Print it worst-first so the strongest matches land at the
         // bottom, next to the prompt the shell scrolls to — and the low,
@@ -546,7 +547,7 @@ impl RealEnv<'_> {
                 repo: r.repo.clone(),
                 approval: ui::ApprovalCell::Approved,
                 name: r.name.clone(),
-                old_ver: r.old_ver.clone(),
+                old_ver: r.upgrade_from().cloned(),
                 new_ver: r.new_ver.clone(),
                 age: None,
             })

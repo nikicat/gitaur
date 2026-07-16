@@ -9,18 +9,25 @@
 //! dependency 'libjpeg' required by ioquake3-git" *after* the user already
 //! confirmed a multi-GiB transaction and typed the sudo password.
 //!
-//! Two entry points:
+//! Three entry points:
 //! * [`files`] — a `pacman -U <artifacts>` set (the AUR install lane).
 //! * [`sysupgrade`] — a `pacman -Su` with an `--ignore` pin set (the shell's
 //!   partial repo-upgrade lane and the `-Syu` passthroughs). Runs against
 //!   aurox's rootless synced db ([`alpm_db::open_synced`]) because that is the
 //!   post-`-Sy` state the real pacman will resolve against — the system db
 //!   only catches up once pacman itself syncs.
+//! * [`remove`] — a `pacman -R…` set ([`RemoveRequest`]: the `-R` passthrough
+//!   and the shell's removal lane). Runs against the system localdb.
 //!
-//! Both are **advisory**: the synced db can trail what `pacman -Sy` fetches
-//! moments later, so a clean preflight doesn't guarantee pacman success and a
-//! flagged one can in principle self-heal. Callers gate with an override,
-//! never hard-fail — pacman stays the authority.
+//! [`files`] and [`sysupgrade`] are **advisory**: the synced db can trail what
+//! `pacman -Sy` fetches moments later, so a clean preflight doesn't guarantee
+//! pacman success and a flagged one can in principle self-heal. Callers gate
+//! with an override, never hard-fail — pacman stays the authority. [`remove`]
+//! is different: it resolves against the very localdb pacman is about to use,
+//! and pacman offers no interactive override for a broken removal — a flagged
+//! remove is deterministically doomed, so its caller refuses outright (the
+//! pacman-native escape hatches, `-Rdd`/`-Rc`/…, travel into the simulation
+//! and preflight clean). Infrastructure failures still fall through to pacman.
 
 use crate::error::{Error, Result};
 use crate::names::{Arch, PkgName, PkgTarget};
@@ -30,7 +37,7 @@ use alpm::{Alpm, PrepareData, PrepareError, SigLevel, TransFlag};
 use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use tracing::{instrument, warn};
+use tracing::{debug, instrument};
 
 /// One problem `trans_prepare` found with the simulated transaction, with the
 /// participants extracted as owned, typed data (a [`PrepareError`] borrows the
@@ -60,6 +67,18 @@ pub enum Issue {
         /// Filled best-effort after the prepare; `None` when unavailable.
         causing_ver: Option<Version>,
     },
+    /// The transaction would remove `removed`, leaving `target`'s dependency
+    /// `depend` unsatisfied — the removal twin of [`Issue::UnsatisfiedDep`]
+    /// (pacman's "removing X breaks dependency 'd' required by Y" shape).
+    RemovalBreaks {
+        removed: PkgName,
+        depend: PkgTarget,
+        target: PkgName,
+    },
+    /// A `-R` target that is neither an installed package nor an installed
+    /// group — pacman's "target not found". Carries the target verbatim
+    /// (including any `repo/` prefix), like pacman's own message.
+    TargetNotFound { target: PkgTarget },
     /// A package whose `arch` doesn't match this machine.
     InvalidArch { pkg: PkgName, arch: Option<Arch> },
     /// The prepare failed without structured detail — carried verbatim so the
@@ -105,6 +124,15 @@ impl fmt::Display for Issue {
                 f,
                 "unable to satisfy dependency '{depend}' required by {target}"
             ),
+            Self::RemovalBreaks {
+                removed,
+                depend,
+                target,
+            } => write!(
+                f,
+                "removing {removed} breaks dependency '{depend}' required by {target}"
+            ),
+            Self::TargetNotFound { target } => write!(f, "target not found: {target}"),
             Self::InvalidArch { pkg, arch } => match arch {
                 Some(a) => write!(f, "package {pkg} does not have a valid architecture ({a})"),
                 None => write!(f, "package {pkg} does not have a valid architecture"),
@@ -184,6 +212,165 @@ pub fn files(paths: &[&Path]) -> Result<Vec<Issue>> {
     Ok(issues)
 }
 
+/// A `pacman -R…` invocation reduced to what the simulation needs.
+///
+/// Holds the targets and the transaction flags the `-R` modifiers map to,
+/// built from a raw passthrough argv by [`RemoveRequest::from_argv`]. That
+/// parse is the one site holding the modifier→flag table, so [`remove`]
+/// prepares with exactly the semantics pacman will apply (`-Rc` cascades,
+/// `-Rdd` skips dep checks).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveRequest {
+    pub targets: Vec<PkgTarget>,
+    pub flags: TransFlag,
+}
+
+impl RemoveRequest {
+    /// Parse a raw `pacman`-bound argv into a simulate-able remove request.
+    ///
+    /// `None` means "don't preflight": the argv isn't a remove at all, has no
+    /// targets, or carries a flag outside the modeled set — anything that
+    /// redirects the db (`--root`, `--dbpath`, `--config`, …), takes a value
+    /// this parser doesn't track, or is simply unknown. An unmodeled flag
+    /// could make the simulation diverge from what pacman will do, and a
+    /// wrong refusal is worse than no preflight, so the unknown case always
+    /// stands aside and leaves pacman the authority.
+    pub fn from_argv(argv: &[String]) -> Option<Self> {
+        let mut is_remove = false;
+        let mut flags = TransFlag::NONE;
+        // `-s` and `-d` escalate on repetition (`-Rss` recurses through
+        // explicitly-installed deps, `-Rdd` drops dep checks entirely), so
+        // they're counted rather than or-ed.
+        let (mut recursive, mut nodeps) = (0u8, 0u8);
+        let mut targets = Vec::new();
+        let mut rest = argv.iter();
+        while let Some(a) = rest.next() {
+            if a == "--" {
+                // pacman's end-of-options marker: the rest are targets.
+                targets.extend(rest.by_ref().map(PkgTarget::new));
+                break;
+            }
+            if let Some(long) = a.strip_prefix("--") {
+                match long {
+                    "cascade" => flags |= TransFlag::CASCADE,
+                    "recursive" => recursive += 1,
+                    "unneeded" => flags |= TransFlag::UNNEEDED,
+                    "nosave" => flags |= TransFlag::NO_SAVE,
+                    "nodeps" => nodeps += 1,
+                    "dbonly" => flags |= TransFlag::DB_ONLY,
+                    "noscriptlet" => flags |= TransFlag::NO_SCRIPTLET,
+                    // No effect on what trans_prepare would refuse.
+                    "noconfirm" | "confirm" | "noprogressbar" | "verbose" | "debug" => {}
+                    _ if long.starts_with("color=") => {}
+                    // `--color <when>`: consume the value so it isn't
+                    // mistaken for a target.
+                    "color" => {
+                        rest.next()?;
+                    }
+                    _ => return None,
+                }
+            } else if let Some(cluster) = a.strip_prefix('-') {
+                for c in cluster.chars() {
+                    match c {
+                        'R' => is_remove = true,
+                        'c' => flags |= TransFlag::CASCADE,
+                        's' => recursive += 1,
+                        'u' => flags |= TransFlag::UNNEEDED,
+                        'n' => flags |= TransFlag::NO_SAVE,
+                        'd' => nodeps += 1,
+                        'v' => {}
+                        _ => return None,
+                    }
+                }
+            } else {
+                targets.push(PkgTarget::new(a.clone()));
+            }
+        }
+        if !is_remove || targets.is_empty() {
+            return None;
+        }
+        flags |= match recursive {
+            0 => TransFlag::NONE,
+            1 => TransFlag::RECURSE,
+            _ => TransFlag::RECURSE | TransFlag::RECURSE_ALL,
+        };
+        flags |= match nodeps {
+            0 => TransFlag::NONE,
+            1 => TransFlag::NO_DEP_VERSION,
+            _ => TransFlag::NO_DEP_VERSION | TransFlag::NO_DEPS,
+        };
+        Some(Self { targets, flags })
+    }
+}
+
+/// Simulate `pacman -R…` for `req` against the system localdb — the store the
+/// real `pacman -R` resolves against.
+///
+/// Target resolution mirrors pacman's: exact installed pkgname (an optional
+/// `local/` prefix allowed), then installed package group. Anything else is
+/// [`Issue::TargetNotFound`] — `provides` names deliberately don't resolve,
+/// because `pacman -R` doesn't accept them. Not-found targets short-circuit
+/// (pacman aborts on them before dependency checking), so the two issue kinds
+/// never mix in one result.
+#[instrument]
+pub fn remove(req: &RemoveRequest) -> Result<Vec<Issue>> {
+    let mut alpm = alpm_db::open()?;
+    alpm.trans_init(req.flags | TransFlag::NO_LOCK)
+        .map_err(|e| Error::other(format!("alpm trans_init: {e}")))?;
+    let mut not_found = Vec::new();
+    for target in &req.targets {
+        let name = target
+            .as_str()
+            .strip_prefix("local/")
+            .unwrap_or(target.as_str());
+        let db = alpm.localdb();
+        let staged = if let Ok(pkg) = db.pkg(name) {
+            alpm.trans_remove_pkg(pkg)
+        } else if let Ok(group) = db.group(name) {
+            group
+                .packages()
+                .iter()
+                .try_for_each(|pkg| alpm.trans_remove_pkg(pkg))
+        } else {
+            not_found.push(Issue::TargetNotFound {
+                target: target.clone(),
+            });
+            Ok(())
+        };
+        // e.g. a duplicated target — not a verdict on the removal, so give up
+        // on simulating and let pacman rule on the real argv.
+        if let Err(e) = staged {
+            alpm.trans_release().ok();
+            return Err(Error::other(format!("alpm trans_remove_pkg {target}: {e}")));
+        }
+    }
+    if !not_found.is_empty() {
+        alpm.trans_release().ok();
+        return Ok(not_found);
+    }
+    let issues = prepare_issues(&mut alpm);
+    alpm.trans_release().ok();
+    // In a remove transaction an unsatisfied dep means "removing `causing`
+    // orphans `target`'s dependency" — reshape into the removal-verb issue so
+    // the message matches what pacman would have printed.
+    Ok(issues
+        .into_iter()
+        .map(|issue| match issue {
+            Issue::UnsatisfiedDep {
+                target,
+                depend,
+                causing: Some(removed),
+                ..
+            } => Issue::RemovalBreaks {
+                removed,
+                depend,
+                target,
+            },
+            other => other,
+        })
+        .collect())
+}
+
 /// Run `trans_prepare` on the staged transaction and widen its complaint list
 /// into owned [`Issue`]s. `PrepareError` borrows the handle mutably, so the
 /// extraction happens here and only owned data leaves.
@@ -238,13 +425,20 @@ fn sync_version(alpm: &Alpm, name: &PkgName) -> Option<Version> {
         .map(|p| Version::from(p.version()))
 }
 
-/// Log each issue as its own structured warn event so the fields (`pkg1`,
-/// `pkg2`, `reason`, …) are queryable in the execution log — the contract
+/// Log each issue as its own structured event so the fields (`pkg1`, `pkg2`,
+/// `reason`, …) are queryable in the execution log — the contract
 /// `tests/container/smoke/57_pacman_conflict_logged.sh` pins.
+///
+/// `debug!`, not `warn!`: the console layer shows warnings, and every caller
+/// presents the issues to the user in its own voice (the shell's preflight
+/// notes, the remove gate's pacman-parity lines, pacman's own error on the
+/// passthrough lanes) — a console echo here would say everything twice. The
+/// execution log captures `debug` and up, so the structured detail lands
+/// there regardless.
 pub fn log_issues(issues: &[Issue]) {
     for issue in issues {
         match issue {
-            Issue::Conflict { pkg1, pkg2, reason } => warn!(
+            Issue::Conflict { pkg1, pkg2, reason } => debug!(
                 pkg1 = pkg1.as_str(),
                 pkg2 = pkg2.as_str(),
                 reason = reason.as_str(),
@@ -255,19 +449,33 @@ pub fn log_issues(issues: &[Issue]) {
                 depend,
                 causing,
                 ..
-            } => warn!(
+            } => debug!(
                 target = target.as_str(),
                 depend = depend.as_str(),
                 causing_pkg = causing.as_ref().map_or("(none)", PkgName::as_str),
                 "pacman preflight: unsatisfied dep",
             ),
-            Issue::InvalidArch { pkg, arch } => warn!(
+            Issue::RemovalBreaks {
+                removed,
+                depend,
+                target,
+            } => debug!(
+                removed = removed.as_str(),
+                depend = depend.as_str(),
+                target = target.as_str(),
+                "pacman preflight: removal breaks dependency",
+            ),
+            Issue::TargetNotFound { target } => debug!(
+                target = target.as_str(),
+                "pacman preflight: target not found",
+            ),
+            Issue::InvalidArch { pkg, arch } => debug!(
                 pkg = pkg.as_str(),
                 arch = arch.as_ref().map_or("(unknown)", Arch::as_str),
                 "pacman preflight: invalid architecture",
             ),
             Issue::Other { message } => {
-                warn!(error = %message, "pacman preflight: prepare failed without detail");
+                debug!(error = %message, "pacman preflight: prepare failed without detail");
             }
         }
     }
@@ -364,5 +572,122 @@ mod tests {
             message: "transaction not prepared".to_owned(),
         };
         assert_eq!(other.to_string(), "transaction not prepared");
+    }
+
+    /// The removal twin renders with pacman's remove-mode verb (and, unlike
+    /// the install shape, no version — pacman's message carries none).
+    #[test]
+    fn removal_breaks_phrasing_matches_pacman() {
+        let i = Issue::RemovalBreaks {
+            removed: PkgName::new("python-pathvalidate"),
+            depend: PkgTarget::new("python-pathvalidate>=3.0.0"),
+            target: PkgName::new("electron-cash"),
+        };
+        assert_eq!(
+            i.to_string(),
+            "removing python-pathvalidate breaks dependency \
+             'python-pathvalidate>=3.0.0' required by electron-cash"
+        );
+    }
+
+    /// Not-found keeps the target verbatim — pacman echoes `core/bash` back
+    /// with the prefix, so the preflight must too.
+    #[test]
+    fn target_not_found_phrasing_matches_pacman() {
+        let i = Issue::TargetNotFound {
+            target: PkgTarget::new("core/bash"),
+        };
+        assert_eq!(i.to_string(), "target not found: core/bash");
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn req(parts: &[&str]) -> Option<RemoveRequest> {
+        RemoveRequest::from_argv(&argv(parts))
+    }
+
+    #[test]
+    fn remove_request_parses_bare_remove() {
+        let r = req(&["-R", "foo", "bar"]).expect("plain -R parses");
+        assert_eq!(
+            r.targets,
+            vec![PkgTarget::new("foo"), PkgTarget::new("bar")]
+        );
+        assert_eq!(r.flags, TransFlag::NONE);
+    }
+
+    /// Every modeled modifier, in the clustered spelling users actually type.
+    #[test]
+    fn remove_request_maps_cluster_modifiers() {
+        assert_eq!(
+            req(&["-Rns", "foo"]).unwrap().flags,
+            TransFlag::NO_SAVE | TransFlag::RECURSE
+        );
+        assert_eq!(req(&["-Rc", "foo"]).unwrap().flags, TransFlag::CASCADE);
+        assert_eq!(req(&["-Ru", "foo"]).unwrap().flags, TransFlag::UNNEEDED);
+        // Repetition escalates the way pacman's own parser does.
+        assert_eq!(
+            req(&["-Rss", "foo"]).unwrap().flags,
+            TransFlag::RECURSE | TransFlag::RECURSE_ALL
+        );
+        assert_eq!(
+            req(&["-Rd", "foo"]).unwrap().flags,
+            TransFlag::NO_DEP_VERSION
+        );
+        assert_eq!(
+            req(&["-Rdd", "foo"]).unwrap().flags,
+            TransFlag::NO_DEP_VERSION | TransFlag::NO_DEPS
+        );
+    }
+
+    /// Long spellings and split clusters accumulate like pacman's getopt —
+    /// `-R -s --recursive` counts two recursions.
+    #[test]
+    fn remove_request_merges_long_and_split_flags() {
+        let r = req(&["-R", "--nosave", "-s", "--recursive", "foo"]).unwrap();
+        assert_eq!(
+            r.flags,
+            TransFlag::NO_SAVE | TransFlag::RECURSE | TransFlag::RECURSE_ALL
+        );
+        // Flags that don't change what prepare would refuse parse but map to
+        // nothing.
+        assert_eq!(
+            req(&["-R", "--noconfirm", "foo"]).unwrap().flags,
+            TransFlag::NONE
+        );
+    }
+
+    /// `--` ends option parsing; `--color`'s value must not be read as a
+    /// target in either spelling.
+    #[test]
+    fn remove_request_handles_terminator_and_color_values() {
+        assert_eq!(
+            req(&["-R", "--", "--weird-name"]).unwrap().targets,
+            vec![PkgTarget::new("--weird-name")]
+        );
+        assert_eq!(
+            req(&["-R", "--color", "never", "foo"]).unwrap().targets,
+            vec![PkgTarget::new("foo")]
+        );
+        assert_eq!(
+            req(&["-R", "--color=never", "foo"]).unwrap().targets,
+            vec![PkgTarget::new("foo")]
+        );
+    }
+
+    /// Anything the simulation can't faithfully model refuses to parse:
+    /// non-remove ops, no targets, db-redirecting or unknown flags. A wrong
+    /// refusal is worse than no preflight.
+    #[test]
+    fn remove_request_stands_aside_when_not_modelable() {
+        assert_eq!(req(&["-Syu"]), None);
+        assert_eq!(req(&["-R"]), None);
+        assert_eq!(req(&["-Rx", "foo"]), None);
+        assert_eq!(req(&["-R", "--root", "/mnt", "foo"]), None);
+        assert_eq!(req(&["-R", "--dbpath", "/tmp/db", "foo"]), None);
+        assert_eq!(req(&["-R", "--assume-installed", "x", "foo"]), None);
+        assert_eq!(req(&["-Rp", "foo"]), None);
     }
 }

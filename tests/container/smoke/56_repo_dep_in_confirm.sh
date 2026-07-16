@@ -29,7 +29,12 @@ assert_stderr_contains "repo-helper-lib"
 assert_pkg_not_installed repo-with-dep
 assert_pkg_not_installed repo-helper-lib
 
-# --- accept (--noconfirm): target explicit, dep installed as --asdeps ------
+# --- accept (--noconfirm): target explicit, dep installed by pacman itself -
+# One transaction: `pacman -S repo-with-dep` resolves and installs the dep
+# with the dependency reason natively. aurox must not run its own dep lane
+# ("installing repo dependencies") or a second sudo gate on top — the
+# elevation preview prints once per elevated pacman, so exactly one is the
+# one-transaction pin.
 reset_state
 aurox -S --noconfirm repo-with-dep
 assert_exit 0
@@ -37,6 +42,13 @@ assert_pkg_installed repo-with-dep
 assert_pkg_explicit  repo-with-dep
 assert_pkg_installed repo-helper-lib
 assert_pkg_asdep     repo-helper-lib
+assert_stderr_not_contains "installing repo dependencies"
+elevations=$(grep -cF "about to elevate via sudo" "$LAST_STDERR")
+[[ "$elevations" == 1 ]] || {
+    echo "expected exactly one sudo elevation for a repo→repo install, got $elevations" >&2
+    _dump >&2
+    exit 1
+}
 
 # --- dep already installed: no new deps → no plan prompt -------------------
 # With repo-helper-lib already present, the plan installs exactly what the

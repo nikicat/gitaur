@@ -99,6 +99,10 @@ assert_stdout_contains() {
     grep -qF -- "$1" "$LAST_STDOUT" || { echo "stdout missing: $1" >&2; _dump >&2; return 1; }
 }
 
+assert_stdout_not_contains() {
+    ! grep -qF -- "$1" "$LAST_STDOUT" || { echo "stdout unexpectedly contains: $1" >&2; _dump >&2; return 1; }
+}
+
 assert_stderr_contains() {
     grep -qF -- "$1" "$LAST_STDERR" || { echo "stderr missing: $1" >&2; _dump >&2; return 1; }
 }

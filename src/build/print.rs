@@ -18,8 +18,11 @@ use super::{BuildFailure, RunReport};
 /// (AUR index), so the plan answers "which exact version would land?" for
 /// every row before the user confirms.
 pub(super) fn plan(plan: &Plan, idx: &IndexFile, pac: &PacmanIndex) {
-    if plan.direct_repo.is_empty() && plan.transitive_repo.is_empty() && plan.aur_strata.is_empty()
-    {
+    // Both dep buckets disclose here — the union covers deps aurox installs
+    // itself (`transitive_repo`) and deps pacman resolves natively within a
+    // repo target's transaction (`disclosed_repo_deps`).
+    let repo_deps = plan.repo_dep_disclosure();
+    if plan.direct_repo.is_empty() && repo_deps.is_empty() && plan.aur_strata.is_empty() {
         ui::info("plan: nothing to do");
         return;
     }
@@ -32,13 +35,9 @@ pub(super) fn plan(plan: &Plan, idx: &IndexFile, pac: &PacmanIndex) {
         )
         .eprint_framed();
     }
-    if !plan.transitive_repo.is_empty() {
-        ui::install_table(
-            "Repo dependencies",
-            &rows_for_repo(&plan.transitive_repo, pac),
-            paint,
-        )
-        .eprint_framed();
+    if !repo_deps.is_empty() {
+        ui::install_table("Repo dependencies", &rows_for_repo(&repo_deps, pac), paint)
+            .eprint_framed();
     }
     if !plan.aur_strata.is_empty() {
         let total = plan.aur_strata.len();
