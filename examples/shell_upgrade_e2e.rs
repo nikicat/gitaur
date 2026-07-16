@@ -8,10 +8,11 @@
 //! `pacman -Syu`. A clean apply empties the cart, which `show` confirms.
 //!
 //! It also folds in the synced-db **size guard** (the retired
-//! `05_loop_size_from_synced_db` test): the preview total must be a real nonzero
-//! figure, never `total  0 B` — the smoking gun of reading sizes from the stale
-//! system syncdb (whose installed-version archive is cached → `0`) instead of
-//! the freshly-synced db carrying the new version.
+//! `05_loop_size_from_synced_db` test): the size figure is parsed off the
+//! `-> total  📥 …` line and must be a real nonzero value. `0 B` is the
+//! smoking gun of reading sizes from the stale system syncdb (whose
+//! installed-version archive is cached → `0`) instead of the freshly-synced
+//! db carrying the new version.
 
 use pty_harness::Pty;
 
@@ -47,14 +48,26 @@ fn main() {
     });
     pty.expect("repo upgrade staged", |s| has(s, "loop-repo 1.0-1 → 2.0-1"));
 
-    // The size guard from the retired `05_loop_size_from_synced_db`: the staged
-    // upgrade's total (rendered by `upgrade` above) must be a real nonzero figure,
-    // never `total  0 B` — the smoking gun of reading sizes from the stale system
-    // syncdb (cached installed archive → `0`) instead of the freshly-synced db.
+    // The size guard from the retired `05_loop_size_from_synced_db`: pump until
+    // the `-> total  📥 …` line renders with a parseable figure — the row
+    // expect above can match while the table is still streaming, so a one-shot
+    // screen grab races the total line — then require a real nonzero value.
+    // `0 B` is the smoking gun of reading sizes from the stale system syncdb
+    // (cached installed archive → `0`) instead of the freshly-synced db; an
+    // unparseable figure (`?`) times the expect out and dumps the screen
+    // instead of slipping past a substring needle.
+    let size_re =
+        regex::Regex::new(r"(?m)^-> total\s+📥 >?([0-9]+(?:\.[0-9]+)?) (?:B|[KMGT]iB) *$").unwrap();
+    pty.expect("parseable change-set total", |s| size_re.is_match(s));
     let screen = pty.screen();
+    let size: f64 = size_re
+        .captures(&screen)
+        .expect("expect() pumped until the total line matched")[1]
+        .parse()
+        .expect("regex-matched figure is a number");
     assert!(
-        !screen.contains("total  0 B"),
-        "change-set total is `0 B` — preview sizes look stale (read from the \
+        size > 0.0,
+        "change-set total is `0` — preview sizes look stale (read from the \
          system syncdb whose installed-version archive is cached) rather than \
          the freshly synced db's new version\n--- screen ---\n{screen}\n--- end ---"
     );
