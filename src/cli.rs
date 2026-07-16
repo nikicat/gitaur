@@ -82,6 +82,7 @@ YAY PARITY SHORTCUTS:\n\
 \n\
 PASS-THROUGH (raw `pacman` — clap doesn't parse these):\n\
   -Q (except -Qu), -R, -T, -D, -F, -U, and any flags they accept\n\
+  (-R is preflighted: dependency breakage is caught before the sudo prompt)\n\
 \n\
 ENVIRONMENT:\n\
   RUST_LOG=aurox=debug    raise console tracing level\n\
