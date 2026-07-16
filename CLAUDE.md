@@ -20,6 +20,11 @@ Hard-won rules from review; hold new code to these.
   `ConfigFile` from the one `Config` definition) or arrange for drift to be
   a compile error (exhaustive struct literals). A string literal that must
   match a field name is a latent desync.
+- **Don't hand-maintain derivable counts.** A const data table is `&[T]`,
+  not `[T; N]`: a `const`'s type can't infer `N` on stable, so the literal
+  length is a number every row add/remove must edit — noise even though the
+  compiler checks it. Tests assert against `TABLE.len()`, never a re-typed
+  count.
 - **Model state, don't reconstruct it.** If code needs to know "did the user
   set this?", that is state — carry it in a type (`Option` fields on the
   on-disk schema), never recover it by diffing serializations or splicing

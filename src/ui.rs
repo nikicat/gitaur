@@ -11,6 +11,7 @@
 //!
 //! Splitting the two lets callers `set_message` without clobbering the label.
 
+mod banner;
 mod cells;
 mod change_set;
 mod cost;
@@ -21,6 +22,7 @@ mod prompts;
 mod search_table;
 mod tables;
 
+pub use banner::launch_banner;
 pub use change_set::{ApprovalCell, ChangeSet, TxnRoot};
 pub use cost::PreviewMetrics;
 pub use gix_progress::{GixProgress, Operation};

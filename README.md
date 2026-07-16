@@ -91,6 +91,7 @@ build_dir            = "~/.local/state/aurox/pkgs"
 index_threads        = 4
 refresh_max_age_secs = 3600
 color                = "auto"
+banner               = true        # ASCII-art splash when the shell starts
 makepkg_path         = "makepkg"
 makepkg_args         = ["-s", "--noconfirm", "--needed"]
 privilege_escalator  = "sudo"      # or "doas" / "run0"

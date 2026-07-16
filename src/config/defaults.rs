@@ -18,6 +18,7 @@ pub fn default_config() -> Config {
         index_threads: 4,
         refresh_max_age_secs: 3600,
         color: "auto".into(),
+        banner: true,
         makepkg_path: "makepkg".into(),
         // `-d` skips makepkg's own dep checks: aurox pre-installs makedeps
         // stratum-by-stratum, and `makepkg -s` would otherwise try to fetch

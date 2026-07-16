@@ -30,6 +30,10 @@ pub mod defaults;
     merge_fn = merge_config_file
 )]
 #[derive(Debug, Clone)]
+// Config knobs are independent on/off switches whose on-disk form is a toml
+// `true`/`false`; folding them into two-variant enums would complicate the
+// schema without expressing any real state machine.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     /// Where per-pkgbase worktrees live.
     pub build_dir: PathBuf,
@@ -59,6 +63,10 @@ pub struct Config {
     pub refresh_max_age_secs: u64,
     /// `auto` | `always` | `never`.
     pub color: String,
+    /// Show the ASCII-art splash when the interactive shell starts. `false`
+    /// skips straight to the one-line session banner; the splash also follows
+    /// `color`, so `--color never` keeps it plain rather than hiding it.
+    pub banner: bool,
     /// Path or name of the `makepkg` binary.
     pub makepkg_path: String,
     /// Default args passed to every `makepkg` invocation.
@@ -226,6 +234,20 @@ mod tests {
             .expect("`aur = false` parses")
             .resolve();
         assert!(!cfg.aur);
+    }
+
+    /// The launch splash defaults on (existing configs say nothing about it)
+    /// and parses off.
+    #[test]
+    fn banner_defaults_on_and_parses_off() {
+        let cfg = toml::from_str::<ConfigFile>("")
+            .expect("empty config parses")
+            .resolve();
+        assert!(cfg.banner, "missing `banner` key defaults to enabled");
+        let cfg = toml::from_str::<ConfigFile>("banner = false")
+            .expect("`banner = false` parses")
+            .resolve();
+        assert!(!cfg.banner);
     }
 
     /// "Pacman-only from now on" must create a missing config file holding

@@ -109,6 +109,12 @@ pub fn run(config: &ConfigHandle, devel: DevelPolicy, initial_search: &[SearchTe
     };
     let mut state = State::default();
 
+    // The splash, behind the `banner` knob (default on). After the
+    // first-launch question — art must never bury a prompt — and before the
+    // session banner, so the one-liner reads as its caption.
+    if cfg.banner {
+        env.print_table(&ui::launch_banner(ui::Paint::detect()));
+    }
     for line in startup_lines(aur_state) {
         env.print(line);
     }
