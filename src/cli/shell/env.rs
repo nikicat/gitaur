@@ -347,9 +347,7 @@ impl ShellEnv for RealEnv<'_> {
         // landing behind `show`).
         match self.transaction_view(cart) {
             Ok(table) => {
-                for line in table.lines() {
-                    self.print(line);
-                }
+                self.print_table(&table);
                 // The sysupgrade preflight verdict for the staged repo lane —
                 // "upgrading X breaks Y" plus the shell-native way out —
                 // belongs on this same screen, ahead of any `apply`.

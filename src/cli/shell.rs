@@ -30,6 +30,7 @@ use crate::mirror;
 use crate::names::{PkgBase, PkgTarget, RepoName, SearchTerm};
 use crate::pacman::invoke::PkgUpgrade;
 use crate::system;
+use crate::ui;
 use crate::units::ByteSize;
 use cart::{ApplyOutcome, AurApproval, Cart, ReviewOutcome, StageClass};
 
@@ -121,6 +122,13 @@ pub enum Flow {
 pub trait ShellEnv {
     /// Emit one line of user-facing output.
     fn print(&mut self, line: &str);
+    /// Emit a rendered table, line by line, through [`Self::print`] — the one
+    /// place a [`ui::Table`] meets the shell's output seam.
+    fn print_table(&mut self, table: &ui::Table) {
+        for line in table.lines() {
+            self.print(line);
+        }
+    }
     /// Refresh the mirror + index, reload the session (so `search`/`info` see
     /// fresh data too), and return the current upgrade candidates (repo ∪ AUR)
     /// for `upgrade` to seed into the cart.

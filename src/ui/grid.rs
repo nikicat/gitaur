@@ -30,14 +30,14 @@ use std::ops::Add;
 /// — cells are padded by char count, never byte length, so embedded ANSI
 /// escapes don't skew alignment — lives in one place.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct Width(usize);
+pub struct Width(usize);
 
 impl Width {
     pub(super) const ZERO: Self = Self(0);
 
     /// Visible width of a plain (un-colored) cell. Table cells are ASCII
     /// (names, versions, repo labels, sizes), so char count == display columns.
-    pub(super) fn of(s: &str) -> Self {
+    pub fn of(s: &str) -> Self {
         Self(s.chars().count())
     }
 
@@ -72,14 +72,14 @@ impl Add for Width {
 /// The domain type for a single aligned cell — instead of passing a
 /// `(plain, rendered)` pair around, the cell carries its own visible width so
 /// the grid aligns correctly even when the text holds color escapes.
-pub(super) struct Cell {
+pub struct Cell {
     text: String,
     width: Width,
 }
 
 impl Cell {
     /// A plain (uncolored) cell; its width is its visible char count.
-    pub(super) fn plain(s: impl Into<String>) -> Self {
+    pub fn plain(s: impl Into<String>) -> Self {
         let text = s.into();
         let width = Width::of(&text);
         Self { text, width }
@@ -222,14 +222,14 @@ pub(super) enum Align {
 /// section's grid the result via [`Self::min`] — the union max is ≥ each
 /// section's own max, so the floor *is* the shared width.
 #[derive(Clone, Copy)]
-pub(super) struct Col {
+pub struct Col {
     align: Align,
     min: Width,
 }
 
 impl Col {
     /// A left-aligned column (names, labels).
-    pub(super) const fn left() -> Self {
+    pub const fn left() -> Self {
         Self {
             align: Align::Left,
             min: Width::ZERO,
@@ -237,7 +237,7 @@ impl Col {
     }
 
     /// A right-aligned column (numbers, sizes, durations).
-    pub(super) const fn right() -> Self {
+    pub const fn right() -> Self {
         Self {
             align: Align::Right,
             min: Width::ZERO,
@@ -246,23 +246,26 @@ impl Col {
 
     /// This column with a width floor — for widths shared across sections or
     /// pinned to a widest-possible label.
-    pub(super) const fn min(self, min: Width) -> Self {
+    #[must_use]
+    pub const fn min(self, min: Width) -> Self {
         Self { min, ..self }
     }
 }
 
 /// One grid row: its aligned cells plus an optional verbatim tail appended
-/// after the last column — the unaligned appendices (the `built` tag, the
-/// `(3d ago)` age, a description), each carrying its own leading gap, that
+/// after the last column.
+///
+/// The tail carries the unaligned appendices (the `built` tag, the
+/// `(3d ago)` age, a description), each with its own leading gap, that
 /// ride behind the aligned block without perturbing column math.
-pub(super) struct GridRow {
+pub struct GridRow {
     cells: Vec<Cell>,
     tail: String,
 }
 
 impl GridRow {
     /// A row from its aligned cells, one per grid column.
-    pub(super) const fn new(cells: Vec<Cell>) -> Self {
+    pub const fn new(cells: Vec<Cell>) -> Self {
         Self {
             cells,
             tail: String::new(),
@@ -270,7 +273,8 @@ impl GridRow {
     }
 
     /// Attach the unaligned tail (must carry its own leading gap).
-    pub(super) fn tail(mut self, tail: impl Into<String>) -> Self {
+    #[must_use]
+    pub fn tail(mut self, tail: impl Into<String>) -> Self {
         self.tail = tail.into();
         self
     }
@@ -279,7 +283,7 @@ impl GridRow {
 /// The column-layout engine: measures each column over all rows (the max of
 /// the column's floor and its cells' visible widths), then renders the rows
 /// as aligned lines under the module-doc conventions.
-pub(super) struct Grid {
+pub struct Grid {
     cols: Vec<Col>,
     rows: Vec<GridRow>,
     indent: &'static str,
@@ -287,7 +291,7 @@ pub(super) struct Grid {
 
 impl Grid {
     /// An empty grid over the given column specs.
-    pub(super) const fn new(cols: Vec<Col>) -> Self {
+    pub const fn new(cols: Vec<Col>) -> Self {
         Self {
             cols,
             rows: Vec::new(),
@@ -297,7 +301,8 @@ impl Grid {
 
     /// Prefix every rendered line with `prefix` (the table's left margin —
     /// `"    "` for the flag tables, `"        "` for the dep block).
-    pub(super) const fn indent(mut self, prefix: &'static str) -> Self {
+    #[must_use]
+    pub const fn indent(mut self, prefix: &'static str) -> Self {
         self.indent = prefix;
         self
     }
@@ -305,7 +310,7 @@ impl Grid {
     /// Append one row. Panics when the row's cell count doesn't match the
     /// column specs — a row/spec mismatch is a bug at the call site, not a
     /// renderable state.
-    pub(super) fn push(&mut self, row: GridRow) {
+    pub fn push(&mut self, row: GridRow) {
         assert_eq!(
             row.cells.len(),
             self.cols.len(),
@@ -317,7 +322,7 @@ impl Grid {
     }
 
     /// Lay the rows out into aligned lines.
-    pub(super) fn render(self) -> Table {
+    pub fn render(self) -> Table {
         let widths: Vec<Width> = self
             .cols
             .iter()

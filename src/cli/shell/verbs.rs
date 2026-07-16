@@ -11,6 +11,7 @@ use crate::mirror;
 use crate::names::{PkgTarget, RepoName, SearchTerm};
 use crate::pacman::invoke::PkgUpgrade;
 use crate::system;
+use crate::ui;
 use std::collections::HashSet;
 
 /// Word one `refresh` outcome — the AUR half only. The repo-database half
@@ -76,29 +77,32 @@ fn system_dispatch<E: ShellEnv>(action: Option<SystemAction>, env: &mut E) {
 
 /// Render the `system show` table through `env`: one aligned row per state
 /// category (size + what it holds, cache rows tagged) and a total line saying
-/// what `system prune` would free.
-// TODO: consolidate the table-formatting code — this hand-rolled column
-// layout, the width math inside `ui::search_table` / `ui::transaction_table`,
-// and the HELP_TEXT column convention each re-implement aligned columns;
-// `ui::Table` only collects rendered lines. One shared column-layout helper
-// should own padding/alignment so the conventions can't drift per call site.
+/// what `system prune` would free. Laid out by [`ui::Grid`] — the descriptions
+/// (with their `[cache]` tags) ride as unaligned tails behind the size column.
 fn print_system_report<E: ShellEnv>(report: &system::Report, env: &mut E) {
     env.print(&format!("state under {}:", report.root.display()));
+    let mut grid = ui::Grid::new(vec![ui::Col::left(), ui::Col::right()]).indent("  ");
     for row in &report.rows {
         let tag = if row.kind.prunable() { "  [cache]" } else { "" };
-        env.print(&format!(
-            "  {:<8} {:>10}  {}{tag}",
-            row.kind.label(),
-            row.size,
-            row.kind.description(),
-        ));
+        grid.push(
+            ui::GridRow::new(vec![
+                ui::Cell::plain(row.kind.label()),
+                ui::Cell::plain(row.size.to_string()),
+            ])
+            .tail(format!("  {}{tag}", row.kind.description())),
+        );
     }
-    env.print(&format!(
-        "  {:<8} {:>10}  `system prune` frees the [cache] rows ({})",
-        "total",
-        report.total(),
-        report.prunable_total(),
-    ));
+    grid.push(
+        ui::GridRow::new(vec![
+            ui::Cell::plain("total"),
+            ui::Cell::plain(report.total().to_string()),
+        ])
+        .tail(format!(
+            "  `system prune` frees the [cache] rows ({})",
+            report.prunable_total(),
+        )),
+    );
+    env.print_table(&grid.render());
 }
 
 /// Pure command dispatch: map a parsed [`Command`] to side effects + control
