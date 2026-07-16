@@ -13,7 +13,7 @@
 //! - [`TimeEst`] — the build-time cell, plus [`built_tag`], the trailing
 //!   `built` marker.
 
-use super::tables::{Paint, Width};
+use super::grid::{Paint, Width};
 use super::{human_bytes, human_duration};
 use crate::names::{PkgBase, PkgName, RepoName, RepoRank};
 use crate::pacman::alpm_db::PacmanIndex;

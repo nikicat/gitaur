@@ -14,6 +14,7 @@
 mod change_set;
 mod cost;
 mod gix_progress;
+mod grid;
 mod progress;
 mod prompts;
 mod search_table;
@@ -22,13 +23,14 @@ mod tables;
 pub use change_set::{ApprovalCell, ChangeSet, TxnRoot};
 pub use cost::PreviewMetrics;
 pub use gix_progress::{GixProgress, Operation};
+pub use grid::{Paint, Table};
 pub use progress::{
     TICK_PERIOD, bar_bytes, bar_bytes_streaming, bar_count, bar_sideband, promote_byte_bar,
     promote_count_bar, spinner, tick,
 };
 pub use prompts::{AurSetupChoice, aur_setup_prompt, confirm, confirm_default_no, select_pkgnames};
 pub use search_table::{InstallState, SearchRow, search_table};
-pub use tables::{Paint, Table, UpgradeSelection, install_table, pkg_list, upgrade_table};
+pub use tables::{UpgradeSelection, install_table, pkg_list, upgrade_table};
 
 use crate::units::ByteSize;
 use console::{Term, style};

@@ -18,7 +18,8 @@
 //! order given.
 
 use super::cost::{PreviewMetrics, RowCost, SizeEst, cost_of, size_of, time_col};
-use super::tables::{Cell, Paint, Table, Width, version_block};
+use super::grid::{Cell, Paint, Table, Width};
+use super::tables::version_block;
 use super::{color_on, dim, repo as repo_style};
 use crate::names::{PkgName, RepoName};
 use crate::pacman::alpm_db::PacmanIndex;
