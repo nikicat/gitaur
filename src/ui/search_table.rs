@@ -1,7 +1,9 @@
 //! The aligned result table for the ranked search list (shell `search` + the
 //! non-interactive `aurox <term>` listing).
 //!
-//! Columns: `repo · name · version · size · build-time · description`. It shares
+//! Columns: `repo · name · version · size · build-time · description`, plus a
+//! dimmed trailing [`MatchNote`] annotation when the match site is invisible
+//! on the row (a hidden split member, a `provides=` name, a group). It shares
 //! the change-set/upgrade table's cell machinery so the same bugs are fixed
 //! once — [`version_block`](super::tables::version_block) for the `old → new`
 //! verdiff, [`size_of`](super::cost::size_of)/[`cost_of`](super::cost::cost_of)
@@ -20,10 +22,11 @@
 use super::cost::{PreviewMetrics, RowCost, SizeEst, cost_of, size_of, time_col};
 use super::tables::{Cell, Paint, Table, Width, version_block};
 use super::{color_on, dim, repo as repo_style};
-use crate::names::{PkgName, RepoName};
+use crate::names::{GroupName, PkgName, RepoName, VirtualName};
 use crate::pacman::alpm_db::PacmanIndex;
 use crate::version::Version;
 use console::style;
+use std::fmt;
 
 /// Whether a searched package is installed locally.
 ///
@@ -51,6 +54,33 @@ impl InstallState {
     }
 }
 
+/// Why a row matched when nothing visible on it shows the term — rendered as
+/// the dimmed trailing annotation after the description.
+///
+/// The bracket wording matches the review header's `[provides {name}]` /
+/// `[replaces {name}]` vocabulary ([`crate::build::review`]) — a display
+/// convention, not shared code (different data feeds each).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatchNote {
+    /// A split member's pkgname (or its member-only description) matched —
+    /// the displayed pkgbase name doesn't show it.
+    Via(PkgName),
+    /// A `provides=` name matched (bare, constraint-stripped).
+    Provides(VirtualName),
+    /// A pacman group matched (repo rows only).
+    Group(GroupName),
+}
+
+impl fmt::Display for MatchNote {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Via(n) => write!(f, "[via {n}]"),
+            Self::Provides(v) => write!(f, "[provides {v}]"),
+            Self::Group(g) => write!(f, "[group {g}]"),
+        }
+    }
+}
+
 /// One search hit, ready to render. The caller resolves installed state and the
 /// version pair against the pacman DBs; the table derives the size + build-time
 /// cells from `pac`/`metrics`.
@@ -69,6 +99,10 @@ pub struct SearchRow {
     pub new_ver: Option<Version>,
     /// The one-line package description, shown dimmed as the trailing column.
     pub desc: Option<String>,
+    /// Why the row matched when the term is invisible on it (member pkgname,
+    /// provides, group); `None` when the visible name/description explains
+    /// the match.
+    pub note: Option<MatchNote>,
 }
 
 /// Render the ranked rows into an aligned table — one body line per row.
@@ -128,9 +162,10 @@ pub fn search_table(rows: &[SearchRow], pac: &PacmanIndex, metrics: &PreviewMetr
         );
         let size_cell = size_cell(*size, em, paint).pad_to(size_w);
         out.push(format!(
-            "{repo_cell}  {name_cell}  {ver}  {size_cell}  {time}{desc}",
+            "{repo_cell}  {name_cell}  {ver}  {size_cell}  {time}{desc}{note}",
             time = time_col(*cost, time_w, paint),
             desc = desc_cell(row.desc.as_deref(), paint),
+            note = note_cell(row.note.as_ref(), paint),
         ));
     }
     out
@@ -212,6 +247,16 @@ fn desc_cell(desc: Option<&str>, paint: Paint) -> String {
     }
 }
 
+/// The trailing match-site annotation — dimmed like the description; empty
+/// when the match is visible on the row itself.
+fn note_cell(note: Option<&MatchNote>, paint: Paint) -> String {
+    match note {
+        Some(n) if paint.colored() => format!("  {}", dim(n.to_string())),
+        Some(n) => format!("  {n}"),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +278,7 @@ mod tests {
             old_ver: old,
             new_ver: new,
             desc,
+            note: None,
         }
     }
 
@@ -321,6 +367,72 @@ mod tests {
             !table.lines()[0].contains("3m"),
             "not-installed row must not show a build estimate: {:?}",
             table.lines()[0]
+        );
+    }
+
+    /// The match-site annotation renders as the trailing `[...]` cell after
+    /// the description — one wording per variant — and only when present.
+    #[test]
+    fn note_renders_after_desc_and_only_when_present() {
+        super::super::set_color(super::super::ColorMode::Never);
+        let mut provides = row(
+            RepoName::from("aur"),
+            PkgName::from("linux-zz"),
+            InstallState::NotInstalled,
+            None,
+            Some(Version::from("1-1")),
+        );
+        provides.note = Some(MatchNote::Provides(VirtualName::new(
+            "VIRTUALBOX-GUEST-MODULES",
+        )));
+        let mut via = row(
+            RepoName::from("aur"),
+            PkgName::from("openrc-misc"),
+            InstallState::NotInstalled,
+            None,
+            Some(Version::from("1-1")),
+        );
+        via.note = Some(MatchNote::Via(PkgName::from(
+            "virtualbox-guest-utils-openrc",
+        )));
+        let mut group = row(
+            RepoName::from("extra"),
+            PkgName::from("qemu-zz"),
+            InstallState::NotInstalled,
+            None,
+            Some(Version::from("1-1")),
+        );
+        group.note = Some(MatchNote::Group(GroupName::new("virt-tools")));
+        let plain = row(
+            RepoName::from("aur"),
+            PkgName::from("claude"),
+            InstallState::NotInstalled,
+            None,
+            Some(Version::from("1-1")),
+        );
+
+        let rows = vec![provides, via, group, plain];
+        let table = search_table(&rows, &PacmanIndex::default(), &PreviewMetrics::empty());
+        let lines = table.lines();
+        assert!(
+            lines[0].ends_with("linux-zz description  [provides VIRTUALBOX-GUEST-MODULES]"),
+            "provides note trails the desc: {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[1].ends_with("  [via virtualbox-guest-utils-openrc]"),
+            "via note: {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[2].ends_with("  [group virt-tools]"),
+            "group note: {:?}",
+            lines[2]
+        );
+        assert!(
+            !lines[3].contains('['),
+            "no note, no bracket: {:?}",
+            lines[3]
         );
     }
 

@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::context;
 use crate::error::Result;
 use crate::index::{self, AurIndexData, IndexEntry};
-use crate::names::{NameMatch, PkgName, PkgTarget, RepoName, SearchTerm};
+use crate::names::{GroupName, NameMatch, PkgName, PkgTarget, RepoName, SearchTerm, VirtualName};
 use crate::pacman::alpm_db::{self, PacmanIndex, RepoHit};
 use crate::pacman::invoke::REPO_AUR;
 use crate::ui;
@@ -22,7 +22,7 @@ use crate::units::UnixTime;
 use crate::version::Version;
 
 use std::cmp::Ordering;
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument};
 
 /// One search hit — either a sync-repo package or an AUR pkgbase.
 ///
@@ -130,15 +130,15 @@ fn merged_rows<'a>(
     repo_hits: Vec<RepoHit>,
     aur_hits: Vec<&'a IndexEntry>,
     regexes: &[regex::Regex],
-) -> Vec<Row<'a>> {
-    let mut rows: Vec<Row<'a>> = repo_hits
+) -> Vec<RankedRow<'a>> {
+    let rows: Vec<Row<'a>> = repo_hits
         .into_iter()
         .map(Row::Repo)
         .chain(aur_hits.into_iter().map(Row::Aur))
         .collect();
-    rank_rows(&mut rows, regexes);
-    info!(rows = rows.len(), "search results");
-    rows
+    let ranked = rank_rows(rows, regexes);
+    info!(rows = ranked.len(), "search results");
+    ranked
 }
 
 /// `-Ss <regex>...` — search the sync repos and the AUR in one ranked list,
@@ -158,9 +158,9 @@ pub fn cmd_search(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
     let pac = PacmanIndex::build(&alpm_db::open()?);
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    for row in &rows {
-        let install = ui::InstallState::from_installed(row.installed_name(&pac).is_some());
-        write_search_result(&mut out, row, install)?;
+    for r in &rows {
+        let install = ui::InstallState::from_installed(r.row.installed_name(&pac).is_some());
+        write_search_result(&mut out, &r.row, install)?;
     }
     Ok(0)
 }
@@ -236,11 +236,12 @@ pub fn cmd_search_install(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
     Ok(0)
 }
 
-/// Resolve one ranked [`Row`] into a [`ui::SearchRow`] for the aligned table:
-/// its display name, available version, description, and — against `pac` — its
-/// installed state and (when an upgrade is available) the installed version for
-/// the `old → new` diff.
-pub(crate) fn search_row(row: &Row<'_>, pac: &PacmanIndex) -> ui::SearchRow {
+/// Resolve one [`RankedRow`] into a [`ui::SearchRow`] for the aligned table:
+/// its display name, available version, description, match-site annotation,
+/// and — against `pac` — its installed state and (when an upgrade is
+/// available) the installed version for the `old → new` diff.
+pub(crate) fn search_row(r: &RankedRow<'_>, pac: &PacmanIndex) -> ui::SearchRow {
+    let row = &r.row;
     let name = PkgName::new(row.picked().into_inner());
     let available = Some(row.version());
     let installed_as = row.installed_name(pac);
@@ -263,24 +264,57 @@ pub(crate) fn search_row(row: &Row<'_>, pac: &PacmanIndex) -> ui::SearchRow {
         old_ver,
         new_ver: available,
         desc: row.desc(),
+        note: r.class.note.clone(),
     }
 }
 
-/// Rank + sort merged repo/AUR search `rows` in place, best match first.
+/// A search row decorated with its one-shot [`MatchClass`] — what ranking
+/// produces and every renderer consumes. The classification is computed once
+/// and feeds both the sort key and the match-site annotation, so the two
+/// can't drift apart.
+pub(crate) struct RankedRow<'a> {
+    pub(crate) row: Row<'a>,
+    class: MatchClass,
+}
+
+/// Classify + rank merged repo/AUR search `rows`, best match first.
 ///
 /// The order the shell list and the non-interactive listing both use:
-///   1. **match tier** — a package-name *prefix* match beats a name *substring*
-///      match beats a *description-only* match. (`regexes` is already applied as
-///      the AND filter that produced `rows`, so every row matches *somewhere*;
-///      the tier records *where*.)
-///   2. **shorter name wins** within a tier — `claude` before `claude-desktop`.
-///   3. repo rows sit ahead of AUR rows of otherwise-equal rank (pacman owns the
-///      name), then AUR ties break **freshest-commit-first**, then name, for a
-///      stable total order.
+///   1. **match tier** — the [`MatchTier`] ladder, from name-prefix down to
+///      provides-substring. (`regexes` is already applied as the AND filter
+///      that produced `rows`, so every row matches *somewhere*; the tier
+///      records *where* — see [`MatchClass::of`].)
+///   2. **shorter name wins** within a tier — `claude` before
+///      `claude-desktop`; the length is the name that *earned* the tier, so a
+///      split pkgbase pulled in by a long member ranks by that member, not by
+///      its short pkgbase name.
+///   3. repo rows sit ahead of AUR rows of otherwise-equal rank (pacman owns
+///      the name), then AUR ties break **freshest-commit-first**, then name,
+///      for a stable total order.
 ///
 /// `pub(crate)` so [`crate::cli::shell`] ranks its combined list identically.
-pub(crate) fn rank_rows(rows: &mut [Row<'_>], regexes: &[regex::Regex]) {
-    rows.sort_by_cached_key(|r| rank_key(r, regexes));
+pub(crate) fn rank_rows<'a>(rows: Vec<Row<'a>>, regexes: &[regex::Regex]) -> Vec<RankedRow<'a>> {
+    let mut ranked: Vec<RankedRow<'a>> = rows
+        .into_iter()
+        .map(|row| {
+            let class = MatchClass::of(&row, regexes);
+            RankedRow { row, class }
+        })
+        .collect();
+    ranked.sort_by_cached_key(RankKey::of);
+    let mut by_tier = [0usize; 5];
+    for r in &ranked {
+        by_tier[r.class.tier as usize] += 1;
+    }
+    debug!(
+        name_prefix = by_tier[MatchTier::NamePrefix as usize],
+        name_substring = by_tier[MatchTier::NameSubstring as usize],
+        provides_exact = by_tier[MatchTier::ProvidesExact as usize],
+        desc = by_tier[MatchTier::Desc as usize],
+        provides_substring = by_tier[MatchTier::ProvidesSubstring as usize],
+        "ranked search rows"
+    );
+    ranked
 }
 
 /// The total-order sort key for one row — see [`rank_rows`] for the field
@@ -288,6 +322,7 @@ pub(crate) fn rank_rows(rows: &mut [Row<'_>], regexes: &[regex::Regex]) {
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct RankKey {
     tier: MatchTier,
+    /// Length of the name that earned the tier (see [`MatchClass`]).
     name_len: usize,
     source: SourceRank,
     /// Breaks AUR ties freshest-commit-first; repo rows all tie here (they've
@@ -295,6 +330,22 @@ struct RankKey {
     freshness: Freshness,
     /// Final lexical tie-break — the row's install identity (`PkgTarget`).
     name: PkgTarget,
+}
+
+impl RankKey {
+    fn of(r: &RankedRow<'_>) -> Self {
+        let (source, freshness) = match &r.row {
+            Row::Repo(_) => (SourceRank::Repo, Freshness::STALE),
+            Row::Aur(e) => (SourceRank::Aur, Freshness(e.commit_time)),
+        };
+        Self {
+            tier: r.class.tier,
+            name_len: r.class.name_len,
+            source,
+            freshness,
+            name: r.row.picked(),
+        }
+    }
 }
 
 /// A row's freshness for ranking: its AUR branch-tip commit time, ordered so
@@ -325,17 +376,29 @@ impl PartialOrd for Freshness {
     }
 }
 
-/// Where the query matched a package's name, best to worst. Only the name
-/// decides the tier; a hit that reached the row purely through its description
-/// (or `provides`) lands in [`MatchTier::Desc`].
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// Where the query matched a row, best to worst — variant order *is* the
+/// rank order (derived `Ord`).
+///
+/// The name tiers require the term(s) in a package name. `ProvidesExact` is
+/// a whole-name hit on a `provides=` entry — the user typed a virtual name
+/// (`wireguard-module`), so its providers outrank description matches.
+/// `Desc` covers descriptions, repo groups, and the no-site fallback. And
+/// `ProvidesSubstring` — a term merely *inside* a provides name, like
+/// `virtualbox` in every kernel's `VIRTUALBOX-GUEST-MODULES` — sinks below
+/// everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum MatchTier {
-    /// Some name starts with the query.
-    Prefix,
+    /// Some name starts with (or equals) the query.
+    NamePrefix,
     /// Some name contains the whole query, but none as a prefix.
-    Substring,
-    /// No single name carries the whole query — it matched the description.
+    NameSubstring,
+    /// A bare `provides=` name is matched over its entire span.
+    ProvidesExact,
+    /// A description or a repo group carries the query — or nothing
+    /// classifiable did (the fallback; see [`MatchClass::of`]).
     Desc,
+    /// The query is merely a substring of a `provides=` name.
+    ProvidesSubstring,
 }
 
 /// Repo rows sort ahead of AUR rows when everything else ties.
@@ -345,67 +408,186 @@ enum SourceRank {
     Aur,
 }
 
-fn rank_key(row: &Row<'_>, regexes: &[regex::Regex]) -> RankKey {
-    // `picked()` is the row's install identity (repo pkgname / AUR pkgbase) —
-    // the same name the label shows, reused here for the length + lexical keys.
-    let name = row.picked();
-    let (source, freshness) = match row {
-        Row::Repo(_) => (SourceRank::Repo, Freshness::STALE),
-        Row::Aur(e) => (SourceRank::Aur, Freshness(e.commit_time)),
-    };
-    RankKey {
-        tier: match_tier(row, regexes),
-        name_len: name.len(),
-        source,
-        freshness,
-        name,
-    }
+/// One row's classification against the whole AND query — computed ONCE by
+/// [`MatchClass::of`], read by both [`RankKey`] and the rendered
+/// [`ui::MatchNote`].
+struct MatchClass {
+    tier: MatchTier,
+    /// Byte length of the name that *earned* the tier (the best-matching
+    /// member / pkgbase / repo pkgname); the display name's length for the
+    /// non-name tiers.
+    name_len: usize,
+    /// Annotation for the bottleneck site; `None` when that site is visible
+    /// on the row (display name / display desc) or unknown.
+    note: Option<ui::MatchNote>,
 }
 
-/// The best (lowest) tier any of a row's names achieves against the whole query.
-///
-/// A row's names are its display name plus — for AUR split packages — each
-/// member pkgname, so a query hitting only a member still counts as a name
-/// match, not a description one. Each name is tiered through its typed
-/// `regex_anchor` (on `PkgName` / `PkgBase`); `name_tier` combines the per-term
-/// anchors into a [`MatchTier`].
-fn match_tier(row: &Row<'_>, regexes: &[regex::Regex]) -> MatchTier {
-    match row {
-        Row::Repo(r) => name_tier(|re| r.name.regex_anchor(re), regexes),
-        Row::Aur(e) => e
-            .pkgnames
-            .iter()
-            .map(|p| name_tier(|re| p.name.regex_anchor(re), regexes))
-            .fold(
-                name_tier(|re| e.pkgbase.regex_anchor(re), regexes),
-                MatchTier::min,
+impl MatchClass {
+    /// Classify `row` against the whole AND query: each term takes its best
+    /// site ([`Best::of`]); the row's tier and annotation come from the
+    /// **worst** term — the bottleneck that kept it out of a higher tier
+    /// (ties keep the first term, deterministic in user-typed order).
+    ///
+    /// Two deliberate differences from the pre-ladder ranking:
+    /// * a name tier no longer requires all terms inside ONE name — term A
+    ///   hitting member X and term B member Y still ranks as a name match;
+    /// * a prefix hit for one term plus a substring hit for another ranks
+    ///   `NameSubstring` (worst-of), where the old ranking reported prefix.
+    fn of(row: &Row<'_>, regexes: &[regex::Regex]) -> Self {
+        let mut worst: Option<Best<'_>> = None;
+        for r in regexes {
+            let b = Best::of(row, r);
+            if worst.as_ref().is_none_or(|w| b.tier > w.tier) {
+                worst = Some(b);
+            }
+        }
+        let worst = worst.unwrap_or(Best {
+            tier: MatchTier::Desc,
+            site: Site::Unknown,
+        });
+        let display_len = row.picked().len();
+        let (name_len, note) = match worst.site {
+            Site::DisplayName | Site::DisplayDesc | Site::Unknown => (display_len, None),
+            Site::MemberName(n) => (n.len(), Some(ui::MatchNote::Via(n.clone()))),
+            Site::MemberDesc(n) => (display_len, Some(ui::MatchNote::Via(n.clone()))),
+            Site::Provides(s) => (
+                display_len,
+                Some(ui::MatchNote::Provides(VirtualName::new(s))),
             ),
-    }
-}
-
-/// Tier one name against the whole query, given `anchor` — where each term
-/// matches that name. The query is an AND, so the name has to satisfy *every*
-/// term (`anchor` returning `Some`) to count as a name match at all: it's
-/// `Prefix` when some term anchors at the name's start, `Substring` when all
-/// terms match but none anchors, else `Desc` (the row was pulled in by its
-/// description). The typed [`NameMatch`] keeps an anchored query like `^foo$`
-/// classified as the exact-name match it is.
-fn name_tier(
-    anchor: impl Fn(&regex::Regex) -> Option<NameMatch>,
-    regexes: &[regex::Regex],
-) -> MatchTier {
-    let mut any_prefix = false;
-    for r in regexes {
-        match anchor(r) {
-            Some(NameMatch::Prefix) => any_prefix = true,
-            Some(NameMatch::Inside) => {}
-            None => return MatchTier::Desc,
+            Site::Group(g) => (display_len, Some(ui::MatchNote::Group(g.clone()))),
+        };
+        Self {
+            tier: worst.tier,
+            name_len,
+            note,
         }
     }
-    if any_prefix {
-        MatchTier::Prefix
-    } else {
-        MatchTier::Substring
+}
+
+/// Where one term matched a row — the classification's internal vocabulary.
+/// Borrows from the row; only the final [`MatchClass`] clones.
+enum Site<'e> {
+    /// The name the row displays (repo pkgname / AUR pkgbase or its canonical
+    /// member) — the match is visible, no annotation.
+    DisplayName,
+    /// A split member's pkgname, hidden behind the pkgbase row.
+    MemberName(&'e PkgName),
+    /// The description the row displays — visible, no annotation.
+    DisplayDesc,
+    /// A split member's own description that `display_desc` did not pick —
+    /// hidden, so the member is named in the annotation.
+    MemberDesc(&'e PkgName),
+    /// A bare `provides=` name.
+    Provides(&'e str),
+    /// A repo package's group.
+    Group(&'e GroupName),
+    /// Nothing classifiable matched: a repo hit libalpm matched with POSIX
+    /// ERE / plain-substring semantics our regex doesn't reproduce, or an
+    /// AUR hit where the term matched only a provides *version suffix*
+    /// (the index filter matches full dep specs).
+    Unknown,
+}
+
+/// One term's best (lowest-tier) match site on a row.
+struct Best<'e> {
+    tier: MatchTier,
+    site: Site<'e>,
+}
+
+impl<'e> Best<'e> {
+    /// Probe every site of `row` for `r`, best tier wins; **equal tiers keep
+    /// the earlier, more visible site**, so an invisible site only wins when
+    /// strictly better — that is what suppresses the annotation whenever the
+    /// displayed name/desc explains the row equally well.
+    fn of(row: &'e Row<'_>, r: &regex::Regex) -> Self {
+        let mut best: Option<Best<'e>> = None;
+        let mut consider = |tier: MatchTier, site: Site<'e>| {
+            if best.as_ref().is_none_or(|b| tier < b.tier) {
+                best = Some(Best { tier, site });
+            }
+        };
+        match row {
+            Row::Aur(e) => {
+                if let Some(t) = name_tier(e.pkgbase.regex_anchor(r)) {
+                    consider(t, Site::DisplayName);
+                }
+                for p in &e.pkgnames {
+                    if let Some(t) = name_tier(p.name.regex_anchor(r)) {
+                        let site = if e.pkgbase.matches_pkgname(&p.name) {
+                            Site::DisplayName
+                        } else {
+                            Site::MemberName(&p.name)
+                        };
+                        consider(t, site);
+                    }
+                }
+                let shown = e.display_desc();
+                if let Some(d) = shown
+                    && r.is_match(d)
+                {
+                    consider(MatchTier::Desc, Site::DisplayDesc);
+                }
+                for p in &e.pkgnames {
+                    if let Some(d) = p.pkgdesc.as_deref()
+                        && !d.is_empty()
+                        && shown != Some(d)
+                        && r.is_match(d)
+                    {
+                        consider(MatchTier::Desc, Site::MemberDesc(&p.name));
+                    }
+                }
+                for prov in e.all_provides() {
+                    if let Some(t) = provides_tier(prov.bare_anchor(r)) {
+                        consider(t, Site::Provides(prov.bare()));
+                    }
+                }
+            }
+            Row::Repo(h) => {
+                if let Some(t) = name_tier(h.name.regex_anchor(r)) {
+                    consider(t, Site::DisplayName);
+                }
+                if let Some(d) = h.desc.as_deref()
+                    && r.is_match(d)
+                {
+                    consider(MatchTier::Desc, Site::DisplayDesc);
+                }
+                for v in &h.provides {
+                    if let Some(t) = provides_tier(v.regex_anchor(r)) {
+                        consider(t, Site::Provides(v.as_str()));
+                    }
+                }
+                for g in &h.groups {
+                    if g.matches_regex(r) {
+                        consider(MatchTier::Desc, Site::Group(g));
+                    }
+                }
+            }
+        }
+        best.unwrap_or(Best {
+            tier: MatchTier::Desc,
+            site: Site::Unknown,
+        })
+    }
+}
+
+/// Lift a name's [`NameMatch`] anchor into the name tiers. The typed anchor
+/// keeps a query like `^foo$` classified as the exact-name match it is.
+const fn name_tier(anchor: Option<NameMatch>) -> Option<MatchTier> {
+    match anchor {
+        Some(NameMatch::Exact | NameMatch::Prefix) => Some(MatchTier::NamePrefix),
+        Some(NameMatch::Inside) => Some(MatchTier::NameSubstring),
+        None => None,
+    }
+}
+
+/// Lift a provides name's anchor into the provides tiers: only a whole-span
+/// hit counts as the user naming the virtual; anything else is the noise
+/// tier below descriptions.
+const fn provides_tier(anchor: Option<NameMatch>) -> Option<MatchTier> {
+    match anchor {
+        Some(NameMatch::Exact) => Some(MatchTier::ProvidesExact),
+        Some(NameMatch::Prefix | NameMatch::Inside) => Some(MatchTier::ProvidesSubstring),
+        None => None,
     }
 }
 
@@ -440,6 +622,8 @@ mod tests {
             version: Version::from("2.0-1"),
             desc: desc.map(str::to_owned),
             installed,
+            provides: Vec::new(),
+            groups: Vec::new(),
         }
     }
 
@@ -502,9 +686,17 @@ mod tests {
     }
 
     /// Rank `rows` against `terms` and return the install identities in order.
-    fn ranked(mut rows: Vec<Row<'_>>, terms: &[SearchTerm]) -> Vec<PkgTarget> {
-        rank_rows(&mut rows, &compiled(terms));
-        rows.iter().map(Row::picked).collect()
+    fn ranked(rows: Vec<Row<'_>>, terms: &[SearchTerm]) -> Vec<PkgTarget> {
+        rank_rows(rows, &compiled(terms))
+            .iter()
+            .map(|r| r.row.picked())
+            .collect()
+    }
+
+    /// Classify one row against `terms` — the tier + annotation both rank and
+    /// render read.
+    fn class(row: &Row<'_>, terms: &[SearchTerm]) -> MatchClass {
+        MatchClass::of(row, &compiled(terms))
     }
 
     /// The primary key: a name-prefix hit outranks a name-substring hit, which
@@ -541,10 +733,13 @@ mod tests {
     #[test]
     fn rank_puts_repo_ahead_of_aur_on_equal_match() {
         let aur = mk("claude", None, None);
-        let mut rows = vec![Row::Aur(&aur), Row::Repo(repo("claude", None, false))];
-        rank_rows(&mut rows, &compiled(&[SearchTerm::new("claude")]));
-        assert!(matches!(rows[0], Row::Repo(_)), "repo should lead the tie");
-        assert!(matches!(rows[1], Row::Aur(_)));
+        let rows = vec![Row::Aur(&aur), Row::Repo(repo("claude", None, false))];
+        let ranked = rank_rows(rows, &compiled(&[SearchTerm::new("claude")]));
+        assert!(
+            matches!(ranked[0].row, Row::Repo(_)),
+            "repo should lead the tie"
+        );
+        assert!(matches!(ranked[1].row, Row::Aur(_)));
     }
 
     /// `Freshness` is the domain key behind the AUR tie-break: a newer commit
@@ -576,14 +771,15 @@ mod tests {
     fn rank_treats_anchored_regex_as_name_prefix() {
         let hit = mk("test-trivial", None, None);
         let miss = mk("unrelated", None, None);
-        let rx = compiled(&[SearchTerm::new("^test-trivial$")]);
-        assert_eq!(match_tier(&Row::Aur(&hit), &rx), MatchTier::Prefix);
-        assert_eq!(match_tier(&Row::Aur(&miss), &rx), MatchTier::Desc);
+        let terms = [SearchTerm::new("^test-trivial$")];
+        assert_eq!(class(&Row::Aur(&hit), &terms).tier, MatchTier::NamePrefix);
+        assert_eq!(class(&Row::Aur(&miss), &terms).tier, MatchTier::Desc);
     }
 
-    /// Multi-term AND: a name-tier match needs *every* term in the name. Here
-    /// `python-claude` carries both (→ prefix), while `claude-cli` has "python"
-    /// only in its description (→ desc), so it ranks lower.
+    /// Multi-term AND: the row ranks by its *bottleneck* term. `python-claude`
+    /// carries both terms in its name (worst site: name), while `claude-cli`
+    /// has "python" only in its description (worst site: desc), so it ranks
+    /// lower.
     #[test]
     fn rank_multi_term_requires_all_terms_in_name() {
         let both = mk("python-claude", None, None);
@@ -650,7 +846,8 @@ mod tests {
     }
 
     /// A split package's member pkgname counts as a name match, not a
-    /// description one — so a query hitting only a member still ranks by name.
+    /// description one — so a query hitting only a member still ranks by name,
+    /// and the hidden member is named in the annotation.
     #[test]
     fn rank_member_pkgname_counts_as_name_match() {
         let mut e = mk("widgets", None, None);
@@ -659,7 +856,190 @@ mod tests {
             provides: Vec::new(),
             pkgdesc: None,
         });
-        let rx = compiled(&[SearchTerm::new("claude")]);
-        assert_eq!(match_tier(&Row::Aur(&e), &rx), MatchTier::Substring);
+        let c = class(&Row::Aur(&e), &[SearchTerm::new("claude")]);
+        assert_eq!(c.tier, MatchTier::NameSubstring);
+        assert_eq!(c.name_len, "libclaude".len(), "ranks by the earned member");
+        assert_eq!(c.note, Some(ui::MatchNote::Via(PkgName::new("libclaude"))));
+    }
+
+    /// The full five-rung ladder in one list: name-prefix, name-substring,
+    /// exact-provides, description, provides-substring — in that order.
+    #[test]
+    fn rank_orders_full_tier_ladder() {
+        let prefix = mk("virtualbox-bin", None, None);
+        let substr = mk("mini-virtualbox", None, None);
+        let mut pexact = mk("kernel-a", None, None);
+        pexact.provides = vec![PkgTarget::new("virtualbox")];
+        let desc = mk("qemu-thing", Some("a virtualbox alternative"), None);
+        let mut psub = mk("kernel-b", None, None);
+        psub.provides = vec![PkgTarget::new("VIRTUALBOX-GUEST-MODULES")];
+        let rows = vec![
+            Row::Aur(&psub),
+            Row::Aur(&desc),
+            Row::Aur(&pexact),
+            Row::Aur(&substr),
+            Row::Aur(&prefix),
+        ];
+        assert_eq!(
+            ranked(rows, &[SearchTerm::new("virtualbox")]),
+            [
+                PkgTarget::from("virtualbox-bin"),
+                PkgTarget::from("mini-virtualbox"),
+                PkgTarget::from("kernel-a"),
+                PkgTarget::from("qemu-thing"),
+                PkgTarget::from("kernel-b"),
+            ]
+        );
+    }
+
+    /// The kernel-flood case: a term merely inside a provides name sinks
+    /// below a description match, no matter how the names compare.
+    #[test]
+    fn rank_provides_substring_sinks_below_desc() {
+        let mut kernel = mk("linux-zz", None, None);
+        kernel.provides = vec![PkgTarget::new("VIRTUALBOX-GUEST-MODULES")];
+        let desc = mk("vbox-tools", Some("tools for virtualbox guests"), None);
+        let rows = vec![Row::Aur(&kernel), Row::Aur(&desc)];
+        assert_eq!(
+            ranked(rows, &[SearchTerm::new("virtualbox")]),
+            [PkgTarget::from("vbox-tools"), PkgTarget::from("linux-zz")]
+        );
+    }
+
+    /// Typing a virtual name exactly is a legitimate lookup: the provider
+    /// outranks description matches, but still trails real name matches.
+    #[test]
+    fn rank_provides_exact_outranks_desc_but_not_name() {
+        let name = mk("virtualbox-guest-modules-lts", None, None);
+        let mut provider = mk("linux-zz", None, None);
+        provider.provides = vec![PkgTarget::new("VIRTUALBOX-GUEST-MODULES")];
+        let desc = mk("docs", Some("about virtualbox-guest-modules"), None);
+        let rows = vec![Row::Aur(&desc), Row::Aur(&provider), Row::Aur(&name)];
+        assert_eq!(
+            ranked(rows, &[SearchTerm::new("virtualbox-guest-modules")]),
+            [
+                PkgTarget::from("virtualbox-guest-modules-lts"),
+                PkgTarget::from("linux-zz"),
+                PkgTarget::from("docs"),
+            ]
+        );
+    }
+
+    /// The openrc-misc shape: a short pkgbase pulled in by a long member must
+    /// rank by the member's length, not jump the queue on its own short name.
+    #[test]
+    fn rank_uses_earned_member_name_length() {
+        let mut openrc = mk("openrc-misc", None, None);
+        openrc.pkgnames = vec![Pkgname {
+            name: PkgName::new("virtualbox-guest-utils-openrc"),
+            provides: Vec::new(),
+            pkgdesc: None,
+        }];
+        let bin = mk("virtualbox-bin", None, None);
+        let rows = vec![Row::Aur(&openrc), Row::Aur(&bin)];
+        assert_eq!(
+            ranked(rows, &[SearchTerm::new("virtualbox")]),
+            [
+                PkgTarget::from("virtualbox-bin"),
+                PkgTarget::from("openrc-misc"),
+            ]
+        );
+    }
+
+    /// Worst-of across terms: one term a name prefix, the other only a name
+    /// substring → the row ranks `NameSubstring` (the pre-ladder ranking
+    /// reported prefix here). Pins the deliberate semantics shift.
+    #[test]
+    fn classify_multi_term_worst_of_demotes_prefix_to_substring() {
+        let e = mk("python-claude", None, None);
+        let both = [SearchTerm::new("python"), SearchTerm::new("claude")];
+        assert_eq!(class(&Row::Aur(&e), &both).tier, MatchTier::NameSubstring);
+        let one = [SearchTerm::new("python")];
+        assert_eq!(class(&Row::Aur(&e), &one).tier, MatchTier::NamePrefix);
+    }
+
+    /// Matches on what the row already displays — its name, its description —
+    /// carry no annotation.
+    #[test]
+    fn classify_display_sites_carry_no_note() {
+        let name = mk("claude", None, None);
+        let desc = mk("toolkit", Some("wraps claude"), None);
+        let terms = [SearchTerm::new("claude")];
+        let c = class(&Row::Aur(&name), &terms);
+        assert_eq!((c.tier, c.note), (MatchTier::NamePrefix, None));
+        let c = class(&Row::Aur(&desc), &terms);
+        assert_eq!((c.tier, c.note), (MatchTier::Desc, None));
+    }
+
+    /// A hidden member description (pkgbase-level desc displayed instead)
+    /// names the member in the annotation.
+    #[test]
+    fn classify_notes_hidden_member_desc() {
+        let mut e = mk("widgets", Some("a widget kit"), None);
+        e.pkgnames[0].pkgdesc = Some("claude bindings".to_owned());
+        let c = class(&Row::Aur(&e), &[SearchTerm::new("claude")]);
+        assert_eq!(c.tier, MatchTier::Desc);
+        assert_eq!(c.note, Some(ui::MatchNote::Via(PkgName::new("widgets"))));
+    }
+
+    /// A versioned provides spec (`myvirt=2.5`) classifies against its bare
+    /// name: `^myvirt$` is an exact provides hit, and the annotation carries
+    /// the stripped name.
+    #[test]
+    fn classify_provides_note_strips_constraint() {
+        let mut e = mk("test-provides-virt", None, None);
+        e.provides = vec![PkgTarget::new("myvirt=2.5")];
+        let c = class(&Row::Aur(&e), &[SearchTerm::new("^myvirt$")]);
+        assert_eq!(c.tier, MatchTier::ProvidesExact);
+        assert_eq!(
+            c.note,
+            Some(ui::MatchNote::Provides(VirtualName::new("myvirt")))
+        );
+    }
+
+    /// With multiple terms, the *bottleneck* term (the worst site) decides
+    /// both the tier and the annotation: name hit + provides-only hit →
+    /// provides tier, provides note.
+    #[test]
+    fn classify_bottleneck_term_drives_tier_and_note() {
+        let mut e = mk("claude-extras", None, None);
+        e.provides = vec![PkgTarget::new("VIRTUALBOX-GUEST-MODULES")];
+        let c = class(
+            &Row::Aur(&e),
+            &[SearchTerm::new("claude"), SearchTerm::new("virtualbox")],
+        );
+        assert_eq!(c.tier, MatchTier::ProvidesSubstring);
+        assert_eq!(
+            c.note,
+            Some(ui::MatchNote::Provides(VirtualName::new(
+                "VIRTUALBOX-GUEST-MODULES"
+            )))
+        );
+    }
+
+    /// libalpm's `-Ss` also matches pacman groups; a group-only repo hit is
+    /// tiered with descriptions and explained by a `[group …]` note.
+    #[test]
+    fn classify_repo_group_match_notes_group() {
+        let mut h = repo("qemu-zz", None, false);
+        h.groups = vec![GroupName::new("virt-tools")];
+        let c = class(&Row::Repo(h), &[SearchTerm::new("virt-tools")]);
+        assert_eq!(c.tier, MatchTier::Desc);
+        assert_eq!(
+            c.note,
+            Some(ui::MatchNote::Group(GroupName::new("virt-tools")))
+        );
+    }
+
+    /// A repo hit our regex can't re-classify (libalpm matched it with POSIX
+    /// ERE / plain-substring semantics) falls back to the description tier,
+    /// unannotated — never dropped, never crashing.
+    #[test]
+    fn classify_unmatched_repo_hit_falls_back_unannotated() {
+        let c = class(
+            &Row::Repo(repo("weird", None, false)),
+            &[SearchTerm::new("zzz")],
+        );
+        assert_eq!((c.tier, c.note), (MatchTier::Desc, None));
     }
 }
