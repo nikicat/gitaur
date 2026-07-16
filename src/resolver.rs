@@ -20,9 +20,9 @@ pub use pkgbase_expand::{ExpandedTargets, expand_pkgbase_targets};
 ///
 /// Field types use the typed [`PkgBase`]/[`PkgName`] newtypes wherever the
 /// identity is unambiguous — pkgbase-keyed maps, pkgbase strata, pkgname
-/// selections. `direct_repo` / `transitive_repo` / `direct_targets` stay
-/// `String` because their contents are deliberately mixed (virtual provides,
-/// version-suffixed names, freeform pacman targets).
+/// selections. `direct_repo` / `transitive_repo` / `disclosed_repo_deps` /
+/// `direct_targets` stay `String` because their contents are deliberately
+/// mixed (virtual provides, version-suffixed names, freeform pacman targets).
 #[derive(Debug, Default, Clone)]
 pub struct Plan {
     /// Direct targets the user named that resolve to a sync repo. Installed
@@ -30,6 +30,15 @@ pub struct Plan {
     pub direct_repo: Vec<String>,
     /// Transitive repo pkgnames pulled in via AUR builds; installed with `--asdeps`.
     pub transitive_repo: Vec<String>,
+    /// Repo deps of *repo* packages — surfaced in the plan table and counted
+    /// by [`Plan::only_requested`], but never installed by aurox: the
+    /// `pacman -S` that installs their requirer resolves them itself,
+    /// recording the dependency reason natively. A pkg required by both an
+    /// AUR pkgbase and a repo package may sit here *and* in
+    /// `transitive_repo`; the install lane follows `transitive_repo` (its
+    /// `--needed` makes the overlap a harmless skip) and displays render the
+    /// deduped union ([`Plan::repo_dep_disclosure`]).
+    pub disclosed_repo_deps: Vec<String>,
     /// AUR pkgbases grouped into Kahn strata over the **makedepends +
     /// checkdepends** subgraph only — these are the build-time requirements
     /// that must already be installed in localdb when `makepkg` runs.
@@ -82,7 +91,9 @@ impl Plan {
     }
 
     /// True when every package the plan would install was named by the user:
-    /// no repo dependencies pulled in (`transitive_repo` empty) and every AUR
+    /// no repo dependencies pulled in (`transitive_repo` and
+    /// `disclosed_repo_deps` both empty — an unrequested repo dep warrants
+    /// the gate whether aurox installs it or pacman does) and every AUR
     /// pkgbase was a direct target (none dragged in as another's dep). The
     /// build pipeline skips its "Proceed with installation?" prompt in this
     /// case — the plan table just echoes the user's own request, so the
@@ -91,11 +102,28 @@ impl Plan {
     /// per-pkgbase AUR review prompts still apply regardless.
     pub fn only_requested(&self) -> bool {
         self.transitive_repo.is_empty()
+            && self.disclosed_repo_deps.is_empty()
             && self
                 .aur_strata
                 .iter()
                 .flatten()
                 .all(|pb| self.direct_aur.contains(pb))
+    }
+
+    /// The repo-dependency rows to disclose to the user: the deduped union of
+    /// `transitive_repo` (AUR-required, installed by aurox with `--asdeps`)
+    /// and `disclosed_repo_deps` (repo-required, installed by pacman itself
+    /// within its requirer's transaction). Display-only — install code reads
+    /// `transitive_repo` directly.
+    pub fn repo_dep_disclosure(&self) -> Vec<String> {
+        let mut union = self.transitive_repo.clone();
+        union.extend(
+            self.disclosed_repo_deps
+                .iter()
+                .filter(|n| !self.transitive_repo.contains(n))
+                .cloned(),
+        );
+        union
     }
 
     /// What the plan says about one pkgbase: the pkgbase itself plus the two
@@ -121,9 +149,10 @@ pub struct PkgbasePlan<'a> {
 
 /// How a target entered the resolver's work queue: named by the user
 /// (`Direct`) or pulled in as another package's dependency (`Dep`, carrying
-/// the requiring package). Drives the explicit-vs-`--asdeps` split
-/// (`direct_repo`/`transitive_repo`, `direct_aur`), gates the direct-target
-/// rebuild override, and names the requirer when a dep resolves nowhere.
+/// the requiring package). Drives the repo bucketing split
+/// (`direct_repo`/`transitive_repo`/`disclosed_repo_deps`, `direct_aur`),
+/// gates the direct-target rebuild override, and names the requirer when a
+/// dep resolves nowhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Origin {
     Direct,
@@ -223,10 +252,17 @@ pub fn resolve(aur: &AurIndexData, pac: &PacmanIndex, targets: &[String]) -> Res
                 // direct_set is keyed on the **user-typed** name so explicit
                 // `aurox -S cargo` flips the resolved provider (`rust`) into
                 // direct_repo even when it also appears as another pkg's dep.
+                // Unrequested deps split by requirer: an AUR pkgbase's repo
+                // dep needs its own `--asdeps` install before builds
+                // (transitive_repo); a repo pkg's dep is installed by the
+                // same `pacman -S` as its requirer, so it's disclosure-only
+                // (disclosed_repo_deps).
                 let bucket = if origin.is_direct(&target, &direct_set) {
                     &mut plan.direct_repo
-                } else {
+                } else if matches!(origin, Origin::Dep(Requirer::Aur(_))) {
                     &mut plan.transitive_repo
+                } else {
+                    &mut plan.disclosed_repo_deps
                 };
                 if !bucket.iter().any(|s| concrete == *s) {
                     bucket.push(concrete.into_inner());
@@ -294,17 +330,20 @@ pub fn resolve(aur: &AurIndexData, pac: &PacmanIndex, targets: &[String]) -> Res
     plan.aur_make_edges = make_edges_resolved;
 
     // Cross-bucket dedup: a concrete pkg may have landed in direct_repo via
-    // one alias (e.g. user typed `rust`) and in transitive_repo via another
-    // (an AUR makedep `cargo` → `rust`). Direct wins — drop the transitive
-    // copy so the install isn't double-listed and explicit-vs-asdeps stays
+    // one alias (e.g. user typed `rust`) and in a dep bucket via another
+    // (an AUR makedep `cargo` → `rust`). Direct wins — drop the dep-bucket
+    // copies so the install isn't double-listed and explicit-vs-asdeps stays
     // consistent.
     let direct_set: HashSet<&str> = plan.direct_repo.iter().map(String::as_str).collect();
     plan.transitive_repo
+        .retain(|n| !direct_set.contains(n.as_str()));
+    plan.disclosed_repo_deps
         .retain(|n| !direct_set.contains(n.as_str()));
 
     info!(
         direct_repo = plan.direct_repo.len(),
         transitive_repo = plan.transitive_repo.len(),
+        disclosed_repo_deps = plan.disclosed_repo_deps.len(),
         aur_strata = plan.aur_strata.len(),
         aur_total = plan.aur_strata.iter().map(Vec::len).sum::<usize>(),
         "plan resolved",
@@ -315,10 +354,10 @@ pub fn resolve(aur: &AurIndexData, pac: &PacmanIndex, targets: &[String]) -> Res
 /// Expand a repo package's `depends` into the BFS `queue` as `Origin::Dep`
 /// targets carrying `concrete` as their [`Requirer`].
 /// Each is classified on its next pop: already-installed deps drop
-/// out as `Installed`, sync deps land in `transitive_repo`, virtuals resolve
-/// to their provider. Surfacing them here is what lets the plan show — and
-/// [`Plan::only_requested`] gate on — deps the final `pacman -S` would
-/// otherwise pull in silently.
+/// out as `Installed`, sync deps land in `disclosed_repo_deps`, virtuals
+/// resolve to their provider. Surfacing them here is what lets the plan
+/// show — and [`Plan::only_requested`] gate on — deps the final `pacman -S`
+/// resolves and installs itself.
 fn enqueue_repo_deps(pac: &PacmanIndex, concrete: &PkgName, queue: &mut Vec<(PkgTarget, Origin)>) {
     for dep in pac.sync_depends(concrete) {
         if !dep.bare().is_empty() {
@@ -474,10 +513,10 @@ mod tests {
         );
     }
 
-    /// Sorted clone of `transitive_repo` — the BFS pushes in pop order, so
-    /// tests assert membership, not the incidental ordering.
-    fn sorted_transitive(plan: &Plan) -> Vec<String> {
-        let mut t = plan.transitive_repo.clone();
+    /// Sorted clone of `disclosed_repo_deps` — the BFS pushes in pop order,
+    /// so tests assert membership, not the incidental ordering.
+    fn sorted_disclosed(plan: &Plan) -> Vec<String> {
+        let mut t = plan.disclosed_repo_deps.clone();
         t.sort();
         t
     }
@@ -485,15 +524,18 @@ mod tests {
     // ---- repo dependency tree --------------------------------------------
 
     #[test]
-    fn repo_target_pulls_uninstalled_repo_dep() {
+    fn repo_target_dep_is_disclosed_not_installed() {
         // `foo` depends on repo `bar`; nothing installed. `bar` is an
-        // unrequested repo dep → transitive_repo, and the prompt must fire.
+        // unrequested repo dep of a *repo* target → disclosed_repo_deps (the
+        // `pacman -S foo` installs it natively; aurox must not), NOT
+        // transitive_repo — and the prompt must fire.
         let mut pac = PacmanIndex::default();
         sync_pkg(&mut pac, "foo", &["bar"]);
         sync_pkg(&mut pac, "bar", &[]);
         let plan = resolve_repo(&pac, &["foo"]);
         assert_eq!(plan.direct_repo, vec!["foo".to_owned()]);
-        assert_eq!(plan.transitive_repo, vec!["bar".to_owned()]);
+        assert_eq!(plan.disclosed_repo_deps, vec!["bar".to_owned()]);
+        assert!(plan.transitive_repo.is_empty());
         assert!(!plan.only_requested());
     }
 
@@ -508,13 +550,14 @@ mod tests {
         let plan = resolve_repo(&pac, &["foo"]);
         assert_eq!(plan.direct_repo, vec!["foo".to_owned()]);
         assert!(plan.transitive_repo.is_empty());
+        assert!(plan.disclosed_repo_deps.is_empty());
         assert!(plan.only_requested());
     }
 
     #[test]
     fn repo_deps_walk_transitively() {
         // foo → bar → baz, all repo, none installed. The walk must reach the
-        // whole closure, not just the direct dep.
+        // whole closure, not just the direct dep — all disclosure-only.
         let mut pac = PacmanIndex::default();
         sync_pkg(&mut pac, "foo", &["bar"]);
         sync_pkg(&mut pac, "bar", &["baz"]);
@@ -522,9 +565,10 @@ mod tests {
         let plan = resolve_repo(&pac, &["foo"]);
         assert_eq!(plan.direct_repo, vec!["foo".to_owned()]);
         assert_eq!(
-            sorted_transitive(&plan),
+            sorted_disclosed(&plan),
             vec!["bar".to_owned(), "baz".to_owned()]
         );
+        assert!(plan.transitive_repo.is_empty());
         assert!(!plan.only_requested());
     }
 
@@ -532,7 +576,7 @@ mod tests {
     fn user_named_repo_dep_stays_direct() {
         // User names both `foo` and its dep `bar` → both explicit, nothing
         // unrequested, prompt skipped. `bar` is reached as a dep too, but the
-        // direct_set backstop keeps it in direct_repo, not transitive_repo.
+        // direct_set backstop keeps it in direct_repo, not a dep bucket.
         let mut pac = PacmanIndex::default();
         sync_pkg(&mut pac, "foo", &["bar"]);
         sync_pkg(&mut pac, "bar", &[]);
@@ -541,6 +585,7 @@ mod tests {
         direct.sort();
         assert_eq!(direct, vec!["bar".to_owned(), "foo".to_owned()]);
         assert!(plan.transitive_repo.is_empty());
+        assert!(plan.disclosed_repo_deps.is_empty());
         assert!(plan.only_requested());
     }
 
@@ -555,8 +600,54 @@ mod tests {
             .insert("libbar.so".into(), vec!["barlib".into()]);
         let plan = resolve_repo(&pac, &["foo"]);
         assert_eq!(plan.direct_repo, vec!["foo".to_owned()]);
-        assert_eq!(plan.transitive_repo, vec!["barlib".to_owned()]);
+        assert_eq!(plan.disclosed_repo_deps, vec!["barlib".to_owned()]);
+        assert!(plan.transitive_repo.is_empty());
         assert!(!plan.only_requested());
+    }
+
+    /// A repo pkgname required by BOTH an AUR pkgbase (makedep) and a repo
+    /// target's `depends` sits in both dep buckets; `transitive_repo` wins
+    /// for install (lane 2's `--needed` makes the overlap a no-op) and the
+    /// disclosure union lists it once.
+    #[test]
+    fn dep_required_by_both_aur_and_repo_lands_in_install_bucket() {
+        let idx = IndexFile {
+            entries: vec![entry("a", &[], &["shared"])],
+            ..IndexFile::empty()
+        };
+        let aur = AurIndexData::from_index(idx);
+        let mut pac = PacmanIndex::default();
+        sync_pkg(&mut pac, "foo", &["shared"]);
+        sync_pkg(&mut pac, "shared", &[]);
+        let plan = resolve(&aur, &pac, &["a".to_owned(), "foo".to_owned()]).unwrap();
+
+        assert_eq!(plan.transitive_repo, vec!["shared".to_owned()]);
+        assert_eq!(plan.disclosed_repo_deps, vec!["shared".to_owned()]);
+        assert_eq!(
+            plan.repo_dep_disclosure(),
+            vec!["shared".to_owned()],
+            "the union dedups the double-bucketed dep"
+        );
+        assert!(!plan.only_requested());
+    }
+
+    /// The dep of an AUR-required repo dep: AUR `a` makedepends on repo
+    /// `foo`, which depends on repo `bar`. Lane 2 installs `foo`, and that
+    /// pacman transaction resolves `bar` itself — so `bar` is disclosure-only.
+    #[test]
+    fn dep_of_aur_required_repo_dep_is_disclosed_not_installed() {
+        let idx = IndexFile {
+            entries: vec![entry("a", &[], &["foo"])],
+            ..IndexFile::empty()
+        };
+        let aur = AurIndexData::from_index(idx);
+        let mut pac = PacmanIndex::default();
+        sync_pkg(&mut pac, "foo", &["bar"]);
+        sync_pkg(&mut pac, "bar", &[]);
+        let plan = resolve(&aur, &pac, &["a".to_owned()]).unwrap();
+
+        assert_eq!(plan.transitive_repo, vec!["foo".to_owned()]);
+        assert_eq!(plan.disclosed_repo_deps, vec!["bar".to_owned()]);
     }
 
     // ---- repo-only paths -------------------------------------------------
@@ -671,6 +762,7 @@ mod tests {
         assert_eq!(plan.aur_strata, vec![vec!["a".to_owned()]]);
         assert_eq!(plan.transitive_repo, vec!["bash".to_owned()]);
         assert!(plan.direct_repo.is_empty());
+        assert!(plan.disclosed_repo_deps.is_empty());
     }
 
     // ---- build graph: makedepends drive strata, depends do not ----------
@@ -854,6 +946,7 @@ mod tests {
         let plan = run(&["a"], vec![entry("a", &[], &["foo"])], &["foo"]).unwrap();
         assert!(plan.direct_repo.is_empty());
         assert_eq!(plan.transitive_repo, vec!["foo".to_owned()]);
+        assert!(plan.disclosed_repo_deps.is_empty());
     }
 
     // ---- provides resolution: the `paru` regression --------------------

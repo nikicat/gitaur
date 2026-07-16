@@ -315,13 +315,19 @@ pub(crate) fn synced_pac() -> Result<PacmanIndex> {
 const STALE_METRIC_AGE_SECS: u64 = 90 * 24 * 3_600;
 
 /// The dep rows the unified table shows beneath the roots: concrete repo
-/// pkgnames the build pulls in, plus AUR pkgbases that were dragged in rather
+/// pkgnames the transaction pulls in — whether aurox installs them
+/// (`transitive_repo`) or pacman resolves them natively
+/// (`disclosed_repo_deps`) — plus AUR pkgbases that were dragged in rather
 /// than named.
 pub(crate) fn dep_rows(plan: Option<&Plan>) -> (Vec<PkgName>, Vec<PkgBase>) {
     let Some(plan) = plan else {
         return (Vec::new(), Vec::new());
     };
-    let repo_deps = plan.transitive_repo.iter().map(PkgName::from).collect();
+    let repo_deps = plan
+        .repo_dep_disclosure()
+        .iter()
+        .map(PkgName::from)
+        .collect();
     let root_bases: HashSet<&PkgBase> = plan.direct_aur.iter().collect();
     let aur_deps = plan
         .aur_strata

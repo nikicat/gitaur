@@ -511,6 +511,12 @@ impl PacmanIndex {
     /// dep instead of staging a redundant install of a different concrete pkg.
     /// On a sync-providers tie we pick the first one we saw (DB declaration
     /// order from `pacman.conf`); pacman would prompt, we don't.
+    ///
+    /// For repo-target deps (`Plan::disclosed_repo_deps`) that pick is a
+    /// *prediction*: aurox never installs those — the plan row must name the
+    /// provider the requirer's own `pacman -S --noconfirm` will choose, which
+    /// is pacman's default of option 1, the first provider in DB order. Keep
+    /// the two in lockstep or the disclosure lies.
     pub fn resolve_concrete(&self, name: &str) -> Option<(&PkgName, bool)> {
         if let Some((n, _)) = self.installed.get_key_value(name) {
             return Some((n, true));

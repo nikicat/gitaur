@@ -677,11 +677,19 @@ impl InstallCtx<'_> {
     }
 }
 
-/// Install the user's repo targets up front: direct ones as explicit, deps
-/// as `--asdeps`. Two `pacman -S` calls so the install-reason flag is per-
-/// batch; sudo cache bridges them. No-op when both buckets are empty.
-/// Always `--noconfirm`: aurox already gated this with its own prompt, so
-/// pacman shouldn't ask again.
+/// Install the user's repo targets up front: direct ones as explicit,
+/// AUR-required repo deps as `--asdeps`. Two `pacman -S` calls so the
+/// install-reason flag is per-batch; sudo cache bridges them. No-op when
+/// both buckets are empty. Always `--noconfirm`: aurox already gated this
+/// with its own prompt, so pacman shouldn't ask again.
+///
+/// Invariant: lane 1's pacman resolves and installs the deps of its targets
+/// itself, recording the dependency reason natively — those deps
+/// (`Plan::disclosed_repo_deps`) must never be re-listed here as a second
+/// transaction. Lane 2 exists solely for repo deps of AUR builds
+/// (`Plan::transitive_repo` — nothing in lane 1 depends on them) and is
+/// skipped when there are none, so a simple repo install runs exactly one
+/// pacman transaction behind one sudo gate.
 fn install_repo_phase(cfg: &Config, plan: &Plan, asdeps: bool) -> Result<()> {
     if !plan.direct_repo.is_empty() {
         ui::info("installing repo packages");
