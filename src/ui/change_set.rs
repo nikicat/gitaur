@@ -313,11 +313,12 @@ fn removal_lines(removals: &[PkgName], paint: Paint) -> Table {
     out
 }
 
-/// The trailing ` build` figure for a batch total, or `None` for a pure-repo
-/// batch that carries no build-time term. An all-unknown total renders
-/// `? build` — never a bogus `0s build`, the never-built case; a total that
-/// under-counts because an unknown row is in the mix is a lower bound
-/// (`>22m build`).
+/// The trailing ` build` term for the one-line [`ChangeSet::summary`], or
+/// `None` for a pure-repo batch that carries no build-time term. An
+/// all-unknown total renders `? build` — never a bogus `0s build`, the
+/// never-built case; a total that under-counts because an unknown row is in
+/// the mix is a lower bound (`>22m build`). The table's [`total_line`] renders
+/// its own 🔨 term and drops the all-unknown case entirely.
 fn build_term(time: TimeTotal) -> Option<String> {
     match time {
         TimeTotal::None => None,
@@ -387,15 +388,17 @@ impl Figures {
     }
 }
 
-/// The batch `total` line for the table.
+/// The batch `total` line for the table: the size figure behind 📥, the
+/// build-time figure behind 🔨. The build term joins only when something was
+/// actually *measured* — a pure-repo batch has no build tail, and an
+/// all-unknown one shows nothing rather than a noisy `🔨 ?` (the per-row `?`
+/// cells already carry that; the one-line [`ChangeSet::summary`] keeps its
+/// explicit `? build`).
 fn total_line(fig: &Figures) -> String {
     let size = fig.size_total();
-    let time = fig.time_total();
-    let mut line = format!("-> total  {}", size.render());
-    // The build-time term joins only when the batch has at least one AUR row —
-    // a pure-repo batch doesn't need a build tail.
-    if let Some(build) = build_term(time) {
-        write!(line, "   {build}").ok();
+    let mut line = format!("-> total  📥 {}", size.render());
+    if let TimeTotal::Measured { total, bound } = fig.time_total() {
+        write!(line, "   🔨 {}{}", bound.marker(), human_duration(total)).ok();
     }
     line
 }
@@ -808,7 +811,14 @@ mod tests {
         assert_regex!(joined, r"(?m)^\s+gcc13\s+\(install\)");
         assert_regex!(joined, r"(?m)^\s+nvidia-utils\s+\(build\)");
         assert_regex!(joined, r"-> will remove:\n\s+old-cuda");
-        assert_regex!(joined, r"(?m)^-> total  \S");
+        assert_regex!(joined, r"(?m)^-> total  📥 \S");
+        // The batch has AUR rows but nothing measured (empty metrics): the
+        // total's build term is omitted, not rendered as an unknown figure.
+        assert_not_contains!(
+            lines.last().unwrap(),
+            "🔨",
+            "unmeasured builds leave no build term on the total"
+        );
     }
 
     /// A pure-repo cart with no deps/removals: just numbered rows + a total with
@@ -820,8 +830,31 @@ mod tests {
         let roots = vec![root("core", "glibc", Some("1-1"), Some("1-2"))];
         let table = cs(&roots, &[], &[], &[], &pac, &PreviewMetrics::empty()).table(Paint::Plain);
         let total = table.lines().last().unwrap();
-        assert_regex!(total, r"^-> total  \S");
-        assert_not_contains!(total, "build", "pure-repo total has no build term");
+        assert_regex!(total, r"^-> total  📥 \S");
+        assert_not_contains!(total, "🔨", "pure-repo total has no build term");
+    }
+
+    /// A measured AUR build joins the total as the 🔨 term — exact when every
+    /// build row is measured, a `>` lower bound once an unknown build is in
+    /// the mix. (The all-unknown case omits the term; covered above.)
+    #[test]
+    fn transaction_table_total_build_term_measured_and_bound() {
+        let mut pac = PacmanIndex::default();
+        pac.installed_size.insert("cuda".into(), gib(3));
+        let roots = vec![root("aur", "cuda", Some("1-1"), Some("2-1"))];
+        let mut metrics = PreviewMetrics::empty();
+        metrics.root_build_secs.insert(PkgName::from("cuda"), 120);
+
+        let table = cs(&roots, &[], &[], &[], &pac, &metrics).table(Paint::Plain);
+        assert_regex!(
+            table.lines().last().unwrap(),
+            r"^-> total  📥 3\.00 GiB   🔨 2m 0s$"
+        );
+
+        // An unmeasured build dep contributes 0 → the sum is a lower bound.
+        let aur_deps = vec![PkgBase::from("never-built")];
+        let table = cs(&roots, &[], &aur_deps, &[], &pac, &metrics).table(Paint::Plain);
+        assert_regex!(table.lines().last().unwrap(), "🔨 >2m 0s$");
     }
 
     /// Both paints render the same *content*: stripping ANSI codes from the
