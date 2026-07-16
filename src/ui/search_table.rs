@@ -13,9 +13,10 @@
 //! not-installed row is dimmed so it recedes. Under `--color=never` the emphasis
 //! collapses (there's nothing to dim), but the version/size columns still align.
 //!
-//! The row *number* and best-last print order are the shell's job
-//! ([`crate::cli::shell`]); this renders bodies only, one line per row, in the
-//! order given.
+//! The shell's selector `№` column is part of the row ([`RowNumbers`]), so the
+//! number a user types (`add 3`) and the number printed can't drift; the
+//! best-last print order stays the shell's job ([`crate::cli::shell`]) — this
+//! renders one line per row, in the order given.
 
 use super::cells::VersionColumn;
 use super::cost::{PreviewMetrics, RowCost, SizeEst, cost_of, size_of};
@@ -72,10 +73,24 @@ pub struct SearchRow {
     pub desc: Option<String>,
 }
 
+/// Whether the table carries the shell's selector row numbers as its first
+/// column.
+///
+/// The shell renders [`Self::Numbered`] — each row's `№` is the index the
+/// selector verbs (`add 3`) resolve against, so the number is part of the row,
+/// not a second layout pass bolted on top. The non-interactive pipe listing
+/// renders [`Self::Plain`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowNumbers {
+    Numbered,
+    Plain,
+}
+
 /// Render the ranked rows into an aligned table — one body line per row.
 ///
-/// Rows come out in the given order, with no number and no header (the shell
-/// adds those). `pac` backs the size cells; `metrics` backs the build-time cells
+/// Rows come out in the given order with no header (the shell adds one);
+/// `numbers` says whether the shell's `№` selector column leads each row.
+/// `pac` backs the size cells; `metrics` backs the build-time cells
 /// (empty for the non-interactive listing → installed AUR rows show `?`).
 /// `paint` is passed in (callers use [`Paint::detect`]) rather than re-read
 /// from the environment, so tests pin the plain rendering.
@@ -83,6 +98,7 @@ pub fn search_table(
     rows: &[SearchRow],
     pac: &PacmanIndex,
     metrics: &PreviewMetrics,
+    numbers: RowNumbers,
     paint: Paint,
 ) -> Table {
     // Per-row size + cost, computed once (also feeds the column widths).
@@ -108,31 +124,38 @@ pub fn search_table(
             .map(|r| (r.old_ver.as_ref(), r.new_ver.as_ref())),
     );
 
-    let mut grid = Grid::new(vec![
+    let mut cols = vec![
         Col::left(),  // repo
         Col::left(),  // name
         Col::left(),  // version block
         Col::left(),  // size (historically left-aligned here; change_set right-aligns)
         Col::right(), // build time
-    ]);
-    for ((row, size), cost) in rows.iter().zip(&sizes).zip(&costs) {
+    ];
+    if numbers == RowNumbers::Numbered {
+        // Floored at three digits — the `{:>3}` the shell's second-pass
+        // numbering used to apply — and growing gracefully past row 999.
+        cols.insert(0, Col::right().min(Width::of("999")));
+    }
+    let mut grid = Grid::new(cols);
+    for (i, ((row, size), cost)) in rows.iter().zip(&sizes).zip(&costs).enumerate() {
         let em = row.install;
-        grid.push(
-            GridRow::new(vec![
-                repo_cell(&row.repo, em, paint),
-                name_cell(&row.name, em, paint),
-                version_cell(
-                    &versions,
-                    em,
-                    row.old_ver.as_ref(),
-                    row.new_ver.as_ref(),
-                    paint,
-                ),
-                size_cell(*size, em, paint),
-                cost.cell(paint),
-            ])
-            .tail(desc_cell(row.desc.as_deref(), paint)),
-        );
+        let mut cells = vec![
+            repo_cell(&row.repo, em, paint),
+            name_cell(&row.name, em, paint),
+            version_cell(
+                &versions,
+                em,
+                row.old_ver.as_ref(),
+                row.new_ver.as_ref(),
+                paint,
+            ),
+            size_cell(*size, em, paint),
+            cost.cell(paint),
+        ];
+        if numbers == RowNumbers::Numbered {
+            cells.insert(0, Cell::plain((i + 1).to_string()));
+        }
+        grid.push(GridRow::new(cells).tail(desc_cell(row.desc.as_deref(), paint)));
     }
     grid.render()
 }
@@ -269,7 +292,13 @@ mod tests {
                 Some(Version::from("18.1.0-1")),
             ),
         ];
-        let table = search_table(&rows, &pac, &PreviewMetrics::empty(), Paint::Plain);
+        let table = search_table(
+            &rows,
+            &pac,
+            &PreviewMetrics::empty(),
+            RowNumbers::Plain,
+            Paint::Plain,
+        );
         let lines = table.lines();
         assert_eq!(lines.len(), 3);
 
@@ -302,6 +331,46 @@ mod tests {
         assert!(lines[1].contains("claude description"));
     }
 
+    /// `Numbered` leads each row with its 1-based selector index, right-aligned
+    /// in a column floored at three digits — byte-identical to the `{:>3}  `
+    /// prefix the shell used to bolt on in a second pass.
+    #[test]
+    fn numbered_rows_carry_the_selector_index() {
+        let rows = vec![
+            row(
+                RepoName::from("aur"),
+                PkgName::from("first"),
+                InstallState::NotInstalled,
+                None,
+                Some(Version::from("1-1")),
+            ),
+            row(
+                RepoName::from("aur"),
+                PkgName::from("second"),
+                InstallState::NotInstalled,
+                None,
+                Some(Version::from("2-1")),
+            ),
+        ];
+        let table = search_table(
+            &rows,
+            &PacmanIndex::default(),
+            &PreviewMetrics::empty(),
+            RowNumbers::Numbered,
+            Paint::Plain,
+        );
+        assert!(
+            table.lines()[0].starts_with("  1  aur"),
+            "row 1: {:?}",
+            table.lines()[0]
+        );
+        assert!(
+            table.lines()[1].starts_with("  2  aur"),
+            "row 2: {:?}",
+            table.lines()[1]
+        );
+    }
+
     /// A not-installed row shows no build-time cell even when the metrics store
     /// has a figure for that name (build time is an installed-package property).
     #[test]
@@ -315,7 +384,13 @@ mod tests {
             None,
             Some(Version::from("1.5.0-1")),
         )];
-        let table = search_table(&rows, &PacmanIndex::default(), &metrics, Paint::Plain);
+        let table = search_table(
+            &rows,
+            &PacmanIndex::default(),
+            &metrics,
+            RowNumbers::Plain,
+            Paint::Plain,
+        );
         assert!(
             !table.lines()[0].contains("3m"),
             "not-installed row must not show a build estimate: {:?}",
@@ -335,7 +410,13 @@ mod tests {
             None,
             Some(Version::from("1.5.0-1")),
         )];
-        let table = search_table(&rows, &PacmanIndex::default(), &metrics, Paint::Plain);
+        let table = search_table(
+            &rows,
+            &PacmanIndex::default(),
+            &metrics,
+            RowNumbers::Plain,
+            Paint::Plain,
+        );
         assert!(
             table.lines()[0].contains("3m 20s"),
             "installed AUR row shows its build estimate: {:?}",

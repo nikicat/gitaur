@@ -222,6 +222,9 @@ impl State {
         }
         match env.search(terms) {
             Ok(items) => {
+                // The env printed the numbered table itself (rendering is its
+                // side of the seam); the empty case is worded here where the
+                // data decision lives.
                 if items.is_empty() {
                     let joined = terms
                         .iter()
@@ -229,16 +232,6 @@ impl State {
                         .collect::<Vec<_>>()
                         .join(" ");
                     env.print(&format!("no packages match `{joined}`"));
-                } else {
-                    // `items` is best-first (row 1 = best). Print it worst-first
-                    // so the strongest matches land at the bottom, next to the
-                    // prompt the shell scrolls to — and the low, easy-to-type
-                    // numbers are the good ones. The numbers still key the
-                    // best-first `search_list`, so `add 1` is always the top match
-                    // regardless of print direction.
-                    for (i, item) in items.iter().enumerate().rev() {
-                        env.print(&format!("{:>3}  {}", i + 1, item.label));
-                    }
                 }
                 // Replace the current list even when empty, so a stale list
                 // can't be addressed by number after a fruitless search, and
@@ -460,7 +453,6 @@ impl State {
             .iter()
             .map(|it| ListItem {
                 target: PkgTarget::new(it.spec()),
-                label: String::new(),
                 repo: Some(it.repo_label()),
             })
             .collect()
@@ -579,7 +571,6 @@ fn select_from_candidates(
         .iter()
         .map(|r| ListItem {
             target: r.target.clone(),
-            label: String::new(),
             repo: r.repo.clone(),
         })
         .collect();
@@ -974,25 +965,19 @@ mod tests {
     }
 
     #[test]
-    fn search_prints_numbered_list_and_remembers_it() {
+    fn search_remembers_list_and_sets_view() {
+        // The printed table (numbering, alignment, worst-first order) is
+        // RealEnv's side of the seam, pinned by `ui::search_table`'s tests and
+        // the search PTY e2e; the pure core's job is the session state.
         let mut env = FakeEnv {
-            search_result: vec![li("aur/foo 1-1", "foo"), li("extra/bar 2-1", "bar")],
+            search_result: vec![li("foo"), li("bar")],
             ..FakeEnv::default()
         };
         let mut state = State::default();
         let flow = state.dispatch(&command::parse("search foo"), &mut env);
         assert_eq!(flow, Flow::Continue);
-        assert!(
-            env.lines
-                .any(|l| l.starts_with("  1") && l.contains("aur/foo")),
-            "row 1 should be numbered: {:?}",
-            env.lines
-        );
-        assert!(
-            env.lines
-                .any(|l| l.contains("  2") && l.contains("extra/bar"))
-        );
         assert_eq!(state.search_list.len(), 2, "the list should be remembered");
+        assert_eq!(state.view, View::Search, "numbers now key the search list");
     }
 
     #[test]
@@ -1006,7 +991,7 @@ mod tests {
     fn info_by_number_resolves_against_the_search_list() {
         let mut env = FakeEnv::default();
         let mut state = State {
-            search_list: vec![li("aur/foo 1-1", "foo"), li("extra/bar 2-1", "bar")],
+            search_list: vec![li("foo"), li("bar")],
             ..State::default()
         };
         state.dispatch(&command::parse("info 2"), &mut env);
@@ -1042,7 +1027,7 @@ mod tests {
     fn info_out_of_range_number_reports_error_without_calling_show() {
         let mut env = FakeEnv::default();
         let mut state = State {
-            search_list: vec![li("only 1-1", "only")],
+            search_list: vec![li("only")],
             ..State::default()
         };
         state.dispatch(&command::parse("info 9"), &mut env);

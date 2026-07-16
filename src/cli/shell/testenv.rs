@@ -123,6 +123,8 @@ impl ShellEnv for FakeEnv {
             .unwrap_or(mirror::RefreshOutcome::Refreshed))
     }
     fn search(&mut self, _terms: &[SearchTerm]) -> Result<Vec<ListItem>> {
+        // The numbered table print is RealEnv's side of the seam (like
+        // `render_cart`); the fake only supplies the selector rows.
         Ok(self.search_result.clone())
     }
     fn show_info(&mut self, targets: &[PkgTarget]) -> Result<()> {
@@ -186,10 +188,9 @@ pub(super) fn env_with(classes: &[(&str, Source)]) -> FakeEnv {
     env
 }
 
-pub(super) fn li(label: &str, name: &str) -> ListItem {
+pub(super) fn li(name: &str) -> ListItem {
     ListItem {
         target: PkgTarget::new(name),
-        label: label.to_owned(),
         repo: None,
     }
 }
@@ -198,7 +199,6 @@ pub(super) fn li(label: &str, name: &str) -> ListItem {
 pub(super) fn li_repo(repo: &str, name: &str) -> ListItem {
     ListItem {
         target: PkgTarget::new(name),
-        label: format!("{repo}/{name} 1-1"),
         repo: Some(RepoName::from(repo)),
     }
 }

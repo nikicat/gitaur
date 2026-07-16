@@ -148,6 +148,16 @@ impl Table {
         &self.0
     }
 
+    /// The same lines bottom-to-top — for a caller whose presentation order
+    /// reverses the data order (the shell prints search results worst-first
+    /// so the best rows land next to the prompt, while row numbers keep
+    /// keying the best-first list).
+    #[must_use]
+    pub fn reversed(mut self) -> Self {
+        self.0.reverse();
+        self
+    }
+
     /// Print the table to stderr framed by blank lines — the flag-path
     /// emission convention (`-Qu`, the `-S` plan tables). A no-op when the
     /// table is empty, so callers never emit a stray empty frame. The shell

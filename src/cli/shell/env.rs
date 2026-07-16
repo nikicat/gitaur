@@ -226,17 +226,31 @@ impl ShellEnv for RealEnv<'_> {
         let pac = upgrade::system_pac()?;
         let search_rows: Vec<ui::SearchRow> = rows.iter().map(|r| search_row(r, &pac)).collect();
         let metrics = self.search_metrics(&search_rows);
-        let table = ui::search_table(&search_rows, &pac, &metrics, ui::Paint::detect());
-        Ok(table
-            .lines()
+        let table = ui::search_table(
+            &search_rows,
+            &pac,
+            &metrics,
+            ui::RowNumbers::Numbered,
+            ui::Paint::detect(),
+        );
+        let items = rows
             .iter()
-            .zip(&rows)
-            .map(|(line, r)| ListItem {
+            .map(|r| ListItem {
                 target: r.picked(),
-                label: line.clone(),
                 repo: Some(RepoName::from(r.repo_name())),
             })
-            .collect())
+            .collect();
+        // `rows` borrows the session's AUR data, so it must be done before
+        // printing takes `&mut self`.
+        drop(rows);
+        // The table is best-first (row 1 = best), each row carrying its `№`
+        // cell. Print it worst-first so the strongest matches land at the
+        // bottom, next to the prompt the shell scrolls to — and the low,
+        // easy-to-type numbers are the good ones. The numbers still key the
+        // best-first list returned below, so `add 1` is always the top match
+        // regardless of print direction.
+        self.print_table(&table.reversed());
+        Ok(items)
     }
 
     fn show_info(&mut self, targets: &[PkgTarget]) -> Result<()> {

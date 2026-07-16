@@ -233,6 +233,7 @@ pub fn cmd_search_install(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
         &search_rows,
         &pac,
         &ui::PreviewMetrics::empty(),
+        ui::RowNumbers::Plain,
         ui::Paint::detect(),
     );
     for line in table.lines() {

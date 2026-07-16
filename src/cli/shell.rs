@@ -51,12 +51,15 @@ pub use repl::run;
 
 /// One row of a numbered list (search results or the cart), addressable by its
 /// 1-based number.
+///
+/// Pure selector data — no rendered text. The displayed table travels as a
+/// [`ui::Table`] beside the list (same index order), so what's printed and
+/// what a number resolves to come from the same rows without the rows ever
+/// storing presentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListItem {
     /// The thing `add` / `info` / … act on when this row is picked by number.
     pub target: PkgTarget,
-    /// Preformatted display label (without the leading number).
-    pub label: String,
     /// Repo bucket (`core`, `extra`, …, or `aur`) this row came from, so a
     /// repo-name selector (`add extra`) can filter the list. `None` for rows
     /// whose source isn't a repo (e.g. cart-derived selector lists).
@@ -140,7 +143,10 @@ pub trait ShellEnv {
     /// refreshed or was skipped (never set up / AUR disabled / out of scope),
     /// so the dispatch core can word the result.
     fn refresh(&mut self, scope: mirror::RefreshScope) -> Result<mirror::RefreshOutcome>;
-    /// Run a combined repo + AUR search; returns rows for the numbered list.
+    /// Run a combined repo + AUR search and print the numbered result table
+    /// (rendering is env-side, like [`Self::render_cart`] — it needs the live
+    /// pacman DBs and paint); returns the selector rows the printed numbers
+    /// key. Prints nothing on no hits — the dispatch core words that case.
     fn search(&mut self, terms: &[SearchTerm]) -> Result<Vec<ListItem>>;
     /// Print `-Si`-style info for the already-resolved targets.
     fn show_info(&mut self, targets: &[PkgTarget]) -> Result<()>;

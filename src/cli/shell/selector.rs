@@ -156,7 +156,6 @@ mod tests {
             .iter()
             .map(|n| ListItem {
                 target: PkgTarget::new(*n),
-                label: format!("aur/{n} 1-1"),
                 repo: None,
             })
             .collect()
