@@ -171,10 +171,11 @@ pub(crate) fn preflight_notes(
         .map(|issue| {
             let remedy = match &issue {
                 preflight::Issue::UnsatisfiedDep { target, depend, .. } => {
-                    let entry = aur_data.entry(target.as_str());
-                    let staged = cart
-                        .item(&PkgTarget::from(target))
-                        .is_some_and(|it| it.source == Source::Aur);
+                    // One lift for both lookups: the issue's pkgname enters
+                    // target space once, then keys the index and the cart.
+                    let spec = PkgTarget::from(target);
+                    let entry = aur_data.entry(&spec);
+                    let staged = cart.item(&spec).is_some_and(|it| it.source == Source::Aur);
                     rebuild_remedy(entry, target, depend, staged)
                 }
                 _ => Remedy::Unknown,

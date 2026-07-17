@@ -6,7 +6,7 @@
 //! actually do. Skips entries the resolver rejects (cycles, missing deps).
 
 use aurox::index::{self, AurIndexData};
-use aurox::names::PkgBase;
+use aurox::names::{PkgBase, PkgTarget};
 use aurox::pacman::alpm_db::{self, PacmanIndex};
 use aurox::paths;
 use aurox::resolver;
@@ -32,7 +32,7 @@ fn main() {
         let Some(pkgname) = entry.pkgnames.first() else {
             continue;
         };
-        let targets = vec![pkgname.name.clone().into_inner()];
+        let targets = vec![PkgTarget::from(&pkgname.name)];
         let Ok(plan) = resolver::resolve(&aur, &pac, &targets) else {
             continue;
         };

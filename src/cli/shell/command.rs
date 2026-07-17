@@ -15,8 +15,8 @@ use crate::names::SearchTerm;
 /// first-word / `help <topic>` candidates, and the per-verb side tables
 /// (`help` topics, completion arg scopes) key off the enum so the compiler —
 /// not a drift test — walks a new verb through every decision. Aliases
-/// (`install`, `discard`, `up`, …) intentionally stay out — they live only in
-/// [`parse`], and completion teaches the canonical name.
+/// (`install`, `discard`, `up`, …) intentionally stay out — they live in
+/// [`ALIASES`], and completion teaches the canonical name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
     Search,
@@ -85,6 +85,44 @@ impl Verb {
             Self::Quit => "quit",
         }
     }
+}
+
+/// Alias word → canonical verb — the one site for the alternate spellings.
+///
+/// [`parse`] resolves the first word through this after the canonical names,
+/// and [`unknown_note`]'s typo suggester offers these words alongside them.
+/// Completion deliberately stays canonical-only (see [`Verb`]).
+pub const ALIASES: &[(&str, Verb)] = &[
+    ("install", Verb::Add),
+    ("discard", Verb::Drop),
+    ("unstage", Verb::Drop),
+    ("only", Verb::Keep),
+    ("uninstall", Verb::Remove),
+    ("rm", Verb::Remove),
+    ("up", Verb::Upgrade),
+    ("status", Verb::Show),
+    ("ls", Verb::Show),
+    ("cart", Verb::Show),
+    ("commit", Verb::Apply),
+    ("do", Verb::Apply),
+    ("?", Verb::Help),
+    ("exit", Verb::Quit),
+    ("q", Verb::Quit),
+];
+
+/// Match one (already-lowercased) first word against the canonical names,
+/// then the aliases.
+fn verb_for(word: &str) -> Option<Verb> {
+    Verb::ALL
+        .iter()
+        .copied()
+        .find(|v| v.name() == word)
+        .or_else(|| {
+            ALIASES
+                .iter()
+                .find(|(alias, _)| *alias == word)
+                .map(|(_, v)| *v)
+        })
 }
 
 /// `system <action>` — the maintenance sub-verbs.
@@ -233,30 +271,85 @@ pub fn parse(line: &str) -> Command {
         return Command::Empty;
     };
     let args = args.to_vec();
-    match verb.to_ascii_lowercase().as_str() {
-        "search" => Command::Search(args.into_iter().map(SearchTerm::from).collect()),
-        "info" => Command::Info(args),
-        "add" | "install" => Command::Add(args),
-        "drop" | "discard" | "unstage" => Command::Drop(args),
-        "keep" | "only" => Command::Keep(args),
-        "remove" | "uninstall" | "rm" => Command::Remove(args),
-        "upgrade" | "up" => Command::Upgrade(args),
-        "review" => Command::Review(args),
-        "approve" => Command::Approve(args),
-        "show" | "status" | "ls" => Command::Show,
-        "apply" | "commit" | "do" => Command::Apply,
-        "undo" => Command::Undo,
-        "redo" => Command::Redo,
-        "clear" => Command::Clear,
-        "refresh" => Command::Refresh(parse_refresh_scope(args.first())),
-        "system" => Command::System(
+    let Some(v) = verb_for(&verb.to_ascii_lowercase()) else {
+        return Command::Unknown(verb.clone());
+    };
+    match v {
+        Verb::Search => Command::Search(args.into_iter().map(SearchTerm::from).collect()),
+        Verb::Info => Command::Info(args),
+        Verb::Add => Command::Add(args),
+        Verb::Drop => Command::Drop(args),
+        Verb::Keep => Command::Keep(args),
+        Verb::Remove => Command::Remove(args),
+        Verb::Upgrade => Command::Upgrade(args),
+        Verb::Review => Command::Review(args),
+        Verb::Approve => Command::Approve(args),
+        Verb::Show => Command::Show,
+        Verb::Apply => Command::Apply,
+        Verb::Undo => Command::Undo,
+        Verb::Redo => Command::Redo,
+        Verb::Clear => Command::Clear,
+        Verb::Refresh => Command::Refresh(parse_refresh_scope(args.first())),
+        Verb::System => Command::System(
             args.first()
                 .and_then(|a| SystemAction::parse(&a.to_ascii_lowercase())),
         ),
-        "help" | "?" => Command::Help(args.into_iter().next()),
-        "quit" | "exit" | "q" => Command::Quit,
-        _ => Command::Unknown(verb.clone()),
+        Verb::Help => Command::Help(args.into_iter().next()),
+        Verb::Quit => Command::Quit,
     }
+}
+
+/// The message for an unrecognized first word.
+///
+/// A near-miss of a verb or alias gets "did you mean", an all-digit word gets
+/// the row-selection hint (numbers are selectors, not commands), and anything
+/// else is offered as a search — the launch shortcut (`aurox <term>`) already
+/// gives bare terms that meaning.
+pub fn unknown_note(word: &str) -> String {
+    if word.bytes().all(|b| b.is_ascii_digit()) {
+        return format!(
+            "unknown command `{word}` — numbers select rows for a verb, e.g. `add {word}` or `info {word}`"
+        );
+    }
+    let lower = word.to_ascii_lowercase();
+    // Fuzzy-match only words long enough to carry a typo signal (a 1-2 letter
+    // word is never "almost" a verb), and keep the allowed distance tight for
+    // short words so `foo` doesn't get a far-fetched suggestion.
+    let max_distance = match lower.len() {
+        0..=2 => 0,
+        3..=4 => 1,
+        _ => 2,
+    };
+    let candidates = Verb::ALL
+        .iter()
+        .map(|v| v.name())
+        .chain(ALIASES.iter().map(|(alias, _)| *alias));
+    let best = candidates
+        .map(|c| (levenshtein(&lower, c), c))
+        .filter(|(d, _)| (1..=max_distance).contains(d))
+        .min_by_key(|(d, _)| *d);
+    match best {
+        Some((_, near)) => {
+            format!("unknown command `{word}` — did you mean `{near}`? (`help` lists commands)")
+        }
+        None => format!("unknown command `{word}` — try `search {word}`; `help` lists commands"),
+    }
+}
+
+/// Plain byte-wise Levenshtein distance — the words compared are ASCII verbs
+/// and user-typed first words, so per-byte editing is the right granularity.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut current = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let substitution = prev[j] + usize::from(ca != cb);
+            current.push(substitution.min(prev[j + 1] + 1).min(current[j] + 1));
+        }
+        prev = current;
+    }
+    prev[b.len()]
 }
 
 #[cfg(test)]
@@ -301,6 +394,7 @@ mod tests {
         assert_eq!(parse("do"), Command::Apply);
         assert_eq!(parse("status"), Command::Show);
         assert_eq!(parse("ls"), Command::Show);
+        assert_eq!(parse("cart"), Command::Show);
         assert_eq!(parse("exit"), Command::Quit);
         assert_eq!(parse("q"), Command::Quit);
     }
@@ -333,6 +427,62 @@ mod tests {
     fn help_takes_optional_topic() {
         assert_eq!(parse("help"), Command::Help(None));
         assert_eq!(parse("help add"), Command::Help(Some("add".into())));
+    }
+
+    #[test]
+    fn every_alias_parses_to_its_verb() {
+        // Structural since `parse` resolves through the table, but pins the
+        // table's words as typeable (e.g. `?` survives tokenization).
+        for (alias, verb) in ALIASES {
+            assert_eq!(parse(alias).verb(), Some(*verb), "alias `{alias}`");
+        }
+    }
+
+    #[test]
+    fn unknown_note_suggests_a_near_miss_verb_or_alias() {
+        assert_eq!(
+            unknown_note("aprove"),
+            "unknown command `aprove` — did you mean `approve`? (`help` lists commands)"
+        );
+        assert_eq!(
+            unknown_note("serach"),
+            "unknown command `serach` — did you mean `search`? (`help` lists commands)"
+        );
+        // Aliases are suggestion candidates too.
+        assert_eq!(
+            unknown_note("instal"),
+            "unknown command `instal` — did you mean `install`? (`help` lists commands)"
+        );
+    }
+
+    #[test]
+    fn unknown_note_offers_search_when_nothing_is_close() {
+        assert_eq!(
+            unknown_note("3dslicer"),
+            "unknown command `3dslicer` — try `search 3dslicer`; `help` lists commands"
+        );
+        // Short words get no far-fetched suggestion (`foo` is not "almost"
+        // any verb worth proposing).
+        assert_eq!(
+            unknown_note("foo"),
+            "unknown command `foo` — try `search foo`; `help` lists commands"
+        );
+    }
+
+    #[test]
+    fn unknown_note_teaches_that_numbers_are_selectors() {
+        assert_eq!(
+            unknown_note("3"),
+            "unknown command `3` — numbers select rows for a verb, e.g. `add 3` or `info 3`"
+        );
+    }
+
+    #[test]
+    fn levenshtein_distances() {
+        assert_eq!(levenshtein("approve", "approve"), 0);
+        assert_eq!(levenshtein("aprove", "approve"), 1);
+        assert_eq!(levenshtein("serach", "search"), 2);
+        assert_eq!(levenshtein("", "abc"), 3);
     }
 
     #[test]

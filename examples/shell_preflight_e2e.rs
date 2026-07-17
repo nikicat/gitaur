@@ -59,8 +59,11 @@ fn main() {
     });
 
     // 2. Un-stage the rebuild: the same issue must now surface as a warning
-    // with the AUR-aware `add` remediation hint.
+    // with the AUR-aware `add` remediation hint. `drop` is quiet (no table,
+    // so no preview notes) — `show` renders the warning.
     pty.send(b"drop test-breaks-dep\r");
+    pty.expect("rebuild dropped", |s| has(s, "dropped test-breaks-dep"));
+    pty.send(b"show\r");
     pty.expect("preview warns with the add hint", |s| {
         has(s, "`add test-breaks-dep` stages a rebuild")
     });

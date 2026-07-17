@@ -6,7 +6,7 @@
 //! scripts the staged-transaction flow against the `test-trivial` AUR fixture:
 //!
 //! ```text
-//!   add test-trivial        → staged, needs review (cart reprinted)
+//!   add test-trivial        → staged, needs review (ack + status line)
 //!   apply                   → refused: the approval gate blocks it
 //!   approve test-trivial    → cleared without opening a diff
 //!   apply                   → cost summary, build, then the sudo gate
@@ -32,7 +32,13 @@ fn main() {
 
     // The approval gate refuses to apply while the AUR item is unreviewed.
     pty.send(b"apply\r");
-    pty.expect("apply gated on review", |s| s.contains("needs review"));
+    // The gate's needle must be its distinct `needs review: <names>` form —
+    // the staging status line also says "needs review" (the singular hint),
+    // and matching that would race the next send against rustyline's redraw
+    // (buffered input is dropped at raw-mode re-entry).
+    pty.expect("apply gated on review", |s| {
+        s.contains("needs review: test-trivial")
+    });
 
     // Approve without opening a diff, then apply for real.
     pty.send(b"approve test-trivial\r");

@@ -9,7 +9,8 @@
 //! was installed:
 //!
 //! ```text
-//!   add test-trivial test-epoch → both staged (cart sorted: test-epoch, then test-trivial)
+//!   add test-trivial test-epoch → both staged (quiet: acks + status line, no table)
+//!   show                        → numbered transaction (row 1 = test-epoch, sorted)
 //!   remove 1                    → refused: row 1 is a staged install, pointed at `drop`
 //!   keep test-trivial           → drops test-epoch
 //!   undo                        → the drop is reverted
@@ -26,7 +27,7 @@
 //! The `.sh` runs `aurox -Sy` first so the shell's on-disk index can classify
 //! `test-trivial` and `test-epoch` as AUR (the shell does not fetch at startup).
 
-use pty_harness::Pty;
+use pty_harness::{Pty, has};
 
 fn main() {
     let mut pty = Pty::spawn_aurox();
@@ -34,13 +35,24 @@ fn main() {
     // The shell starts at its prompt; the index was built by the `.sh`'s `-Sy`.
     pty.expect("shell banner", |s| s.contains("aurox shell"));
 
-    // Stage two AUR fixtures. The cart sorts by spec, so row 1 is `test-epoch`.
+    // Stage two AUR fixtures. Staging is quiet (acks + a status line, no
+    // numbered table), so `show` prints the numbered transaction first —
+    // numbers name rows of the last numbered table printed, and none has been.
+    // The cart sorts by spec, so shown row 1 is `test-epoch`.
     pty.send(b"add test-trivial test-epoch\r");
     pty.expect("both staged", |s| s.contains("staged test-epoch"));
+    pty.send(b"show\r");
+    // The needle must be unique to the *table*: the staging status line also
+    // says "transaction — 2 to install", and matching it would race the next
+    // send against rustyline's redraw (the buffered-input drop — the same
+    // trap shell_cart_e2e's apply-gate needle hit). A numbered row only
+    // exists once `show` has rendered.
+    pty.expect("numbered transaction row", |s| {
+        has(s, "1 aur review test-epoch")
+    });
 
     // `remove 1` lands on a staged install — you can't uninstall what isn't
-    // installed yet, so it's refused and pointed at `drop` (the reported bug was
-    // this erroring with "run search first" against an empty search list).
+    // installed yet, so it's refused and pointed at `drop`.
     pty.send(b"remove 1\r");
     pty.expect("remove refuses a staged install", |s| {
         s.contains("is staged for install")

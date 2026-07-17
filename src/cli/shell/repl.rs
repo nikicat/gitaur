@@ -144,7 +144,10 @@ pub fn run(config: &ConfigHandle, devel: DevelPolicy, initial_search: &[SearchTe
     rl.load_history(&history).ok();
 
     let code = loop {
-        match rl.readline("aurox> ") {
+        // The prompt is recomputed per line: it carries the cart's standing
+        // (counts + open review gates), so state stays ambient at the prompt
+        // instead of being reprinted after every command.
+        match rl.readline(&state.prompt()) {
             Ok(line) => {
                 if !line.trim().is_empty() {
                     // Best-effort: a full history ring shouldn't abort input.

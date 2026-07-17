@@ -254,34 +254,7 @@ pub(super) fn plan(cfg: &Config, reason: RefreshReason) -> Result<AurAction> {
     let state = MirrorState::probe(&paths::aur_repo_path());
     let mut action = decide(cfg.aur, state, reason);
     match action {
-        AurAction::Bootstrap(kind) => {
-            action =
-                match consent_mode(reason, runopts::noconfirm(), std::io::stdin().is_terminal()) {
-                    // The shell's launch prompt already spelled out the full
-                    // cost this session; `refresh aur` just gets a brief
-                    // heads-up that the long clone is starting.
-                    ConsentMode::AutoYes
-                        if reason == RefreshReason::ShellAurSync
-                            && kind == BootstrapKind::FirstRun =>
-                    {
-                        ui::info("syncing the AUR — one-time ~2 GiB clone (~10 min)");
-                        AurAction::Bootstrap(kind)
-                    }
-                    ConsentMode::AutoYes => {
-                        announce(kind);
-                        AurAction::Bootstrap(kind)
-                    }
-                    ConsentMode::Prompt => {
-                        announce(kind);
-                        if ui::confirm(question(kind), false)? {
-                            AurAction::Bootstrap(kind)
-                        } else {
-                            AurAction::Skip(SkipCause::Declined)
-                        }
-                    }
-                    ConsentMode::Refuse => AurAction::Skip(refusal_cause(reason)),
-                };
-        }
+        AurAction::Bootstrap(kind) => action = bootstrap_consent(kind, reason)?,
         // Explicit CLI syncs get a one-line note; the shell words its own
         // outcome and the implicit resync surfaces the cause in its error.
         AurAction::Skip(SkipCause::Disabled)
@@ -298,6 +271,39 @@ pub(super) fn plan(cfg: &Config, reason: RefreshReason) -> Result<AurAction> {
     }
     info!(reason = ?reason, state = ?state, action = ?action, "aur refresh plan");
     Ok(action)
+}
+
+/// Put a wanted bootstrap through the consent gate: announce the cost, then
+/// confirm/auto-accept/refuse per [`consent_mode`], downgrading to a
+/// [`AurAction::Skip`] when consent isn't given. One flat match — the
+/// module's decision-fn convention — instead of a nested reassignment inside
+/// [`plan`]'s own match.
+fn bootstrap_consent(kind: BootstrapKind, reason: RefreshReason) -> Result<AurAction> {
+    let mode = consent_mode(reason, runopts::noconfirm(), std::io::stdin().is_terminal());
+    Ok(match mode {
+        // The shell's launch prompt already spelled out the full cost this
+        // session; `refresh aur` just gets a brief heads-up that the long
+        // clone is starting.
+        ConsentMode::AutoYes
+            if reason == RefreshReason::ShellAurSync && kind == BootstrapKind::FirstRun =>
+        {
+            ui::info("syncing the AUR — one-time ~2 GiB clone (~10 min)");
+            AurAction::Bootstrap(kind)
+        }
+        ConsentMode::AutoYes => {
+            announce(kind);
+            AurAction::Bootstrap(kind)
+        }
+        ConsentMode::Prompt => {
+            announce(kind);
+            if ui::confirm(question(kind), false)? {
+                AurAction::Bootstrap(kind)
+            } else {
+                AurAction::Skip(SkipCause::Declined)
+            }
+        }
+        ConsentMode::Refuse => AurAction::Skip(refusal_cause(reason)),
+    })
 }
 
 /// Print the cost announcement for the flavour of clone about to be proposed.

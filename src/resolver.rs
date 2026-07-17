@@ -3,7 +3,7 @@
 use crate::error::{Error, Result};
 use crate::index::AurIndexData;
 use crate::index::IndexEntry;
-use crate::index::lookup::{self, Lookup};
+use crate::index::lookup::Lookup;
 use crate::names::{PkgBase, PkgName, PkgTarget};
 use crate::pacman::alpm_db::PacmanIndex;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -20,9 +20,11 @@ pub use pkgbase_expand::{ExpandedTargets, expand_pkgbase_targets};
 ///
 /// Field types use the typed [`PkgBase`]/[`PkgName`] newtypes wherever the
 /// identity is unambiguous — pkgbase-keyed maps, pkgbase strata, pkgname
-/// selections. `direct_repo` / `transitive_repo` / `disclosed_repo_deps` /
-/// `direct_targets` stay `String` because their contents are deliberately
-/// mixed (virtual provides, version-suffixed names, freeform pacman targets).
+/// selections — and [`PkgTarget`] for `direct_targets`, whose contents are
+/// deliberately mixed (virtual provides, version-suffixed names, freeform
+/// pacman targets). `direct_repo` / `transitive_repo` /
+/// `disclosed_repo_deps` stay `String`: concrete resolved pkgnames headed
+/// for pacman's argv.
 #[derive(Debug, Default, Clone)]
 pub struct Plan {
     /// Direct targets the user named that resolve to a sync repo. Installed
@@ -196,7 +198,7 @@ impl Origin {
 /// pacman-only view); classification then degenerates to pacman-only and any
 /// unknown name short-circuits to [`Source::Missing`].
 #[instrument(skip(aur, pac), fields(targets = targets.len()))]
-pub fn resolve(aur: &AurIndexData, pac: &PacmanIndex, targets: &[String]) -> Result<Plan> {
+pub fn resolve(aur: &AurIndexData, pac: &PacmanIndex, targets: &[PkgTarget]) -> Result<Plan> {
     let (idx, by) = (aur.index(), aur.lookup());
     let mut plan = Plan::default();
     let mut visited_aur: BTreeSet<PkgBase> = BTreeSet::new();
@@ -220,19 +222,17 @@ pub fn resolve(aur: &AurIndexData, pac: &PacmanIndex, targets: &[String]) -> Res
     let mut make_edges: HashMap<PkgBase, Vec<PkgTarget>> = HashMap::new();
     let mut pkgname_to_pkgbase: HashMap<PkgName, PkgBase> = HashMap::new();
 
-    let direct_set: HashSet<PkgTarget> = targets
-        .iter()
-        .map(|t| PkgTarget::from(lookup::strip_version_constraint(t)))
-        .collect();
+    // Keyed on the constraint-stripped name so `-S cargo>=1` still matches
+    // the resolved row; the full typed specs go straight into the plan and
+    // the walk queue (targets arrive typed from expansion — no widening).
+    let direct_set: HashSet<PkgTarget> = targets.iter().map(|t| PkgTarget::new(t.bare())).collect();
     for t in targets {
-        // Widen the raw CLI/picker string into a typed `PkgTarget` — the
-        // boundary where unclassified user input enters the typed graph.
-        plan.direct_targets.insert(PkgTarget::from(t.as_str()));
+        plan.direct_targets.insert(t.clone());
     }
 
     let mut queue: Vec<(PkgTarget, Origin)> = targets
         .iter()
-        .map(|t| (PkgTarget::from(t.as_str()), Origin::Direct))
+        .map(|t| (t.clone(), Origin::Direct))
         .collect();
     while let Some((target, origin)) = queue.pop() {
         let bare = target.bare();
@@ -491,7 +491,7 @@ mod tests {
         for n in repo {
             pac.sync_versions.insert((*n).into(), "1.0-1".into());
         }
-        let targets: Vec<String> = targets.iter().map(|s| (*s).to_owned()).collect();
+        let targets: Vec<PkgTarget> = targets.iter().map(|s| PkgTarget::from(*s)).collect();
         resolve(&aur, &pac, &targets)
     }
 
@@ -499,7 +499,7 @@ mod tests {
     /// index — the seam for repo→repo dependency-walk tests, which set up
     /// `sync_versions` / `sync_depends` / `installed` with typed values.
     fn resolve_repo(pac: &PacmanIndex, targets: &[&str]) -> Plan {
-        let targets: Vec<String> = targets.iter().map(|s| (*s).to_owned()).collect();
+        let targets: Vec<PkgTarget> = targets.iter().map(|s| PkgTarget::from(*s)).collect();
         resolve(&AurIndexData::empty(), pac, &targets).unwrap()
     }
 
@@ -619,7 +619,7 @@ mod tests {
         let mut pac = PacmanIndex::default();
         sync_pkg(&mut pac, "foo", &["shared"]);
         sync_pkg(&mut pac, "shared", &[]);
-        let plan = resolve(&aur, &pac, &["a".to_owned(), "foo".to_owned()]).unwrap();
+        let plan = resolve(&aur, &pac, &["a".into(), "foo".into()]).unwrap();
 
         assert_eq!(plan.transitive_repo, vec!["shared".to_owned()]);
         assert_eq!(plan.disclosed_repo_deps, vec!["shared".to_owned()]);
@@ -644,7 +644,7 @@ mod tests {
         let mut pac = PacmanIndex::default();
         sync_pkg(&mut pac, "foo", &["bar"]);
         sync_pkg(&mut pac, "bar", &[]);
-        let plan = resolve(&aur, &pac, &["a".to_owned()]).unwrap();
+        let plan = resolve(&aur, &pac, &["a".into()]).unwrap();
 
         assert_eq!(plan.transitive_repo, vec!["foo".to_owned()]);
         assert_eq!(plan.disclosed_repo_deps, vec!["bar".to_owned()]);
@@ -693,7 +693,7 @@ mod tests {
     fn missing_repo_dep_names_requirer() {
         let mut pac = PacmanIndex::default();
         sync_pkg(&mut pac, "foo", &["gone"]);
-        let targets: Vec<String> = vec!["foo".into()];
+        let targets: Vec<PkgTarget> = vec!["foo".into()];
         let err = resolve(&AurIndexData::empty(), &pac, &targets).unwrap_err();
         match err {
             Error::UnknownTargets(s) => assert_eq!(s, "gone (required by foo)"),
@@ -969,7 +969,7 @@ mod tests {
         pac.sync_versions.insert("pacman".into(), "6.1.0-1".into());
         pac.sync_providers
             .insert("libalpm.so".into(), vec!["pacman".into()]);
-        let plan = resolve(&aur, &pac, &["paru".to_owned()]).unwrap();
+        let plan = resolve(&aur, &pac, &["paru".into()]).unwrap();
 
         assert_eq!(plan.aur_strata, vec![vec!["paru".to_owned()]]);
         let mut t = plan.transitive_repo.clone();
@@ -996,7 +996,7 @@ mod tests {
         pac.sync_versions.insert("rust".into(), "1.80.0-1".into());
         pac.sync_providers
             .insert("cargo".into(), vec!["rust".into()]);
-        let plan = resolve(&aur, &pac, &["paru".to_owned()]).unwrap();
+        let plan = resolve(&aur, &pac, &["paru".into()]).unwrap();
 
         assert_eq!(plan.aur_strata, vec![vec!["paru".to_owned()]]);
         assert!(plan.transitive_repo.is_empty());
@@ -1018,7 +1018,7 @@ mod tests {
         pac.sync_versions.insert("rust".into(), "1.80.0-1".into());
         pac.sync_providers
             .insert("cargo".into(), vec!["rust".into()]);
-        let plan = resolve(&aur, &pac, &["rust".to_owned(), "paru".to_owned()]).unwrap();
+        let plan = resolve(&aur, &pac, &["rust".into(), "paru".into()]).unwrap();
 
         assert_eq!(plan.direct_repo, vec!["rust".to_owned()]);
         assert!(
@@ -1044,7 +1044,7 @@ mod tests {
         let mut pac = PacmanIndex::default();
         pac.installed
             .insert("brave-bin".into(), "1:1.90.121-1".into());
-        let plan = resolve(&aur, &pac, &["brave-bin".to_owned()]).unwrap();
+        let plan = resolve(&aur, &pac, &["brave-bin".into()]).unwrap();
         assert_eq!(plan.aur_strata, vec![vec!["brave-bin".to_owned()]]);
     }
 
@@ -1060,7 +1060,7 @@ mod tests {
         let aur = AurIndexData::from_index(idx);
         let mut pac = PacmanIndex::default();
         pac.installed.insert("helper".into(), "1.0-1".into());
-        let plan = resolve(&aur, &pac, &["client".to_owned()]).unwrap();
+        let plan = resolve(&aur, &pac, &["client".into()]).unwrap();
         // Only client should be in the build plan; helper stays satisfied.
         assert_eq!(plan.aur_strata, vec![vec!["client".to_owned()]]);
     }

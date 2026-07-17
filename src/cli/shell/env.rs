@@ -3,7 +3,8 @@
 //! transaction view that `show` and `apply` share.
 
 use super::cart::{
-    ApplyOutcome, Approval, AurApproval, Cart, CartItem, ReviewOutcome, Source, StageClass,
+    ApplyOutcome, ApplyRun, Approval, AurApproval, Cart, CartItem, ReviewOutcome, Source,
+    StageClass,
 };
 use super::upgrade;
 use super::{ListItem, ShellEnv, State};
@@ -80,7 +81,7 @@ pub(super) fn cart_targets(state: &State) -> Vec<PkgTarget> {
         .cart
         .items()
         .iter()
-        .map(|it| PkgTarget::new(it.spec()))
+        .map(|it| it.spec().clone())
         .collect()
 }
 
@@ -151,11 +152,8 @@ impl TxnKey {
     fn of(cart: &Cart) -> Self {
         // The cart keeps `items` sorted (phase 5b), but normalise defensively so
         // the key is order-independent however it was assembled.
-        let mut installs: Vec<PkgTarget> = cart
-            .items()
-            .iter()
-            .map(|it| PkgTarget::new(it.spec()))
-            .collect();
+        let mut installs: Vec<PkgTarget> =
+            cart.items().iter().map(|it| it.spec().clone()).collect();
         installs.sort_unstable();
         let mut removals: Vec<PkgName> = cart.removals().to_vec();
         removals.sort_unstable();
@@ -281,13 +279,10 @@ impl ShellEnv for RealEnv<'_> {
                 repo: Some(repo.clone()),
             });
         }
-        self.aur_data
-            .lookup()
-            .lookup(self.aur_data.index(), target.as_str())
-            .map(|_| StageClass {
-                source: Source::Aur,
-                repo: None,
-            })
+        self.aur_data.entry(target).map(|_| StageClass {
+            source: Source::Aur,
+            repo: None,
+        })
     }
 
     fn aur_policy(&self) -> AurApproval {
@@ -302,15 +297,12 @@ impl ShellEnv for RealEnv<'_> {
     }
 
     fn pkgbase_of(&self, target: &PkgTarget) -> Option<PkgBase> {
-        self.aur_data
-            .lookup()
-            .lookup(self.aur_data.index(), target.as_str())
-            .map(|e| e.pkgbase.clone())
+        self.aur_data.entry(target).map(|e| e.pkgbase.clone())
     }
 
     fn review(&mut self, target: &PkgTarget) -> Result<ReviewOutcome> {
         let aur_data = &self.aur_data;
-        let Some(entry) = aur_data.entry(target.as_str()) else {
+        let Some(entry) = aur_data.entry(target) else {
             ui::warn(&format!("{}: not an AUR package", target.as_str()));
             return Ok(ReviewOutcome::Skipped);
         };
@@ -379,11 +371,16 @@ impl ShellEnv for RealEnv<'_> {
         }
     }
 
-    fn apply(&mut self, cart: &Cart) -> Result<ApplyOutcome> {
+    fn apply(&mut self, cart: &Cart) -> Result<ApplyRun> {
         // The build/install (and any removals) may change the installed set, so
         // the cached resolution is stale once apply runs whatever its outcome;
         // drop it so the next `show` re-resolves against the new system state.
         self.view = None;
+        // The run's review scratch: seeded from the cart, extended by any
+        // PKGBUILD reviewed mid-run (pulled-in AUR deps), and carried back to
+        // the dispatch core in the ApplyRun — on every outcome, so those
+        // approvals survive a failed run's retry.
+        let mut reviewed = cart.reviewed().clone();
         let aur_data = &self.aur_data;
         let pac = upgrade::system_pac()?;
 
@@ -402,7 +399,12 @@ impl ShellEnv for RealEnv<'_> {
         } else {
             match sysupgrade_gate(aur_data, cart, &repo_sel)? {
                 Some(blockers) => blockers,
-                None => return Ok(ApplyOutcome::Declined),
+                None => {
+                    return Ok(ApplyRun {
+                        outcome: ApplyOutcome::Declined,
+                        reviewed,
+                    });
+                }
             }
         };
 
@@ -439,7 +441,6 @@ impl ShellEnv for RealEnv<'_> {
             .summary(),
         );
 
-        let mut reviewed = cart.reviewed().clone();
         let opts = InstallOpts {
             noconfirm: false,
             asdeps: false,
@@ -461,7 +462,10 @@ impl ShellEnv for RealEnv<'_> {
                 // The blocker didn't land, so the repo lane would fail exactly
                 // as preflighted — stop before it runs. The repo rows haven't
                 // run either, so they stay staged (`repo_landed = false`).
-                return Ok(cart_apply_outcome(&report, cart, aur_data, false));
+                return Ok(ApplyRun {
+                    outcome: cart_apply_outcome(&report, cart, aur_data, false),
+                    reviewed,
+                });
             }
         }
 
@@ -480,7 +484,7 @@ impl ShellEnv for RealEnv<'_> {
         }
         let outcome = cart_apply_outcome(&report, cart, aur_data, true);
         if !matches!(outcome, ApplyOutcome::Succeeded) {
-            return Ok(outcome);
+            return Ok(ApplyRun { outcome, reviewed });
         }
 
         // Remove half: `pacman -R`, filtered to packages actually installed so a
@@ -501,15 +505,17 @@ impl ShellEnv for RealEnv<'_> {
                 // The whole install half already landed (we passed the
                 // success gate above); only the removal failed, so drop every
                 // install row and keep the removals staged for a retry.
-                let installed = cart
-                    .items()
-                    .iter()
-                    .map(|it| PkgTarget::new(it.spec()))
-                    .collect();
-                return Ok(ApplyOutcome::Failed { installed });
+                let installed = cart.items().iter().map(|it| it.spec().clone()).collect();
+                return Ok(ApplyRun {
+                    outcome: ApplyOutcome::Failed { installed },
+                    reviewed,
+                });
             }
         }
-        Ok(ApplyOutcome::Succeeded)
+        Ok(ApplyRun {
+            outcome: ApplyOutcome::Succeeded,
+            reviewed,
+        })
     }
 
     fn system_usage(&mut self) -> system::Report {
@@ -787,7 +793,7 @@ fn landed_install_specs(
             Source::Repo => repo_landed,
             Source::Aur => pkgbase_of(it).is_some_and(|pb| installed.contains(&pb)),
         })
-        .map(|it| PkgTarget::new(it.spec()))
+        .map(|it| it.spec().clone())
         .collect()
 }
 
@@ -883,7 +889,7 @@ fn txn_roots(cart: &Cart, aur_data: &AurIndexData, size_pac: &PacmanIndex) -> Ve
             ui::TxnRoot {
                 repo: it.repo_label(),
                 approval: approval_cell(it.approval),
-                name: PkgName::from(it.spec()),
+                name: PkgName::from(it.spec().as_str()),
                 old_ver,
                 new_ver,
                 age: aur_age(it, aur_data, now),
@@ -906,7 +912,7 @@ fn row_versions(
     }
     let new = match it.source {
         Source::Aur => aur_data.entry(it.spec()).map(IndexEntry::version),
-        Source::Repo => size_pac.sync_version(it.spec()).map(Version::from),
+        Source::Repo => size_pac.sync_version(it.spec().as_str()).map(Version::from),
     };
     (None, new)
 }
@@ -948,7 +954,7 @@ fn flat_cart_lines(cart: &Cart, err: &Error) -> ui::Table {
                 ui::Cell::plain((i + 1).to_string()),
                 ui::Cell::plain(it.repo_label().to_string()),
                 ui::Cell::plain(it.approval.label()),
-                ui::Cell::plain(it.spec()),
+                ui::Cell::plain(it.spec().as_str()),
             ])
             .tail(ver),
         );
@@ -1030,7 +1036,7 @@ mod tests {
         // `yay-bin` built + installed; `cuda` did not.
         let installed = [PkgBase::from("yay-bin")];
         // The fixtures use spec == pkgbase, so an identity resolver suffices.
-        let pkgbase_of = |it: &CartItem| Some(PkgBase::from(it.spec()));
+        let pkgbase_of = |it: &CartItem| Some(PkgBase::from(it.spec().as_str()));
         let landed = landed_install_specs(&cart, &installed, true, pkgbase_of);
         let specs: Vec<&str> = landed.iter().map(PkgTarget::as_str).collect();
         assert_eq!(

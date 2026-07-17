@@ -22,6 +22,7 @@ use crate::ui;
 use crate::version::Version;
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
@@ -68,7 +69,7 @@ struct BuiltPkg {
 
 /// One install target paired with the user's intent for counterpart resolution.
 ///
-/// `spec` is the freeform user-typed string (pkgname / pkgbase / virtual /
+/// `spec` is the freeform user-typed target (pkgname / pkgbase / virtual /
 /// `name>=ver`); `hint` is the pkgname the user thinks they have installed —
 /// the one [`PacmanIndex::counterpart_with_hint`] should bias the lookup
 /// toward. Two callers populate it:
@@ -87,14 +88,14 @@ struct BuiltPkg {
 /// so `prepare_one` can look one up regardless of which input path produced it.
 #[derive(Debug, Clone)]
 pub struct Target {
-    pub spec: String,
+    pub spec: PkgTarget,
     pub hint: Option<PkgName>,
 }
 
 impl Target {
     /// Construct a target with no explicit hint — the resolver may infer one
     /// from `spec` when rewriting.
-    pub fn bare(spec: impl Into<String>) -> Self {
+    pub fn bare(spec: impl Into<PkgTarget>) -> Self {
         Self {
             spec: spec.into(),
             hint: None,
@@ -103,7 +104,7 @@ impl Target {
 
     /// Construct a target with an explicit hint — used by `-Syu` where the
     /// picker already knows which installed pkgname triggered the upgrade.
-    pub fn with_hint(spec: impl Into<String>, hint: PkgName) -> Self {
+    pub fn with_hint(spec: impl Into<PkgTarget>, hint: PkgName) -> Self {
         Self {
             spec: spec.into(),
             hint: Some(hint),
@@ -523,40 +524,65 @@ impl InstallCtx<'_> {
                     .insert(prep.pkgbase.to_owned(), blocker.to_owned());
                 continue;
             }
-            match prep.disposition {
-                Disposition::Skipped => {
-                    ui::note(&format!("{}: skipped", prep.pkgbase));
-                    report.skipped_user.push(prep.pkgbase.to_owned());
-                }
-                Disposition::Cached(files) => built.push(BuiltPkg {
-                    pkgbase: prep.pkgbase.to_owned(),
-                    files,
-                }),
-                Disposition::Build => match run_build(self.cfg, &prep) {
-                    Ok(files) => built.push(BuiltPkg {
-                        pkgbase: prep.pkgbase.to_owned(),
-                        files,
-                    }),
-                    // Ctrl+C during this build: mark it interrupted and stop the
-                    // rest of the stratum. The caller installs what built so far,
-                    // then bails the whole run (the no-arg loop re-enters the
-                    // table; `-S` exits non-zero).
-                    Err(Error::Interrupted) => {
-                        ui::warn(&format!("{}: build interrupted", prep.pkgbase));
-                        report.interrupted.push(prep.pkgbase.to_owned());
-                        break;
-                    }
-                    Err(e) => {
-                        let msg = e.to_string();
-                        ui::error(&format!("{}: build failed: {msg}", prep.pkgbase));
-                        report
-                            .failed
-                            .insert(prep.pkgbase.to_owned(), BuildFailure::Build(msg));
-                    }
-                },
+            if self.build_one(prep, &mut built, report).is_break() {
+                break;
             }
         }
         built
+    }
+
+    /// One pkgbase of a stratum: a user-skipped review is recorded, cached
+    /// artifacts short-circuit, and a real build lands in `built` — or its
+    /// failure in `report`. `Break` on Ctrl+C: the stratum stops so the
+    /// caller installs what built so far, then bails the whole run (the shell
+    /// drops back to its prompt; `-S` exits non-zero).
+    fn build_one(
+        &self,
+        prep: Prep<'_>,
+        built: &mut Vec<BuiltPkg>,
+        report: &mut RunReport,
+    ) -> ControlFlow<()> {
+        match prep.disposition {
+            Disposition::Skipped => {
+                ui::note(&format!("{}: skipped", prep.pkgbase));
+                report.skipped_user.push(prep.pkgbase.to_owned());
+            }
+            Disposition::Cached(files) => built.push(BuiltPkg {
+                pkgbase: prep.pkgbase.to_owned(),
+                files,
+            }),
+            Disposition::Build => return self.run_one(&prep, built, report),
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// The build half of [`Self::build_one`]: run `makepkg` and record the
+    /// artifact, the failure, or the interrupt (`Break`).
+    fn run_one(
+        &self,
+        prep: &Prep<'_>,
+        built: &mut Vec<BuiltPkg>,
+        report: &mut RunReport,
+    ) -> ControlFlow<()> {
+        match run_build(self.cfg, prep) {
+            Ok(files) => built.push(BuiltPkg {
+                pkgbase: prep.pkgbase.to_owned(),
+                files,
+            }),
+            Err(Error::Interrupted) => {
+                ui::warn(&format!("{}: build interrupted", prep.pkgbase));
+                report.interrupted.push(prep.pkgbase.to_owned());
+                return ControlFlow::Break(());
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                ui::error(&format!("{}: build failed: {msg}", prep.pkgbase));
+                report
+                    .failed
+                    .insert(prep.pkgbase.to_owned(), BuildFailure::Build(msg));
+            }
+        }
+        ControlFlow::Continue(())
     }
 
     #[instrument(skip(self, mirror, target, reviewed), fields(pkgbase = %target.pkgbase))]

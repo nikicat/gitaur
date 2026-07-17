@@ -5,9 +5,9 @@
 //! `pub(super)` so each sibling's `tests` mod can drive [`State::dispatch`]
 //! against [`FakeEnv`] without re-implementing the 15-method trait.
 
-use super::cart::{ApplyOutcome, AurApproval, Cart, ReviewOutcome, Source, StageClass};
+use super::cart::{ApplyOutcome, ApplyRun, AurApproval, Cart, ReviewOutcome, Source, StageClass};
 use super::command;
-use super::{Flow, ListItem, ShellEnv, State};
+use super::{Flow, ListItem, ListSource, NumberedList, ShellEnv, State};
 use crate::error::Result;
 use crate::index;
 use crate::mirror;
@@ -92,6 +92,9 @@ pub(super) struct FakeEnv {
     pub(super) review_calls: Vec<String>,
     /// What `apply` returns; absent ⇒ `Succeeded`.
     pub(super) apply_outcome: Option<ApplyOutcome>,
+    /// Pkgbases the scripted `apply` reports as reviewed mid-run (pulled-in
+    /// dep diffs the user approved during the build) — drained per call.
+    pub(super) apply_reviewed: std::collections::HashSet<PkgBase>,
     pub(super) apply_calls: CallCount,
     /// Rows `system_usage` reports (under a fixed `/state` root).
     pub(super) usage_rows: Vec<system::Usage>,
@@ -105,6 +108,9 @@ pub(super) struct FakeEnv {
     pub(super) refresh_scopes: Vec<mirror::RefreshScope>,
     /// What `aur_state` reports; `None` ⇒ `Ready` (no nudges).
     pub(super) aur_state: Option<index::AurState>,
+    /// How often the transaction table rendered — the quiet-mutation rule's
+    /// observable: `show` renders, `add`/`drop`/… must not.
+    pub(super) render_calls: CallCount,
 }
 
 impl ShellEnv for FakeEnv {
@@ -162,10 +168,15 @@ impl ShellEnv for FakeEnv {
     fn render_cart(&mut self, _cart: &Cart) {
         // The table rendering (color, alignment, age) is RealEnv's job; the
         // pure dispatch core under test prints the header + summary itself.
+        // The call count is the tests' proof of which verbs draw the table.
+        self.render_calls.bump();
     }
-    fn apply(&mut self, _cart: &Cart) -> Result<ApplyOutcome> {
+    fn apply(&mut self, _cart: &Cart) -> Result<ApplyRun> {
         self.apply_calls.bump();
-        Ok(self.apply_outcome.take().unwrap_or(ApplyOutcome::Succeeded))
+        Ok(ApplyRun {
+            outcome: self.apply_outcome.take().unwrap_or(ApplyOutcome::Succeeded),
+            reviewed: std::mem::take(&mut self.apply_reviewed),
+        })
     }
     fn system_usage(&mut self) -> system::Report {
         system::Report {
@@ -203,6 +214,18 @@ pub(super) fn li_repo(repo: &str, name: &str) -> ListItem {
     }
 }
 
+/// A `State` with a numbered search table "on screen": its referent is a
+/// search-list snapshot over `rows`, as if that table had just printed.
+pub(super) fn state_showing(rows: Vec<ListItem>) -> State {
+    State {
+        referent: Some(NumberedList {
+            source: ListSource::Search,
+            rows,
+        }),
+        ..State::default()
+    }
+}
+
 pub(super) fn dispatch_one(input: &str) -> (Flow, FakeEnv) {
     let mut env = FakeEnv::default();
     let mut state = State::default();
@@ -227,6 +250,6 @@ pub(super) fn cart_specs(state: &State) -> Vec<PkgTarget> {
         .cart
         .items()
         .iter()
-        .map(|i| PkgTarget::new(i.spec()))
+        .map(|i| i.spec().clone())
         .collect()
 }

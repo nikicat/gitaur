@@ -32,7 +32,7 @@ use crate::pacman::invoke::PkgUpgrade;
 use crate::system;
 use crate::ui;
 use crate::units::ByteSize;
-use cart::{ApplyOutcome, AurApproval, Cart, ReviewOutcome, StageClass};
+use cart::{ApplyRun, AurApproval, Cart, ReviewOutcome, StageClass};
 
 pub mod cart;
 pub mod command;
@@ -66,23 +66,57 @@ pub struct ListItem {
     pub repo: Option<RepoName>,
 }
 
-/// Which numbered list a bare number (`3`, `2-4`) currently indexes.
-///
-/// The shell prints two kinds of numbered table — search results and the staged
-/// transaction — and a number always means the row you last brought up. `search`
-/// switches to [`View::Search`]; the verbs that bring the transaction to the
-/// foreground (`show`, `upgrade`, `drop`, `keep`, `undo`) switch to
-/// [`View::Cart`]. The list verbs (`add`, `remove`, `info`) read the active list
-/// but leave the view alone, so working through a search list with a run of
-/// `add`s keeps the numbers pointing at that list even though each `add`
-/// reprints the cart.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum View {
-    /// Numbers index the most recent `search` result list.
-    #[default]
+/// A cart row as a selector/list row — the shape `show` snapshots into the
+/// referent. The conversion owns its clones once, at this named seam, instead
+/// of scattering per-field `.clone()`s over the call sites.
+impl From<&cart::CartItem> for ListItem {
+    fn from(it: &cart::CartItem) -> Self {
+        Self {
+            target: it.spec().clone(),
+            repo: Some(it.repo_label()),
+        }
+    }
+}
+
+/// Which numbered table a [`NumberedList`] snapshot came from — wording only
+/// (error messages name the list a number was resolved against).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListSource {
+    /// The `search` result table.
     Search,
-    /// Numbers index the staged cart rows (as `show` prints them).
-    Cart,
+    /// The transaction table (`show`, and the verbs that print through it).
+    Transaction,
+    /// `upgrade <sel>`'s freshly computed candidate list (selector-only; the
+    /// table itself prints after the subset is seeded).
+    UpgradeCandidates,
+}
+
+impl ListSource {
+    /// How error messages name the list ("no row 9 — the {label} has 3 rows").
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Search => "search list",
+            Self::Transaction => "transaction",
+            Self::UpgradeCandidates => "upgrade candidates",
+        }
+    }
+}
+
+/// The rows of the last *numbered* table printed — what a bare number (`3`,
+/// `2-4`) addresses. WYSIWYG addressing: a number is a name for a row the user
+/// can see; output printed without row numbers is not addressable and leaves
+/// this untouched.
+///
+/// Set only at the sites that render a numbered table (`search`, `show` — and
+/// `upgrade`/`undo`/`redo`/the apply-failure path, which print through `show`),
+/// so the screen and the addressable list cannot drift. A **snapshot**: a
+/// number keeps naming *the package shown at that row* even after the cart
+/// re-sorts or shrinks, so working down a printed table (`show`, `drop 2`,
+/// `drop 4`) hits exactly the rows the user read — a since-dropped row is a
+/// clean miss, never a silent wrong hit.
+struct NumberedList {
+    source: ListSource,
+    rows: Vec<ListItem>,
 }
 
 /// How deep the `undo` stack goes — plenty for an interactive session, bounded
@@ -92,11 +126,9 @@ const UNDO_DEPTH: usize = 64;
 /// Mutable per-session shell state the dispatch core threads between commands.
 #[derive(Default)]
 pub struct State {
-    /// The most recent `search` result list, indexed by number while the search
-    /// view is active (see [`View`]).
-    search_list: Vec<ListItem>,
-    /// Which list bare numbers currently address — search results or the cart.
-    view: View,
+    /// The last numbered table printed, or `None` before any was — what bare
+    /// numbers address (see [`NumberedList`]).
+    referent: Option<NumberedList>,
     /// The staged transaction `apply` runs.
     cart: Cart,
     /// Pre-change cart snapshots for `undo`, most-recent last. Each cart-changing
@@ -175,8 +207,10 @@ pub trait ShellEnv {
     /// width math, wall-clock age) that belongs behind the env seam.
     fn render_cart(&mut self, cart: &Cart);
     /// Run the staged transaction: resolve + preview + confirm + build/install +
-    /// removals. Reads the cart; the dispatch core updates it from the outcome.
-    fn apply(&mut self, cart: &Cart) -> Result<ApplyOutcome>;
+    /// removals. Reads the cart; the dispatch core updates it from the returned
+    /// [`ApplyRun`] — the outcome plus the run's review knowledge, which the
+    /// core folds back so mid-run approvals survive a failed run's retry.
+    fn apply(&mut self, cart: &Cart) -> Result<ApplyRun>;
     /// Measure aurox's on-disk state per category, for `system show`.
     /// Infallible: missing/unreadable paths report as zero.
     fn system_usage(&mut self) -> system::Report;

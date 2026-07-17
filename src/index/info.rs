@@ -115,7 +115,7 @@ impl<'a> InfoLookup<'a> {
             info.print();
             return true;
         }
-        match self.data.entry(target.as_str()) {
+        match self.data.entry(target) {
             Some(entry) => {
                 print_info(entry, &self.extras(entry));
                 true

@@ -8,7 +8,7 @@
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::mirror;
-use crate::names::{PkgBase, PkgName, RepoName};
+use crate::names::{PkgBase, PkgName, PkgTarget, RepoName};
 use crate::pacman::invoke::REPO_AUR;
 use crate::paths;
 use crate::runopts;
@@ -232,9 +232,10 @@ impl AurIndexData {
     }
 
     /// Resolve one user-typed spec — pkgname, `provides` virtual, or pkgbase,
-    /// in that precedence — to its entry.
-    pub fn entry(&self, spec: &str) -> Option<&IndexEntry> {
-        self.by.lookup(&self.idx, spec)
+    /// in that precedence — to its entry. The `&str` step into the lookup
+    /// tables happens here, at the index's own boundary, not at call sites.
+    pub fn entry(&self, spec: &PkgTarget) -> Option<&IndexEntry> {
+        self.by.lookup(&self.idx, spec.as_str())
     }
 
     /// Regex search across pkgnames / descriptions / provides.

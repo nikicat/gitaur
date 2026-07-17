@@ -4,9 +4,9 @@
 //! cart-editing verbs live in [`super::staging`].
 
 use super::cart::{ApplyOutcome, Cart, CartItem, StageResult};
-use super::command::{Command, SystemAction};
+use super::command::{Command, SystemAction, unknown_note};
 use super::help::{HELP_TEXT, help_topic};
-use super::{Flow, ListItem, ShellEnv, State, UNDO_DEPTH, View, selector};
+use super::{Flow, ListItem, ListSource, NumberedList, ShellEnv, State, UNDO_DEPTH, selector};
 use crate::mirror;
 use crate::names::{PkgTarget, RepoName, SearchTerm};
 use crate::pacman::invoke::PkgUpgrade;
@@ -126,9 +126,7 @@ impl State {
                 Flow::Continue
             }
             Command::Unknown(verb) => {
-                env.print(&format!(
-                    "unknown command `{verb}` — type `help` for the command list"
-                ));
+                env.print(&unknown_note(verb));
                 Flow::Continue
             }
             Command::Help(topic) => {
@@ -175,9 +173,6 @@ impl State {
                 Flow::Continue
             }
             Command::Show => {
-                // `show` brings the transaction to the foreground, so numbers now
-                // address its rows.
-                self.view = View::Cart;
                 self.show(env);
                 Flow::Continue
             }
@@ -197,8 +192,10 @@ impl State {
                 if self.cart.is_empty() {
                     env.print("cart is already empty");
                 } else {
-                    self.push_undo(self.cart.clone());
-                    self.cart.clear();
+                    self.edit_cart(|s| {
+                        s.cart.clear();
+                        true
+                    });
                     env.print("cart cleared — `undo` to restore");
                 }
                 Flow::Continue
@@ -233,11 +230,16 @@ impl State {
                         .join(" ");
                     env.print(&format!("no packages match `{joined}`"));
                 }
-                // Replace the current list even when empty, so a stale list
-                // can't be addressed by number after a fruitless search, and
-                // make the search results the active numbered view.
-                self.search_list = items;
-                self.view = View::Search;
+                // The just-printed rows become what numbers address. A
+                // fruitless search printed no numbered rows, so it leaves the
+                // referent alone — the table still on screen above stays
+                // addressable (WYSIWYG addressing).
+                if !items.is_empty() {
+                    self.referent = Some(NumberedList {
+                        source: ListSource::Search,
+                        rows: items,
+                    });
+                }
             }
             Err(e) => env.print(&format!("search: {e}")),
         }
@@ -250,8 +252,8 @@ impl State {
             env.print("usage: info <pkg|number|range|glob>…");
             return;
         }
-        let targets = match self.resolve_against_list(args, env) {
-            Ok(t) => t,
+        let targets: Vec<PkgTarget> = match self.resolve_against_list(args, env) {
+            Ok(t) => t.into_iter().map(|r| r.target).collect(),
             Err(e) => {
                 env.print(&format!("info: {e}"));
                 return;
@@ -294,49 +296,105 @@ impl State {
             }
         };
         let policy = env.aur_policy();
-        let before = self.cart.clone();
         let mut staged = 0;
-        for u in to_seed {
-            if self.cart.add(CartItem::from_upgrade(u, policy)) == StageResult::Staged {
-                staged += 1;
+        self.edit_cart(|s| {
+            for u in to_seed {
+                if s.cart.add(CartItem::from_upgrade(u, policy)) == StageResult::Staged {
+                    staged += 1;
+                }
             }
-        }
-        if staged > 0 {
-            self.push_undo(before);
-        }
-        // The seeded transaction is now the foreground list.
-        self.view = View::Cart;
-        env.print(&format!("{staged} upgrade(s) staged"));
+            staged > 0
+        });
+        let noun = if staged == 1 { "upgrade" } else { "upgrades" };
+        env.print(&format!("{staged} {noun} staged"));
+        // `show` prints the seeded transaction and re-arms the referent.
         self.show(env);
     }
 
     /// `show`: render the staged transaction — a header, the install/removal
     /// table (delegated to the env for color + alignment + age), and whether
-    /// `apply` is ready.
+    /// `apply` is ready — and make the just-rendered rows what bare numbers
+    /// address.
     ///
     /// The header and the approval summary are deterministic and stay here in
     /// the pure core (so they're unit-testable via the fake env); the table body
     /// — color, column widths, per-AUR-row age — is I/O-shaped presentation and
-    /// goes through [`ShellEnv::render_cart`].
-    pub(super) fn show<E: ShellEnv>(&self, env: &mut E) {
-        let cart = &self.cart;
-        if cart.is_empty() {
+    /// goes through [`ShellEnv::render_cart`]. This is the one place the
+    /// transaction prints *numbered*, so it is the one place the referent flips
+    /// to it — render and capture can't drift.
+    pub(super) fn show<E: ShellEnv>(&mut self, env: &mut E) {
+        if self.cart.is_empty() {
             env.print("cart is empty — `add <pkg>` to stage an install");
             return;
         }
-        env.print(&format!(
-            "transaction — {} to install, {} to remove",
-            cart.items().len(),
-            cart.removals().len()
-        ));
-        env.render_cart(cart);
-        let pending = cart.pending_review().len();
+        env.print(&self.txn_header());
+        env.render_cart(&self.cart);
+        env.print(&self.approval_status());
+        self.referent = Some(NumberedList {
+            source: ListSource::Transaction,
+            rows: self.cart_as_list(),
+        });
+    }
+
+    /// One-line cart status — the same header counts and approval standing
+    /// `show` prints, minus the table. Printed by the quiet cart-editing verbs
+    /// (`add`/`drop`/`keep`/`remove`/`approve`/`review`) after a real change,
+    /// so the cart's standing is always on screen without a table dump — and
+    /// without printing row numbers that aren't addressable.
+    pub(super) fn summarize<E: ShellEnv>(&self, env: &mut E) {
+        if self.cart.is_empty() {
+            env.print("cart is empty");
+            return;
+        }
+        env.print(&self.txn_header());
+        env.print(&self.approval_status());
+    }
+
+    /// The prompt for the next read line — ambient cart state (the classic
+    /// fix for hidden state: carry it in the prompt, don't reprint it), so
+    /// the user never needs a `show` just to remember where the transaction
+    /// stands. Empty cart keeps the plain `aurox> `; a staged cart counts its
+    /// rows (installs + removals) and any review gates still open.
+    pub(super) fn prompt(&self) -> String {
+        if self.cart.is_empty() {
+            return "aurox> ".to_owned();
+        }
+        let staged = self.cart.items().len() + self.cart.removals().len();
+        let pending = self.cart.pending_review().len();
         if pending == 0 {
-            env.print("all approved — run `apply`");
+            format!("aurox [{staged} staged]> ")
         } else {
-            env.print(&format!(
-                "{pending} package(s) need review — run `review <sel>` or `approve <sel>`"
-            ));
+            format!("aurox [{staged} staged, {pending} to review]> ")
+        }
+    }
+
+    /// The transaction header line, shared by `show` and [`Self::summarize`]
+    /// so the two can't drift apart in wording.
+    fn txn_header(&self) -> String {
+        format!(
+            "transaction — {} to install, {} to remove",
+            self.cart.items().len(),
+            self.cart.removals().len()
+        )
+    }
+
+    /// The approval standing + next step, shared by `show` and
+    /// [`Self::summarize`]. A single pending package is named with its exact
+    /// command filled in — the shell knows the name, so the user shouldn't
+    /// have to substitute a `<sel>` placeholder; the plural points at bare
+    /// `review`, which walks every pending item.
+    fn approval_status(&self) -> String {
+        let pending = self.cart.pending_review();
+        match *pending.as_slice() {
+            [] => "all approved — run `apply`".to_owned(),
+            [one] => {
+                let name = one.spec();
+                format!("{name} needs review — run `review {name}` (or `approve {name}`)")
+            }
+            ref many => format!(
+                "{} packages need review — run `review` to walk them (or `approve <sel>`)",
+                many.len()
+            ),
         }
     }
 
@@ -351,16 +409,27 @@ impl State {
         }
         let pending = self.cart.pending_review();
         if !pending.is_empty() {
-            let names: Vec<&str> = pending.iter().map(|i| i.spec()).collect();
+            let names: Vec<&str> = pending.iter().map(|i| i.spec().as_str()).collect();
             env.print(&format!(
                 "needs review: {} — run `review <sel>` or `approve <sel>`",
                 names.join(", ")
             ));
             return;
         }
-        match env.apply(&self.cart) {
-            Ok(ApplyOutcome::Declined) => env.print("apply cancelled — cart kept"),
-            Ok(ApplyOutcome::Succeeded) => {
+        let run = match env.apply(&self.cart) {
+            Ok(run) => run,
+            Err(e) => {
+                env.print(&format!("apply: {e}"));
+                return;
+            }
+        };
+        // Fold the run's review knowledge back FIRST, whatever the outcome: a
+        // pulled-in dep's diff approved during a failed run must not re-prompt
+        // on the retry (and stays known for later re-adds after a success).
+        self.cart.absorb_reviewed(run.reviewed);
+        match run.outcome {
+            ApplyOutcome::Declined => env.print("apply cancelled — cart kept"),
+            ApplyOutcome::Succeeded => {
                 self.cart.clear_applied();
                 // The transaction ran: the cart is a new epoch, so pre-apply
                 // undo snapshots (which would re-stage now-installed packages)
@@ -368,7 +437,7 @@ impl State {
                 self.clear_undo_history();
                 env.print("done");
             }
-            Ok(ApplyOutcome::Failed { installed }) => {
+            ApplyOutcome::Failed { installed } => {
                 // Drop the rows that actually landed so a retry doesn't reinstall
                 // them; keep the offenders (and any staged removals, which don't
                 // run once a build fails) staged for `drop`/fix + `apply` again.
@@ -388,10 +457,8 @@ impl State {
                     ));
                 }
                 // Reprint what's left so the failures are on screen to act on.
-                self.view = View::Cart;
                 self.show(env);
             }
-            Err(e) => env.print(&format!("apply: {e}")),
         }
     }
 
@@ -406,77 +473,68 @@ impl State {
     /// `review`): a repo name (`aur`, `core`, …) selects every staged row from
     /// that repo, and names/globs match staged specs — both scoped to what's
     /// staged, since a cart verb acts on the cart regardless of which list is up.
-    /// Numbers, though, index the *active* list (see [`View`]), so a bare `3`
-    /// means the same row it would for any other verb — the one you last saw.
-    pub(super) fn resolve_against_cart(&self, args: &[String]) -> Result<Vec<PkgTarget>, String> {
-        let rows: Vec<RepoRow> = self
-            .cart
-            .items()
-            .iter()
-            .map(|it| RepoRow {
-                target: PkgTarget::new(it.spec()),
-                repo: Some(it.repo_label()),
-            })
-            .collect();
+    /// Numbers, though, name rows of the last numbered table printed (see
+    /// [`NumberedList`]), so a bare `3` means the same row it would for any
+    /// other verb — the one the user can see.
+    pub(super) fn resolve_against_cart(
+        &self,
+        args: &[String],
+    ) -> Result<Vec<selector::Resolved>, String> {
+        let rows: Vec<RepoRow> = self.cart.items().iter().map(RepoRow::from).collect();
         let args = expand_repo_tokens(args, &rows);
         let universe: Vec<PkgTarget> = rows.iter().map(|r| r.target.clone()).collect();
-        selector::resolve(&args, &self.active_list(), &universe)
+        selector::resolve(&args, self.referent.as_ref(), &universe)
     }
 
     /// Resolve selector `args` for a list verb (`add`, `info`, `remove`): a repo
-    /// name selects every row from that repo in the active list, numbers/ranges
-    /// index the active list, and names/globs resolve against the full name
-    /// universe (so you can `add` anything installable, not just what's shown).
+    /// name selects every row from that repo in the last numbered table,
+    /// numbers/ranges index that table, and names/globs resolve against the full
+    /// name universe (so you can `add` anything installable, not just what's
+    /// shown).
     pub(super) fn resolve_against_list<E: ShellEnv>(
         &self,
         args: &[String],
         env: &E,
-    ) -> Result<Vec<PkgTarget>, String> {
-        let active = self.active_list();
-        let rows: Vec<RepoRow> = active
-            .iter()
-            .map(|it| RepoRow {
-                target: it.target.clone(),
-                repo: it.repo.clone(),
-            })
-            .collect();
+    ) -> Result<Vec<selector::Resolved>, String> {
+        let rows: Vec<RepoRow> = self.referent_rows().iter().map(RepoRow::from).collect();
         let args = expand_repo_tokens(args, &rows);
-        selector::resolve(&args, &active, env.names())
+        selector::resolve(&args, self.referent.as_ref(), env.names())
     }
 
-    /// The staged cart as a numbered list — the same rows, in the same order,
-    /// that `show` prints — so a number resolves to the row the user sees. Built
-    /// live from the cart, so it can never lag a staging change.
+    /// The staged cart as selector rows — the same rows, in the same order,
+    /// that `show` renders. Snapshotted into the referent at `show` time, so
+    /// the numbers the user reads stay bound to these packages until the next
+    /// numbered table prints.
     fn cart_as_list(&self) -> Vec<ListItem> {
-        self.cart
-            .items()
-            .iter()
-            .map(|it| ListItem {
-                target: PkgTarget::new(it.spec()),
-                repo: Some(it.repo_label()),
-            })
-            .collect()
+        self.cart.items().iter().map(ListItem::from).collect()
     }
 
-    /// The list bare numbers currently index: the search results while the search
-    /// view is up, else the staged cart (see [`View`]).
-    ///
-    /// The search view falls back to the cart when there's no search list to
-    /// address — a fresh session (never searched) or a fruitless search — so a
-    /// number always resolves against whatever numbered table is actually on
-    /// screen, which after an `add`/`drop`/… is the cart.
-    fn active_list(&self) -> Vec<ListItem> {
-        match self.view {
-            View::Search if !self.search_list.is_empty() => self.search_list.clone(),
-            _ => self.cart_as_list(),
+    /// The referent's rows, or an empty slice before any numbered table was
+    /// printed (repo-token expansion iterates these; number resolution itself
+    /// goes through the referent for kind-aware errors).
+    fn referent_rows(&self) -> &[ListItem] {
+        self.referent.as_ref().map_or(&[], |l| &l.rows)
+    }
+
+    /// Run one undoable cart edit: snapshot the cart, run `edit`, and push the
+    /// snapshot onto the undo stack iff the edit reports it changed something
+    /// (so a no-op never consumes an undo step). Returns that report for the
+    /// caller's follow-up printing. This is the *single* clone site for the
+    /// undo feature — a cart-editing verb structurally cannot forget the
+    /// snapshot or push an unchanged one.
+    pub(super) fn edit_cart(&mut self, edit: impl FnOnce(&mut Self) -> bool) -> bool {
+        let before = self.cart.clone();
+        let changed = edit(self);
+        if changed {
+            self.push_undo(before);
         }
+        changed
     }
 
     /// Snapshot the pre-change cart onto the `undo` stack (bounded) and discard
-    /// any redo branch. Call with the cart as it was *before* a cart-changing
-    /// command mutates it — only when the command actually changed something, so
-    /// a no-op never consumes an undo step.
-    pub(super) fn push_undo(&mut self, before: Cart) {
+    /// any redo branch. [`Self::edit_cart`]'s push half — only ever called with
+    /// the cart as it was before an edit that really changed something.
+    fn push_undo(&mut self, before: Cart) {
         self.history.push(before);
         if self.history.len() > UNDO_DEPTH {
             self.history.remove(0);
@@ -490,8 +548,9 @@ impl State {
         match self.history.pop() {
             Some(prev) => {
                 self.redo.push(std::mem::replace(&mut self.cart, prev));
-                self.view = View::Cart;
                 env.print("undone — `redo` to reapply");
+                // Present the restored cart (and re-arm the referent): the
+                // user didn't enumerate this change, so showing it is the job.
                 self.show(env);
             }
             None => env.print("nothing to undo"),
@@ -504,7 +563,6 @@ impl State {
         match self.redo.pop() {
             Some(next) => {
                 self.history.push(std::mem::replace(&mut self.cart, next));
-                self.view = View::Cart;
                 env.print("redone");
                 self.show(env);
             }
@@ -518,6 +576,57 @@ impl State {
 struct RepoRow {
     target: PkgTarget,
     repo: Option<RepoName>,
+}
+
+impl RepoRow {
+    /// Whether this row belongs to the repo named by `word`
+    /// (case-insensitive) — the predicate a repo-name selector filters on.
+    fn matches_repo(&self, word: &str) -> bool {
+        self.repo
+            .as_ref()
+            .is_some_and(|repo| repo.as_str().eq_ignore_ascii_case(word))
+    }
+}
+
+// The three row sources a repo filter runs over. Each conversion owns its
+// clones once, at a named seam, instead of per-field `.clone()`s at the call
+// sites (the shell-layer clone policy: clone freely, but at one place).
+impl From<&CartItem> for RepoRow {
+    fn from(it: &CartItem) -> Self {
+        Self {
+            target: it.spec().clone(),
+            repo: Some(it.repo_label()),
+        }
+    }
+}
+
+impl From<&ListItem> for RepoRow {
+    fn from(it: &ListItem) -> Self {
+        Self {
+            target: it.target.clone(),
+            repo: it.repo.clone(),
+        }
+    }
+}
+
+impl From<&PkgUpgrade> for RepoRow {
+    fn from(u: &PkgUpgrade) -> Self {
+        Self {
+            target: PkgTarget::from(&u.name),
+            repo: Some(u.repo.clone()),
+        }
+    }
+}
+
+/// An upgrade-candidate row as a selector list row (`select_from_candidates`
+/// numbers the candidates it filters).
+impl From<&RepoRow> for ListItem {
+    fn from(r: &RepoRow) -> Self {
+        Self {
+            target: r.target.clone(),
+            repo: r.repo.clone(),
+        }
+    }
 }
 
 /// Rewrite repo-name tokens (`aur`, `core`, `extra`, …) into the targets of the
@@ -534,11 +643,7 @@ fn expand_repo_tokens(args: &[String], rows: &[RepoRow]) -> Vec<String> {
         .flat_map(|a| {
             let matched: Vec<String> = rows
                 .iter()
-                .filter(|r| {
-                    r.repo
-                        .as_ref()
-                        .is_some_and(|repo| repo.as_str().eq_ignore_ascii_case(a))
-                })
+                .filter(|r| r.matches_repo(a))
                 .map(|r| r.target.as_str().to_owned())
                 .collect();
             if matched.is_empty() {
@@ -559,27 +664,21 @@ fn select_from_candidates(
     args: &[String],
     candidates: &[PkgUpgrade],
 ) -> Result<Vec<PkgUpgrade>, String> {
-    let rows: Vec<RepoRow> = candidates
-        .iter()
-        .map(|u| RepoRow {
-            target: PkgTarget::new(u.name.as_str()),
-            repo: Some(u.repo.clone()),
-        })
-        .collect();
+    let rows: Vec<RepoRow> = candidates.iter().map(RepoRow::from).collect();
     let args = expand_repo_tokens(args, &rows);
-    let list: Vec<ListItem> = rows
-        .iter()
-        .map(|r| ListItem {
-            target: r.target.clone(),
-            repo: r.repo.clone(),
-        })
-        .collect();
+    let list = NumberedList {
+        source: ListSource::UpgradeCandidates,
+        rows: rows.iter().map(ListItem::from).collect(),
+    };
     let universe: Vec<PkgTarget> = rows.iter().map(|r| r.target.clone()).collect();
-    let picked = selector::resolve(&args, &list, &universe)?;
-    let names: HashSet<&str> = picked.iter().map(PkgTarget::as_str).collect();
+    let picked = selector::resolve(&args, Some(&list), &universe)?;
+    // Join back to the candidates in target space: each candidate's name
+    // lifts through the declared `PkgName → PkgTarget` conversion, so the
+    // match never drops to raw strings.
+    let picked: HashSet<PkgTarget> = picked.into_iter().map(|r| r.target).collect();
     Ok(candidates
         .iter()
-        .filter(|u| names.contains(u.name.as_str()))
+        .filter(|u| picked.contains(&PkgTarget::from(&u.name)))
         .cloned()
         .collect())
 }
@@ -592,8 +691,9 @@ mod tests {
     use crate::cli::shell::cart::Source;
     use crate::cli::shell::command;
     use crate::cli::shell::testenv::{
-        FakeEnv, cart_specs, dispatch_one, env_with, li, li_repo, up,
+        FakeEnv, cart_specs, dispatch_one, env_with, li, li_repo, state_showing, up,
     };
+    use crate::names::PkgBase;
     use crate::units::ByteSize;
 
     #[test]
@@ -649,7 +749,12 @@ mod tests {
         };
         let mut state = State::default();
         state.dispatch(&command::parse("upgrade yay-bin"), &mut env);
-        let specs: Vec<&str> = state.cart.items().iter().map(CartItem::spec).collect();
+        let specs: Vec<&str> = state
+            .cart
+            .items()
+            .iter()
+            .map(|i| i.spec().as_str())
+            .collect();
         assert_eq!(specs, vec!["yay-bin"]);
     }
 
@@ -905,6 +1010,26 @@ mod tests {
     }
 
     #[test]
+    fn apply_folds_mid_run_reviews_back_whatever_the_outcome() {
+        // The reviewed-set loss: a pulled-in dep's PKGBUILD approved *during*
+        // a failed apply must not re-prompt on the retry — the run's review
+        // knowledge is folded into the cart on every outcome.
+        let mut env = env_with(&[("a", Source::Aur)]);
+        env.apply_outcome = Some(ApplyOutcome::Failed {
+            installed: Vec::new(),
+        });
+        env.apply_reviewed = std::iter::once(PkgBase::from("some-dep")).collect();
+        let mut state = State::default();
+        state.dispatch(&command::parse("add a"), &mut env);
+        state.dispatch(&command::parse("approve a"), &mut env);
+        state.dispatch(&command::parse("apply"), &mut env);
+        assert!(
+            state.cart.reviewed().contains(&PkgBase::from("some-dep")),
+            "the mid-run approval must survive the failed run"
+        );
+    }
+
+    #[test]
     fn apply_total_failure_keeps_the_whole_cart_for_retry() {
         let mut env = env_with(&[("glibc", Source::Repo)]);
         // Nothing landed → empty `installed` → the whole cart stays staged.
@@ -950,7 +1075,7 @@ mod tests {
         let mut state = State::default();
         state.dispatch(&command::parse("add yay-bin"), &mut env);
         state.dispatch(&command::parse("show"), &mut env);
-        assert!(env.lines.contains("need review"));
+        assert!(env.lines.contains("yay-bin needs review"));
         state.dispatch(&command::parse("approve yay-bin"), &mut env);
         env.lines.clear();
         state.dispatch(&command::parse("show"), &mut env);
@@ -965,10 +1090,10 @@ mod tests {
     }
 
     #[test]
-    fn search_remembers_list_and_sets_view() {
+    fn search_snapshots_the_printed_rows_as_the_referent() {
         // The printed table (numbering, alignment, worst-first order) is
         // RealEnv's side of the seam, pinned by `ui::search_table`'s tests and
-        // the search PTY e2e; the pure core's job is the session state.
+        // the search PTY e2e; the pure core's job is the referent snapshot.
         let mut env = FakeEnv {
             search_result: vec![li("foo"), li("bar")],
             ..FakeEnv::default()
@@ -976,8 +1101,28 @@ mod tests {
         let mut state = State::default();
         let flow = state.dispatch(&command::parse("search foo"), &mut env);
         assert_eq!(flow, Flow::Continue);
-        assert_eq!(state.search_list.len(), 2, "the list should be remembered");
-        assert_eq!(state.view, View::Search, "numbers now key the search list");
+        let referent = state.referent.as_ref().expect("search sets the referent");
+        assert_eq!(referent.rows.len(), 2, "the printed rows are the snapshot");
+        assert_eq!(referent.source, ListSource::Search);
+    }
+
+    #[test]
+    fn fruitless_search_keeps_the_previous_referent() {
+        // A no-hit search prints no numbered rows, so the table still on
+        // screen above stays addressable — `add 1` picks from it.
+        let mut env = env_with(&[("foo", Source::Aur)]);
+        env.search_result = vec![li_repo("aur", "foo")];
+        let mut state = State::default();
+        state.dispatch(&command::parse("search foo"), &mut env);
+        env.search_result = Vec::new();
+        state.dispatch(&command::parse("search zzz"), &mut env);
+        assert!(env.lines.contains("no packages match"));
+        state.dispatch(&command::parse("add 1"), &mut env);
+        assert_eq!(
+            cart_specs(&state),
+            vec!["foo"],
+            "row 1 still names the visible earlier result"
+        );
     }
 
     #[test]
@@ -990,10 +1135,7 @@ mod tests {
     #[test]
     fn info_by_number_resolves_against_the_search_list() {
         let mut env = FakeEnv::default();
-        let mut state = State {
-            search_list: vec![li("foo"), li("bar")],
-            ..State::default()
-        };
+        let mut state = state_showing(vec![li("foo"), li("bar")]);
         state.dispatch(&command::parse("info 2"), &mut env);
         assert_eq!(env.info_calls, vec![vec![PkgTarget::new("bar")]]);
     }
@@ -1026,13 +1168,15 @@ mod tests {
     #[test]
     fn info_out_of_range_number_reports_error_without_calling_show() {
         let mut env = FakeEnv::default();
-        let mut state = State {
-            search_list: vec![li("only")],
-            ..State::default()
-        };
+        let mut state = state_showing(vec![li("only")]);
         state.dispatch(&command::parse("info 9"), &mut env);
         assert!(env.info_calls.is_empty(), "must not show on a bad index");
-        assert!(env.lines.contains("info:"), "got: {:?}", env.lines);
+        assert!(
+            env.lines
+                .contains("info: no row 9 — the search list has 1 row"),
+            "the error names the list numbers refer to: {:?}",
+            env.lines
+        );
     }
 
     #[test]
@@ -1053,13 +1197,13 @@ mod tests {
         assert_eq!(cart_specs(&state), vec!["yay-bin"]);
     }
 
-    // --- unified numbering: a bare number follows the last-shown list ---
+    // --- WYSIWYG addressing: a number names a row of the last numbered table ---
 
     #[test]
     fn add_by_number_keeps_pointing_at_the_search_list_across_adds() {
-        // Working through a search list: each `add` reprints the cart but must
-        // not yank the numbering onto it, so `add 1` then `add 3` both index the
-        // search rows (the classic "search, then add a few" flow).
+        // Working through a search list: `add` prints no numbered table, so
+        // `add 1` then `add 3` both keep naming the search rows (the classic
+        // "search, then add a few" flow).
         let mut env = env_with(&[("a", Source::Aur), ("b", Source::Aur), ("c", Source::Aur)]);
         env.search_result = vec![
             li_repo("aur", "a"),
@@ -1073,24 +1217,34 @@ mod tests {
         assert_eq!(
             cart_specs(&state),
             vec!["a", "c"],
-            "1 and 3 index the search list, not the reprinted cart"
+            "1 and 3 keep naming the search rows"
         );
     }
 
     #[test]
-    fn number_indexes_the_cart_when_no_search_was_run() {
-        // Fresh session, staged straight into the cart (no `search`): a bare
-        // number must still resolve against the cart on screen, not error with
-        // "no numbered list is up".
+    fn number_without_a_printed_table_errors_helpfully() {
+        // Fresh session, staged by name, nothing numbered ever printed: a bare
+        // number has no referent. Guessing "the (invisible, sorted) cart" is
+        // the silent-wrong-target class this design removes — error and point
+        // at `show` instead.
         let mut env = env_with(&[("foo", Source::Aur), ("bar", Source::Aur)]);
         let mut state = State::default();
-        state.dispatch(&command::parse("add foo bar"), &mut env); // cart: [bar, foo]
+        state.dispatch(&command::parse("add foo bar"), &mut env);
         state.dispatch(&command::parse("drop 1"), &mut env);
         assert_eq!(
             cart_specs(&state),
-            vec!["foo"],
-            "`drop 1` hits the shown cart"
+            vec!["bar", "foo"],
+            "nothing may be dropped on a blind number"
         );
+        assert!(
+            env.lines.contains("no numbered list is up"),
+            "got: {:?}",
+            env.lines
+        );
+        // `show` prints the numbered cart; the number now works.
+        state.dispatch(&command::parse("show"), &mut env);
+        state.dispatch(&command::parse("drop 1"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["foo"], "`drop 1` = shown row 1");
     }
 
     #[test]
@@ -1100,7 +1254,7 @@ mod tests {
             ..FakeEnv::default()
         };
         let mut state = State::default();
-        state.dispatch(&command::parse("upgrade"), &mut env); // cart: [bar, foo]
+        state.dispatch(&command::parse("upgrade"), &mut env); // shows cart: [bar, foo]
         state.dispatch(&command::parse("drop 1"), &mut env);
         assert_eq!(
             cart_specs(&state),
@@ -1110,25 +1264,80 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_pins_numbers_while_the_cart_shrinks() {
+        // Working down a printed table: `drop 1` narrows the cart (quietly —
+        // no re-numbering), so `drop 2` must still hit the package *printed*
+        // at row 2, not "current row 2 of the live cart".
+        let mut env = FakeEnv {
+            upgrade_candidates: vec![up("aur", "bar"), up("aur", "foo"), up("aur", "qux")],
+            ..FakeEnv::default()
+        };
+        let mut state = State::default();
+        state.dispatch(&command::parse("upgrade"), &mut env); // shows [bar, foo, qux]
+        state.dispatch(&command::parse("drop 1"), &mut env); // bar gone; live cart: [foo, qux]
+        state.dispatch(&command::parse("drop 2"), &mut env); // printed row 2 = foo
+        assert_eq!(
+            cart_specs(&state),
+            vec!["qux"],
+            "row 2 names foo as printed, though foo is live row 1 by now"
+        );
+    }
+
+    #[test]
+    fn stale_snapshot_row_is_a_clean_miss() {
+        // A number whose package already left the cart misses by name — it
+        // must never slide onto whatever occupies that index now.
+        let mut env = FakeEnv {
+            upgrade_candidates: vec![up("aur", "bar"), up("aur", "foo")],
+            ..FakeEnv::default()
+        };
+        let mut state = State::default();
+        state.dispatch(&command::parse("upgrade"), &mut env); // shows [bar, foo]
+        state.dispatch(&command::parse("drop 1"), &mut env);
+        env.lines.clear();
+        state.dispatch(&command::parse("drop 1"), &mut env);
+        assert!(
+            env.lines.contains("row 1 (bar) is no longer staged"),
+            "the stale row misses as bar, the package printed there: {:?}",
+            env.lines
+        );
+        assert_eq!(cart_specs(&state), vec!["foo"], "foo must not be hit");
+    }
+
+    #[test]
     fn show_switches_numbering_from_the_search_list_to_the_cart() {
         let mut env = env_with(&[("staged", Source::Aur)]);
         env.search_result = vec![li_repo("aur", "searched")];
         let mut state = State::default();
         state.dispatch(&command::parse("add staged"), &mut env); // cart = [staged]
-        state.dispatch(&command::parse("search x"), &mut env); // view = search
+        state.dispatch(&command::parse("search x"), &mut env); // referent = search rows
         state.dispatch(&command::parse("info 1"), &mut env);
         assert_eq!(
             env.info_calls.last(),
             Some(&vec![PkgTarget::new("searched")]),
-            "in the search view, `1` is the search row"
+            "after `search`, `1` is the search row"
         );
-        state.dispatch(&command::parse("show"), &mut env); // view = cart
+        state.dispatch(&command::parse("show"), &mut env); // referent = shown cart
         state.dispatch(&command::parse("info 1"), &mut env);
         assert_eq!(
             env.info_calls.last(),
             Some(&vec![PkgTarget::new("staged")]),
             "after `show`, `1` is the cart row"
         );
+    }
+
+    #[test]
+    fn show_on_an_empty_cart_keeps_the_referent() {
+        // "cart is empty" carries no row numbers, so the search table still on
+        // screen stays what numbers name.
+        let mut env = env_with(&[("foo", Source::Aur)]);
+        env.search_result = vec![li_repo("aur", "foo")];
+        let mut state = State::default();
+        state.dispatch(&command::parse("search x"), &mut env);
+        state.dispatch(&command::parse("show"), &mut env);
+        assert!(env.lines.contains("cart is empty"));
+        state.dispatch(&command::parse("add 1"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["foo"]);
     }
 
     // --- undo / redo ---
@@ -1250,6 +1459,43 @@ mod tests {
             env.lines.contains("nothing to undo"),
             "apply cleared the undo history: {:?}",
             env.lines
+        );
+    }
+
+    // --- prompt: ambient cart state ---
+
+    #[test]
+    fn prompt_carries_the_cart_standing() {
+        let mut env = env_with(&[("glibc", Source::Repo), ("yay-bin", Source::Aur)]);
+        let mut state = State::default();
+        assert_eq!(
+            state.prompt(),
+            "aurox> ",
+            "empty cart keeps the plain prompt"
+        );
+        state.dispatch(&command::parse("add glibc yay-bin"), &mut env);
+        assert_eq!(
+            state.prompt(),
+            "aurox [2 staged, 1 to review]> ",
+            "counts + the open review gate"
+        );
+        state.dispatch(&command::parse("approve yay-bin"), &mut env);
+        assert_eq!(
+            state.prompt(),
+            "aurox [2 staged]> ",
+            "gates cleared drop the review part"
+        );
+        state.dispatch(&command::parse("remove oldpkg"), &mut env);
+        assert_eq!(
+            state.prompt(),
+            "aurox [3 staged]> ",
+            "staged removals count as rows"
+        );
+        state.dispatch(&command::parse("clear"), &mut env);
+        assert_eq!(
+            state.prompt(),
+            "aurox> ",
+            "clear returns to the plain prompt"
         );
     }
 

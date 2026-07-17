@@ -512,66 +512,83 @@ impl<'e> Best<'e> {
             }
         };
         match row {
-            Row::Aur(e) => {
-                if let Some(t) = name_tier(e.pkgbase.regex_anchor(r)) {
-                    consider(t, Site::DisplayName);
-                }
-                for p in &e.pkgnames {
-                    if let Some(t) = name_tier(p.name.regex_anchor(r)) {
-                        let site = if e.pkgbase.matches_pkgname(&p.name) {
-                            Site::DisplayName
-                        } else {
-                            Site::MemberName(&p.name)
-                        };
-                        consider(t, site);
-                    }
-                }
-                let shown = e.display_desc();
-                if let Some(d) = shown
-                    && r.is_match(d)
-                {
-                    consider(MatchTier::Desc, Site::DisplayDesc);
-                }
-                for p in &e.pkgnames {
-                    if let Some(d) = p.pkgdesc.as_deref()
-                        && !d.is_empty()
-                        && shown != Some(d)
-                        && r.is_match(d)
-                    {
-                        consider(MatchTier::Desc, Site::MemberDesc(&p.name));
-                    }
-                }
-                for prov in e.all_provides() {
-                    if let Some(t) = provides_tier(prov.bare_anchor(r)) {
-                        consider(t, Site::Provides(prov.bare()));
-                    }
-                }
-            }
-            Row::Repo(h) => {
-                if let Some(t) = name_tier(h.name.regex_anchor(r)) {
-                    consider(t, Site::DisplayName);
-                }
-                if let Some(d) = h.desc.as_deref()
-                    && r.is_match(d)
-                {
-                    consider(MatchTier::Desc, Site::DisplayDesc);
-                }
-                for v in &h.provides {
-                    if let Some(t) = provides_tier(v.regex_anchor(r)) {
-                        consider(t, Site::Provides(v.as_str()));
-                    }
-                }
-                for g in &h.groups {
-                    if g.matches_regex(r) {
-                        consider(MatchTier::Desc, Site::Group(g));
-                    }
-                }
-            }
+            Row::Aur(e) => consider_aur_sites(e, r, &mut consider),
+            Row::Repo(h) => consider_repo_sites(h, r, &mut consider),
         }
         best.unwrap_or(Best {
             tier: MatchTier::Desc,
             site: Site::Unknown,
         })
+    }
+}
+
+/// Probe every site of an AUR entry: the pkgbase/display name, split-member
+/// names, the displayed and hidden descriptions, and provides. Split out of
+/// [`Best::of`] so each row kind reads as one flat probe list.
+fn consider_aur_sites<'e>(
+    e: &'e IndexEntry,
+    r: &regex::Regex,
+    consider: &mut impl FnMut(MatchTier, Site<'e>),
+) {
+    if let Some(t) = name_tier(e.pkgbase.regex_anchor(r)) {
+        consider(t, Site::DisplayName);
+    }
+    for p in &e.pkgnames {
+        if let Some(t) = name_tier(p.name.regex_anchor(r)) {
+            let site = if e.pkgbase.matches_pkgname(&p.name) {
+                Site::DisplayName
+            } else {
+                Site::MemberName(&p.name)
+            };
+            consider(t, site);
+        }
+    }
+    let shown = e.display_desc();
+    if let Some(d) = shown
+        && r.is_match(d)
+    {
+        consider(MatchTier::Desc, Site::DisplayDesc);
+    }
+    for p in &e.pkgnames {
+        if let Some(d) = p.pkgdesc.as_deref()
+            && !d.is_empty()
+            && shown != Some(d)
+            && r.is_match(d)
+        {
+            consider(MatchTier::Desc, Site::MemberDesc(&p.name));
+        }
+    }
+    for prov in e.all_provides() {
+        if let Some(t) = provides_tier(prov.bare_anchor(r)) {
+            consider(t, Site::Provides(prov.bare()));
+        }
+    }
+}
+
+/// Probe every site of a repo hit: name, description, provides, and groups.
+/// [`consider_aur_sites`]'s repo twin.
+fn consider_repo_sites<'e>(
+    h: &'e RepoHit,
+    r: &regex::Regex,
+    consider: &mut impl FnMut(MatchTier, Site<'e>),
+) {
+    if let Some(t) = name_tier(h.name.regex_anchor(r)) {
+        consider(t, Site::DisplayName);
+    }
+    if let Some(d) = h.desc.as_deref()
+        && r.is_match(d)
+    {
+        consider(MatchTier::Desc, Site::DisplayDesc);
+    }
+    for v in &h.provides {
+        if let Some(t) = provides_tier(v.regex_anchor(r)) {
+            consider(t, Site::Provides(v.as_str()));
+        }
+    }
+    for g in &h.groups {
+        if g.matches_regex(r) {
+            consider(MatchTier::Desc, Site::Group(g));
+        }
     }
 }
 

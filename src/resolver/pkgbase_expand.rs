@@ -18,10 +18,10 @@
 
 use crate::build::Target;
 use crate::error::{Error, Result};
-use crate::index::lookup::{self, Lookup};
+use crate::index::lookup::Lookup;
 use crate::index::schema::IndexEntry;
 use crate::index::{AurIndexData, IndexFile};
-use crate::names::{PkgBase, PkgName};
+use crate::names::{PkgBase, PkgName, PkgTarget};
 use crate::pacman::alpm_db::PacmanIndex;
 use std::collections::HashMap;
 use tracing::{debug, instrument};
@@ -45,13 +45,13 @@ pub type PkgnameSelector<'a> = dyn FnMut(&PkgBase, &[PkgName]) -> Result<Vec<Pkg
 #[derive(Debug, Default)]
 pub struct ExpandedTargets {
     /// Rewritten target list ready for [`super::resolve`]. May contain the
-    /// pkgbase string for rewritten entries; pacman / `by_name` passthroughs
-    /// keep their original form (with any version constraint suffix).
-    /// Stays `Vec<String>` because the contents are deliberately mixed —
-    /// passthroughs can be virtual names, version-constrained pkgnames, or
-    /// pacman targets, none of which fits cleanly under `PkgName` or
-    /// `PkgBase`.
-    pub targets: Vec<String>,
+    /// pkgbase for rewritten entries; pacman / `by_name` passthroughs keep
+    /// their original form (with any version constraint suffix). The
+    /// contents are deliberately mixed — passthroughs can be virtual names,
+    /// version-constrained pkgnames, or pacman targets — which is exactly
+    /// [`PkgTarget`]'s charter (anything a user can name), so the mixed bag
+    /// is typed rather than a `Vec<String>`.
+    pub targets: Vec<PkgTarget>,
     /// pkgbase → user-selected pkgnames, populated only when the user kept a
     /// **proper subset** of a split pkgbase. The build pipeline uses this
     /// for the install-side `pacman -U` filter. Pkgbases absent from the
@@ -109,7 +109,7 @@ pub fn expand_pkgbase_targets(
     };
 
     for t in targets {
-        let bare = lookup::strip_version_constraint(&t.spec);
+        let bare = t.spec.bare();
         // Hint recording runs *unconditionally* — the rewrite decision
         // below may short-circuit (pacman wins, passthrough, …), but the
         // resolver still classifies the spec via `resolve_target_source`
@@ -150,8 +150,9 @@ pub fn expand_pkgbase_targets(
 /// `&mut` flows into the branches.
 struct TargetDecision {
     /// Pushed into [`ExpandedTargets::targets`]. Either the rewritten
-    /// pkgbase string or the original spec for passthrough cases.
-    spec: String,
+    /// pkgbase (lifted through `PkgTarget::from`) or the original spec for
+    /// passthrough cases.
+    spec: PkgTarget,
     /// `(pkgbase, chosen)` for [`extend_selection`] when this target
     /// constrains a split pkgbase's install set; `None` otherwise.
     selection: Option<(PkgBase, Vec<PkgName>)>,
@@ -161,7 +162,7 @@ struct TargetDecision {
 }
 
 impl TargetDecision {
-    const fn passthrough(spec: String) -> Self {
+    const fn passthrough(spec: PkgTarget) -> Self {
         Self {
             spec,
             selection: None,
@@ -214,11 +215,11 @@ fn decide_pkgname(idx: &IndexFile, by: &Lookup, t: &Target, bare: &str) -> Targe
         chosen = chosen.len(),
         "rewrote split-pkg pkgname target to pkgbase with selection",
     );
-    // `into_inner` on the clone is the dedicated PkgBase→String downgrade,
-    // used only at this resolver/string boundary (`out.targets` is the
-    // mixed-bag `Vec<String>` — see [`ExpandedTargets::targets`]).
+    // The rewrite lifts the pkgbase into target space through the declared
+    // `PkgBase → PkgTarget` conversion (`out.targets` is the typed mixed
+    // bag — see [`ExpandedTargets::targets`]).
     TargetDecision {
-        spec: entry.pkgbase.clone().into_inner(),
+        spec: PkgTarget::from(&entry.pkgbase),
         selection: Some((entry.pkgbase.clone(), chosen)),
         direct_pkgnames: vec![bare_name],
     }
@@ -251,7 +252,7 @@ fn decide_virtual(idx: &IndexFile, by: &Lookup, bare: &str) -> TargetDecision {
         (entry.pkgbase.clone(), chosen)
     });
     TargetDecision {
-        spec: entry.pkgbase.clone().into_inner(),
+        spec: PkgTarget::from(&entry.pkgbase),
         selection,
         direct_pkgnames: vec![pkgname.clone()],
     }
@@ -298,7 +299,7 @@ fn decide_pkgbase(
     let selection =
         (chosen.len() < entry.pkgnames.len()).then(|| (entry.pkgbase.clone(), chosen.clone()));
     Ok(TargetDecision {
-        spec: entry.pkgbase.clone().into_inner(),
+        spec: PkgTarget::from(&entry.pkgbase),
         selection,
         direct_pkgnames: chosen,
     })

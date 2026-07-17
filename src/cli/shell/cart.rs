@@ -148,7 +148,7 @@ impl CartItem {
         aur: AurApproval,
     ) -> Self {
         Self {
-            target: Target::bare(target.into_inner()),
+            target: Target::bare(target),
             source,
             approval: Approval::default_for(source, aur),
             repo,
@@ -167,8 +167,8 @@ impl CartItem {
             Source::Repo
         };
         let target = match source {
-            Source::Aur => Target::with_hint(u.name.as_str().to_owned(), u.name.clone()),
-            Source::Repo => Target::bare(u.name.as_str().to_owned()),
+            Source::Aur => Target::with_hint(&u.name, u.name.clone()),
+            Source::Repo => Target::bare(&u.name),
         };
         // AUR rows label as `aur` from the source; a repo row carries its
         // concrete sync-DB so the table shows `core`/`extra`/… not just `repo`.
@@ -182,8 +182,9 @@ impl CartItem {
         }
     }
 
-    /// The freeform user-typed spec this item stages.
-    pub fn spec(&self) -> &str {
+    /// The freeform user-typed spec this item stages — the item's identity
+    /// within the cart.
+    pub const fn spec(&self) -> &PkgTarget {
         &self.target.spec
     }
 
@@ -210,6 +211,21 @@ impl CartItem {
             .as_ref()
             .map(|u| format!("{} → {}", u.old_ver, u.new_ver))
     }
+}
+
+/// What one `apply` run reports back to the dispatch core.
+///
+/// The outcome, plus the review set as the run left it — the cart's set
+/// extended by any PKGBUILD the user approved *during* the run (pulled-in
+/// AUR dependencies prompt mid-build). The env reads the cart; the core owns
+/// folding this knowledge back in ([`Cart::absorb_reviewed`]), on **every**
+/// outcome, so a diff approved before a failure isn't re-prompted on the
+/// retry. (An `Err` abort carries no data and still loses mid-run approvals
+/// — the accepted limit of the seam.)
+#[derive(Debug)]
+pub struct ApplyRun {
+    pub outcome: ApplyOutcome,
+    pub reviewed: HashSet<PkgBase>,
 }
 
 /// The outcome the dispatch core uses to update the cart after `env.apply`.
@@ -331,8 +347,10 @@ impl Cart {
     /// already in the cart — re-`add`ing is idempotent, not a duplicate row.
     ///
     /// Inserts keeping [`Self::items`] sorted (repo-rank → repo → name) so the
-    /// row number `show` prints *is* the vector index `resolve_against_cart`
-    /// addresses — the two can't drift (`docs/plans/shell-ui.md`, phase 5b).
+    /// table renders stably grouped however the cart was assembled. Number
+    /// resolution no longer reads this vector live — `show` snapshots the
+    /// rendered rows into the referent (see `NumberedList` in the shell root),
+    /// so numbers stay bound to what was printed even across a re-sort.
     pub fn add(&mut self, item: CartItem) -> StageResult {
         if self.items.iter().any(|i| i.spec() == item.spec()) {
             return StageResult::AlreadyStaged;
@@ -379,7 +397,10 @@ impl Cart {
     /// install matches, returns [`KeepResult::NoMatch`] and changes nothing.
     /// Relative order of the kept rows is preserved, so the sorted-cart
     /// invariant holds without a re-sort.
-    pub fn keep(&mut self, keep: &HashSet<&str>) -> KeepResult {
+    pub fn keep<'a>(&mut self, keep: impl IntoIterator<Item = &'a PkgTarget>) -> KeepResult {
+        // Fully typed: an item's identity (`spec()`) is a `PkgTarget`, so
+        // the membership probes below never leave target space.
+        let keep: HashSet<PkgTarget> = keep.into_iter().cloned().collect();
         if !self.items.iter().any(|i| keep.contains(i.spec())) {
             return KeepResult::NoMatch;
         }
@@ -387,10 +408,16 @@ impl Cart {
             .items
             .iter()
             .filter(|i| !keep.contains(i.spec()))
-            .map(|i| PkgTarget::new(i.spec()))
+            .map(|i| i.spec().clone())
             .collect();
         self.items.retain(|i| keep.contains(i.spec()));
         KeepResult::Kept { dropped }
+    }
+
+    /// Fold an [`ApplyRun`]'s review knowledge back in — a set union, so the
+    /// incoming set's iteration order is irrelevant.
+    pub fn absorb_reviewed(&mut self, reviewed: HashSet<PkgBase>) {
+        self.reviewed.extend(reviewed);
     }
 
     /// Stage a removal (uninstall). [`StageResult::AlreadyStaged`] when it was
@@ -573,8 +600,8 @@ mod tests {
         assert_eq!(cart.items()[0].spec(), "bar");
     }
 
-    fn keep_set<'a>(specs: &'a [&str]) -> HashSet<&'a str> {
-        specs.iter().copied().collect()
+    fn keep_targets(specs: &[&str]) -> Vec<PkgTarget> {
+        specs.iter().map(|s| PkgTarget::new(*s)).collect()
     }
 
     #[test]
@@ -585,12 +612,12 @@ mod tests {
         cart.add(item("baz", Source::Aur));
         // Keep only `bar` — the two AUR rows drop, reported in cart order.
         assert_eq!(
-            cart.keep(&keep_set(&["bar"])),
+            cart.keep(&keep_targets(&["bar"])),
             KeepResult::Kept {
                 dropped: vec![PkgTarget::new("baz"), PkgTarget::new("foo")]
             }
         );
-        let specs: Vec<&str> = cart.items().iter().map(CartItem::spec).collect();
+        let specs: Vec<&str> = cart.items().iter().map(|i| i.spec().as_str()).collect();
         assert_eq!(specs, vec!["bar"]);
     }
 
@@ -600,7 +627,7 @@ mod tests {
         let mut cart = Cart::default();
         cart.add(item("foo", Source::Aur));
         cart.add(item("bar", Source::Repo));
-        assert_eq!(cart.keep(&keep_set(&["absent"])), KeepResult::NoMatch);
+        assert_eq!(cart.keep(&keep_targets(&["absent"])), KeepResult::NoMatch);
         assert_eq!(cart.items().len(), 2, "nothing dropped on no match");
     }
 
@@ -611,7 +638,7 @@ mod tests {
         cart.add(item("bar", Source::Repo));
         // Every staged row is kept → a no-op, with an empty dropped list.
         assert_eq!(
-            cart.keep(&keep_set(&["foo", "bar"])),
+            cart.keep(&keep_targets(&["foo", "bar"])),
             KeepResult::Kept {
                 dropped: Vec::new()
             }
@@ -626,7 +653,7 @@ mod tests {
         cart.add(item("foo", Source::Aur));
         cart.stage_remove(PkgName::from("old"));
         assert!(matches!(
-            cart.keep(&keep_set(&["foo"])),
+            cart.keep(&keep_targets(&["foo"])),
             KeepResult::Kept { .. }
         ));
         assert_eq!(cart.removals(), &[PkgName::from("old")]);
@@ -735,7 +762,7 @@ mod tests {
             AurApproval::Review,
         ));
         // core (alphabetical within repo) → extra → aur last.
-        let order: Vec<&str> = cart.items().iter().map(CartItem::spec).collect();
+        let order: Vec<&str> = cart.items().iter().map(|i| i.spec().as_str()).collect();
         assert_eq!(order, vec!["glibc", "zlib", "vim", "yay-bin"]);
     }
 
@@ -803,7 +830,7 @@ mod tests {
         );
         // Sorted-cart invariant: firefox (repo, ranks before AUR) precedes
         // yay-bin (aur, sorts last).
-        let install: Vec<String> = cart.install_targets().into_iter().map(|t| t.spec).collect();
+        let install: Vec<PkgTarget> = cart.install_targets().into_iter().map(|t| t.spec).collect();
         assert_eq!(install, vec!["firefox", "yay-bin"]);
     }
 }
