@@ -83,18 +83,18 @@ GIF is ~1.4 MB at font-size 16 (100×30 grid).
 
 ## PR surface
 
-- **Check run always** (on PRs touching `src/ui/`, `src/cli/shell/`,
-  `demos/`, fixtures): the Checks API `output` carries markdown (≤64 KB)
-  plus an `images[]` gallery — GIF URLs from the sidecar repo. Checks are
-  SHA-bound, so every push keeps its own screencasts (a browsable history a
-  sticky comment would destroy). Default `GITHUB_TOKEN` with
-  `checks: write` suffices.
-- **Sticky comment only when something changed** — the loud, notifying
-  channel is reserved for real visual changes (hidden HTML marker to find
-  and update one comment in place).
-- **Side-by-side**: inline via `ffmpeg -filter_complex hstack` of base|PR
-  GIFs (pad the shorter with its last frame); later a small Pages page with
-  two asciinema-player instances slaved to one scrub bar (seek API).
+- **The `screencasts` check run carries everything** (on PRs touching
+  `src/**`, `demos/**`, `examples/**`, `pty-harness/**`, fixtures, the
+  Dockerfile): the Checks API `output` markdown (≤64 KB) holds the GIF
+  gallery (embedded as markdown images — the `images[]` field is silently
+  dropped by the API) plus the player, side-by-side, and text-diff links.
+  Checks are SHA-bound, so every push keeps its own screencasts. Default
+  `GITHUB_TOKEN` with `checks: write` suffices.
+- **No PR comment, deliberately.** A GIF gallery in the conversation swamps
+  the PR log with scrolling; the check run keeps it one click away in the
+  Checks tab instead. (An earlier sticky-comment version was removed.)
+- **Side-by-side** and **text diff** are Pages apps on the media repo
+  (`compare.html` / `diff.html`), linked from the check run.
 
 ## Change detection: path filter + human-judged side-by-side
 
@@ -139,7 +139,10 @@ What ships:
     that makes it robust. It shows a `+adds/−dels` summary (or "no output
     change") but gates nothing.
 
-Both links are posted on the PR's sticky comment. A deterministic *gated*
+Both links live on the PR's `screencasts` check run. Both self-explain the
+bootstrap phase: `main/` (the base) is empty until the first screencast PR
+merges, so for that first PR the pages show "no base on `main` yet — showing
+the PR alone" rather than a bogus base-vs-PR view. A deterministic *gated*
 transcript stays possible only if a fully-hermetic, fixture-only demo variant
 is ever added (no real repos); until then a gate would flake, so it is out —
 but the diff *view* above needs no such determinism.
@@ -181,12 +184,13 @@ see docs/TODO.md "Demos".
    (<https://nikicat.github.io/aurox-ci-media/>), pushed to by the Screencasts
    workflow (`.github/workflows/screencasts.yml`) which records the demo set
    on UI-path PRs, publishes `pr-<N>/` (GIFs + casts + `.txt` transcripts),
-   refreshes `main/` on merges, attaches a `screencasts` check run (GIF
-   gallery + player links), and posts/updates a sticky PR comment with the
-   gallery + the side-by-side + text-diff links (fork PRs skipped — needs the
-   `CI_MEDIA_DEPLOY_KEY` secret). Change gate is the path filter + the
-   human-judged side-by-side/diff (see "Change detection" above). Follow-up
-   content only: remove/first-launch/clone/refresh demos (docs/TODO.md).
+   refreshes `main/` on merges, and attaches a `screencasts` check run
+   carrying the GIF gallery + player + side-by-side + text-diff links (no PR
+   comment — the gallery would swamp the conversation; fork PRs skipped —
+   needs the `CI_MEDIA_DEPLOY_KEY` secret). Change gate is the path filter +
+   the human-judged side-by-side/diff (see "Change detection" above).
+   Follow-up content only: remove/first-launch/clone/refresh demos
+   (docs/TODO.md).
 
 ## Findings from the hero demo (the review loop paying out)
 

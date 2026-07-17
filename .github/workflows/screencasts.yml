@@ -45,7 +45,6 @@ jobs:
     permissions:
       contents: read
       checks: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -113,6 +112,8 @@ jobs:
           set -euo pipefail
           raw="https://raw.githubusercontent.com/nikicat/aurox-ci-media/main/pr-$PR"
           play="https://nikicat.github.io/aurox-ci-media/play.html?cast=pr-$PR"
+          compare="https://nikicat.github.io/aurox-ci-media/compare.html?pr=$PR"
+          textdiff="https://nikicat.github.io/aurox-ci-media/diff.html?pr=$PR"
 
           # The GIFs are embedded as markdown images in the summary, not via
           # the check-run `output.images[]` gallery — that field is silently
@@ -131,7 +132,12 @@ jobs:
             ["repo-install","aurox -S repo package: pacman-parity fast path"],
             ["upgrade","whole-system upgrade: repo + AUR in one change set"]
           ]'
+          # Everything lives in the check run (kept out of the PR conversation
+          # deliberately — the GIF gallery would swamp the log). base-vs-PR
+          # compare/diff links are here too; the `main` base is empty until
+          # the first screencast PR merges, and those pages say so.
           jq -n --arg sha "$HEAD_SHA" --arg raw "$raw" --arg play "$play" \
+                --arg compare "$compare" --arg textdiff "$textdiff" \
                 --argjson demos "$demos" '
             ($demos | map(
               "#### \(.[0]) — \(.[1])\n\n"
@@ -149,64 +155,12 @@ jobs:
                   + "(the same command reproduces them locally). Click any GIF for "
                   + "the interactive player.\n\n"
                   + $gallery
-                  + "\n\nBase (`main`) recordings for comparison: "
-                  + "[player index](https://nikicat.github.io/aurox-ci-media/).")
+                  + "\n\n**[▶ base-vs-PR side-by-side](\($compare))** — two players, one "
+                  + "scrub bar, `main` beside this PR, frame for frame.\n"
+                  + "**[≡ base-vs-PR text diff](\($textdiff))** — the normalized transcript "
+                  + "diff, to read exactly what output changed vs `main`.\n\n"
+                  + "_Recordings: [aurox-ci-media](https://github.com/nikicat/aurox-ci-media). "
+                  + "The `main` base fills in once the first screencast PR merges._")
               }
             }' \
           | gh api "repos/${{ github.repository }}/check-runs" --input -
-
-      - name: Post the sticky screencast comment
-        # The visible, notifying half of the check run: one comment per PR,
-        # found again by its hidden marker and updated in place (no per-push
-        # spam). It adds the base-vs-PR side-by-side player the check can't
-        # link cleanly. The workflow's own path filter is the change gate —
-        # it only runs when UI-affecting files change (see the note in the
-        # plan doc on why committed transcripts aren't the gate here).
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          raw="https://raw.githubusercontent.com/nikicat/aurox-ci-media/main/pr-$PR"
-          play="https://nikicat.github.io/aurox-ci-media/play.html?cast=pr-$PR"
-          compare="https://nikicat.github.io/aurox-ci-media/compare.html?pr=$PR"
-          textdiff="https://nikicat.github.io/aurox-ci-media/diff.html?pr=$PR"
-          marker="<!-- aurox-screencasts -->"
-          demos='[
-            ["search-install","shell: search, stage, review gate, apply"],
-            ["cli-install","aurox -S: PKGBUILD review, streamed build, sudo gate"],
-            ["repo-install","aurox -S repo package: pacman-parity fast path"],
-            ["upgrade","whole-system upgrade: repo + AUR in one change set"]
-          ]'
-          jq -n --arg raw "$raw" --arg play "$play" --arg compare "$compare" \
-                --arg textdiff "$textdiff" --arg marker "$marker" --argjson demos "$demos" '
-            {
-              body: ($marker + "\n## 🎬 Screencasts for this PR\n\n"
-                + "Recorded hermetically from this PR by `demos/build.sh` "
-                + "(the same command reproduces them locally). Updates in place on each push.\n\n"
-                + ($demos | map(
-                    "#### \(.[0]) — \(.[1])\n\n"
-                    + "[![\(.[0])](\($raw)/\(.[0]).gif)](\($play)/\(.[0]).cast)\n\n"
-                    + "▶ [interactive player](\($play)/\(.[0]).cast)"
-                  ) | join("\n\n"))
-                + "\n\n**[▶ base-vs-PR side-by-side](\($compare))** — one scrub bar drives both "
-                + "players, so you can line up `main` and this PR frame for frame.\n"
-                + "**[≡ base-vs-PR text diff](\($textdiff))** — the normalized transcript diff, "
-                + "so you can read exactly what output changed vs `main`.\n\n"
-                + "_Recordings: [aurox-ci-media](https://github.com/nikicat/aurox-ci-media). "
-                + "Base `main` set: [player index](https://nikicat.github.io/aurox-ci-media/)._")
-            }' > /tmp/comment.json
-
-          # --paginate merges list pages into one array; run jq once over it
-          # (a per-page --jq would emit an id per matching page).
-          id=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
-                 | jq -r --arg m "$marker" '[.[] | select(.body | startswith($m))] | .[0].id // empty')
-          if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$REPO/issues/comments/$id" --input /tmp/comment.json >/dev/null
-            echo "updated sticky comment $id"
-          else
-            gh api -X POST "repos/$REPO/issues/$PR/comments" --input /tmp/comment.json >/dev/null
-            echo "created sticky comment"
-          fi
