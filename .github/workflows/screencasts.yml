@@ -1,0 +1,139 @@
+name: Screencasts
+
+# Record the demo set from this tree and publish it for review: casts + GIFs
+# go to the aurox-ci-media sidecar repo (pr-<N>/ for PRs, main/ on merges —
+# main/ doubles as the base for future comparisons), and a `screencasts`
+# check run on the PR links the Pages-hosted player and embeds the GIFs.
+# CI stays a thin wrapper over demos/build.sh: the same command reproduces
+# everything locally (docs/plans/screencasts.md).
+
+on:
+  pull_request:
+    # UI-affecting surfaces only — the demos can't change otherwise.
+    paths:
+      - 'src/**'
+      - 'demos/**'
+      - 'examples/**'
+      - 'pty-harness/**'
+      - 'tests/container/fixtures/**'
+      - 'tests/container/Dockerfile'
+      - '.github/workflows/screencasts.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'demos/**'
+      - 'examples/**'
+      - 'pty-harness/**'
+      - 'tests/container/fixtures/**'
+      - 'tests/container/Dockerfile'
+      - '.github/workflows/screencasts.yml'
+
+concurrency:
+  # Superseded PR runs are useless — cancel them; main refreshes must all
+  # land (each updates the media repo's main/).
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref_name != 'main' }}
+
+jobs:
+  demos:
+    name: record + publish
+    runs-on: ubuntu-latest
+    # The media push needs the deploy-key secret and the check run needs
+    # checks:write — both absent on fork PRs, so: same-repo PRs and main only.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # Deliberately the exact key the `ci` job uses — a hit restores its
+          # warm build for free; and exact-key only, no restore-keys (see the
+          # cache-growth rationale in ci.yml).
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Record and render the demo set
+        # Builds the test image (fonts + pinned agg baked in), cargo-builds
+        # aurox + the demo drivers, records each demo hermetically in the
+        # container, renders GIFs with the image's agg.
+        run: bash demos/build.sh
+
+      - name: Check out media repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: nikicat/aurox-ci-media
+          ssh-key: ${{ secrets.CI_MEDIA_DEPLOY_KEY }}
+          path: media
+
+      - name: Publish recordings to aurox-ci-media
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            dest="pr-${{ github.event.pull_request.number }}"
+          else
+            dest="main"
+          fi
+          mkdir -p "media/$dest"
+          rm -f "media/$dest"/*.gif "media/$dest"/*.cast
+          cp docs/demo/*.gif target/demo-casts/*.cast "media/$dest/"
+          cd media
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo "recordings unchanged byte-wise? unlikely, but nothing to push"
+            exit 0
+          fi
+          git commit -m "aurox ${{ github.event_name }}: $dest @ ${{ github.sha }}"
+          # Concurrent runs race on this junk repo; rebase-retry a few times.
+          for _ in 1 2 3; do
+            git push && exit 0
+            git pull --rebase
+          done
+          git push
+
+      - name: Attach the screencasts check run
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          raw="https://raw.githubusercontent.com/nikicat/aurox-ci-media/main/pr-$PR"
+          play="https://nikicat.github.io/aurox-ci-media/play.html?cast=pr-$PR"
+          jq -n --arg sha "$HEAD_SHA" --arg raw "$raw" --arg play "$play" '
+            def gif(n; c): {alt: n, image_url: ($raw + "/" + n + ".gif"), caption: c};
+            {
+              name: "screencasts",
+              head_sha: $sha,
+              status: "completed",
+              conclusion: "neutral",
+              output: {
+                title: "Demo screencasts recorded from this PR",
+                summary: ("Recorded hermetically from this PR'\''s tree by `demos/build.sh` "
+                  + "(same command locally; GIF gallery below). Interactive players — "
+                  + "scrub the timeline, copy text:\n\n"
+                  + "- [search-install](\($play)/search-install.cast)\n"
+                  + "- [cli-install](\($play)/cli-install.cast)\n"
+                  + "- [repo-install](\($play)/repo-install.cast)\n"
+                  + "- [upgrade](\($play)/upgrade.cast)\n\n"
+                  + "Base (`main`) recordings for comparison: "
+                  + "[player index](https://nikicat.github.io/aurox-ci-media/)."),
+                images: [
+                  gif("search-install"; "shell: search → stage → review gate → apply"),
+                  gif("cli-install";    "aurox -S: PKGBUILD review, streamed build, sudo gate"),
+                  gif("repo-install";   "aurox -S repo package: pacman-parity fast path"),
+                  gif("upgrade";        "whole-system upgrade: repo + AUR in one change set")
+                ]
+              }
+            }' \
+          | gh api "repos/${{ github.repository }}/check-runs" --input -

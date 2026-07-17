@@ -143,9 +143,17 @@ see docs/TODO.md "Demos".
    can't rot); image bakes agg 1.9.0 (sha256-pinned) + JetBrains Mono +
    Noto Color Emoji; `demos/build.sh`; README hero GIF
    (`docs/demo/search-install.gif`, 833 KB / 20.6 s).
-3. Remaining demos (upgrade, remove, first-launch); sidecar repo + Pages
-   player; check-run/sticky-comment workflow; keyframe transcripts;
-   side-by-side.
+3. **(partly done)** Sidecar repo
+   [aurox-ci-media](https://github.com/nikicat/aurox-ci-media): `main/`
+   demos + self-hosted asciinema-player on Pages
+   (<https://nikicat.github.io/aurox-ci-media/>), pushed to by the
+   Screencasts workflow (`.github/workflows/screencasts.yml`) which records
+   the demo set on UI-path PRs, publishes `pr-<N>/`, refreshes `main/` on
+   merges, and attaches a `screencasts` check run (GIF gallery + player
+   links; fork PRs skipped — needs the `CI_MEDIA_DEPLOY_KEY` secret).
+   Still open: keyframe transcripts (precise change detection + the sticky
+   comment reserved for real changes); the synced side-by-side player;
+   remove/first-launch/clone/refresh demos (docs/TODO.md).
 
 ## Findings from the hero demo (the review loop paying out)
 
