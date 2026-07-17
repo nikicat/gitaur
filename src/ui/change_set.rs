@@ -178,7 +178,9 @@ impl ChangeSet<'_> {
         ));
         out.append(removal_lines(self.removals, paint));
 
-        out.push(total_line(&fig));
+        if let Some(total) = total_line(&fig) {
+            out.push(total);
+        }
         out
     }
 
@@ -388,19 +390,21 @@ impl Figures {
     }
 }
 
-/// The batch `total` line for the table: the size figure behind 📥, the
-/// build-time figure behind 🔨. The build term joins only when something was
-/// actually *measured* — a pure-repo batch has no build tail, and an
-/// all-unknown one shows nothing rather than a noisy `🔨 ?` (the per-row `?`
+/// The batch `total` line for the table, or `None` when there is nothing to
+/// total: the size figure behind 📥, the build-time figure behind 🔨. Either
+/// term joins only when something was actually *measured* — an all-unknown
+/// figure shows nothing rather than a noisy `📥 ?` / `🔨 ?` (the per-row `?`
 /// cells already carry that; the one-line [`ChangeSet::summary`] keeps its
-/// explicit `? build`).
-fn total_line(fig: &Figures) -> String {
-    let size = fig.size_total();
-    let mut line = format!("-> total  📥 {}", size.render());
-    if let TimeTotal::Measured { total, bound } = fig.time_total() {
-        write!(line, "   🔨 {}{}", bound.marker(), human_duration(total)).ok();
+/// explicit `?` terms). A batch with neither figure drops the line entirely.
+fn total_line(fig: &Figures) -> Option<String> {
+    let mut terms = Vec::new();
+    if let SizeTotal::Known { total, bound } = fig.size_total() {
+        terms.push(format!("📥 {}{}", bound.marker(), total.render()));
     }
-    line
+    if let TimeTotal::Measured { total, bound } = fig.time_total() {
+        terms.push(format!("🔨 {}{}", bound.marker(), human_duration(total)));
+    }
+    (!terms.is_empty()).then(|| format!("-> total  {}", terms.join("   ")))
 }
 
 /// A section marker line (`-> pulls in:` / `-> will remove:`), dimmed when
@@ -832,6 +836,22 @@ mod tests {
         let total = table.lines().last().unwrap();
         assert_regex!(total, r"^-> total  📥 \S");
         assert_not_contains!(total, "🔨", "pure-repo total has no build term");
+    }
+
+    /// An all-unknown size total (a fresh AUR install, nothing measured)
+    /// drops the whole total line — the per-row `?` cells already carry the
+    /// unknown, and a `📥 ?` total adds noise, not information. (Found by the
+    /// README screencast review, docs/plans/screencasts.md.)
+    #[test]
+    fn transaction_table_all_unknown_drops_total_line() {
+        let pac = PacmanIndex::default();
+        let roots = vec![root("aur", "newpkg", None, Some("1.0-1"))];
+        let table = cs(&roots, &[], &[], &[], &pac, &PreviewMetrics::empty()).table(Paint::Plain);
+        assert_not_contains!(
+            table.lines().last().unwrap(),
+            "-> total",
+            "all-unknown batch renders no total line"
+        );
     }
 
     /// A measured AUR build joins the total as the 🔨 term — exact when every

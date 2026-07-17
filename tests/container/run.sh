@@ -197,7 +197,7 @@ read -r pass fail < "$results_dir/.counters"
 echo
 echo "== $pass passed, $fail failed =="
 if [[ -n "$casts_dir" ]]; then
-    echo "casts written to $casts_dir ($(ls "$casts_dir" | wc -l) files)"
+    echo "casts written to $casts_dir ($(find "$casts_dir" -name '*.cast' | wc -l) files)"
 fi
 if [[ "$fail" -gt 0 ]]; then
     keep_results=1

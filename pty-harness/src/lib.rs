@@ -38,6 +38,9 @@ pub struct Pty {
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
     _master: Box<dyn MasterPty + Send>,
+    /// Typing-jitter RNG for [`Self::send_human`] — fixed seed, so a demo's
+    /// keystroke rhythm is the same on every run.
+    rng: fastrand::Rng,
 }
 
 impl Pty {
@@ -95,6 +98,7 @@ impl Pty {
             writer,
             child,
             _master: pty.master,
+            rng: fastrand::Rng::with_seed(0x5EED),
         }
     }
 
@@ -140,6 +144,22 @@ impl Pty {
         self.writer.flush().ok();
     }
 
+    /// Demo pacing: type `line` character by character with a human-ish,
+    /// *deterministic* rhythm, then Enter after a beat. rustyline echoes each
+    /// keystroke, so in a cast recording this reads as live typing. Only call
+    /// at a prompt (same ack rule as [`Self::send`] — buffered input sent
+    /// before rustyline reads is dropped); the per-char trickle itself is
+    /// what a terminal delivers anyway.
+    pub fn send_human(&mut self, line: &str) {
+        let mut buf = [0u8; 4];
+        for c in line.chars() {
+            self.send(c.encode_utf8(&mut buf).as_bytes());
+            std::thread::sleep(Duration::from_millis(self.rng.u64(35..80)));
+        }
+        std::thread::sleep(Duration::from_millis(180));
+        self.send(b"\r");
+    }
+
     /// Close the input, drain remaining output, and assert `aurox` exited 0.
     /// Consumes the harness — the scenario is over.
     pub fn finish_clean(self) {
@@ -149,6 +169,7 @@ impl Pty {
             writer,
             mut child,
             _master,
+            rng: _,
         } = self;
         drop(writer);
         pump_for(&mut parser, &rx, Duration::from_secs(5));
@@ -166,6 +187,13 @@ impl Pty {
         self.child.kill().ok();
         self.child.wait().ok();
     }
+}
+
+/// Demo pacing: hold the current screen so a viewer can read it. Output that
+/// arrives meanwhile is still pumped into the cast by the reader thread with
+/// true timing; only the driver waits.
+pub fn dwell(ms: u64) {
+    std::thread::sleep(Duration::from_millis(ms));
 }
 
 /// Whitespace-insensitive containment: table columns pad to the widest staged

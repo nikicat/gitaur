@@ -17,10 +17,15 @@ aurox -Sy
 assert_exit 0
 assert_stderr_contains "no ref updates"
 
-# Bump test-trivial 1.0 → 1.1 on its mock-AUR branch.
+# Bump test-trivial 1.0 → 1.1 on its mock-AUR branch. From a neutral cwd:
+# /work may be a *linked git worktree* on the host, whose `.git` is a
+# gitdir-pointer file that dangles inside the container — git then dies at
+# repo discovery ("fatal: not a git repository: (null)") for every command
+# run from /work, even `git config --global`.
+work=$(mktemp -d)
+cd "$work"
 git config --global --add safe.directory '*'
 sudo git config --global --add safe.directory '*'
-work=$(mktemp -d)
 git clone -q -b test-trivial "file://$MOCK_AUR" "$work/pkg"
 sed -i 's/^pkgver=1.0$/pkgver=1.1/' "$work/pkg/PKGBUILD"
 sed -i 's/pkgver = 1.0/pkgver = 1.1/' "$work/pkg/.SRCINFO"

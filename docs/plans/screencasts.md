@@ -126,10 +126,31 @@ meaningless, so:
 
 1. **(done)** Recorder in pty-harness; `run.sh --record`; CI `pty-casts`
    artifact; TESTING.md docs.
-2. First demo driver (search+install) + pacing helpers; agg render script;
-   image bakes agg+fonts; README hero GIF.
-3. Remaining demos; sidecar repo + Pages player; check-run/sticky-comment
-   workflow; keyframe transcripts; side-by-side.
+2. **(done)** `send_human`/`dwell` pacing in pty-harness;
+   `examples/demo_search_install.rs` (+ extended-tier test 33 so the flow
+   can't rot); image bakes agg 1.9.0 (sha256-pinned) + JetBrains Mono +
+   Noto Color Emoji; `demos/build.sh`; README hero GIF
+   (`docs/demo/search-install.gif`, 833 KB / 20.6 s).
+3. Remaining demos (upgrade, remove, first-launch); sidecar repo + Pages
+   player; check-run/sticky-comment workflow; keyframe transcripts;
+   side-by-side.
+
+## Findings from the hero demo (the review loop paying out)
+
+Watching the first recording surfaced real UX issues no PTY assertion had:
+
+- **`-> total 📥 ?` on all-unknown batches** — fixed: `total_line` now drops
+  a term with nothing measured (same rule the 🔨 term already had) and the
+  whole line when neither figure exists.
+- **Uncolored pacman output** — environment, not product: Arch ships
+  `pacman.conf` with `Color` commented out; the demo record step enables it
+  for the demo container only (the test suite greps uncolored output).
+- **Search rows wrap at 100 cols** — open follow-up: long descriptions wrap
+  mid-word on the grid. Proposal: a two-line row mode in `ui/grid.rs`
+  (pacman-style `repo/name version` + indented description line), which
+  fixes narrow terminals product-wide. Touches the table-unification seams
+  and the PTY tests that compact-match wrapped lines — its own change, not
+  part of this plan's phases.
 
 ## Measurements (2026-07-17, aurox-test container)
 
