@@ -1,6 +1,9 @@
 # Plan: shell UX — WYSIWYG addressing + ambient state
 
-Status: **planned**. Amends [shell-ui.md](shell-ui.md): supersedes its post-5c
+Status: **implemented** (all four phases, plus follow-ups the review added:
+`RowNumber` + typed `Cart::keep`, the `Target.spec`/`entry()` PkgTarget
+refactor, `From` conversion seams, and `edit_cart` as the single undo
+snapshot site). Amends [shell-ui.md](shell-ui.md): supersedes its post-5c
 backlog item 2 ("`add`/`drop` should print the whole cart") and replaces the
 `View` mechanism from phase 5. The cart, verbs, selectors, undo/redo, and
 consent points are untouched — this re-plumbs *addressing* and *visibility*.

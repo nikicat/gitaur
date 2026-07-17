@@ -51,6 +51,17 @@ Hard-won rules from review; hold new code to these.
   don't double-prompt; on implicit triggers, refuse rather than surprise.
   Complicated decision logic gets a table in the module doc
   (`mirror/consent.rs`) and pure, parameter-injected decision fns.
+- **Clone freely above the data plane — but at one named place.** In the
+  shell/UI/cart layers object counts are tiny: a `.clone()` there is fine and
+  often *is* the semantics (undo snapshots, the referent snapshot); never
+  contort an API with lifetimes to save one. Repeated per-field clone
+  caravans move into a named seam — a `From` impl (`ListItem`/`RepoRow`) or
+  a single owner (`edit_cart` for undo). In per-entry loops over the
+  index/refs/alpm (100k+ items), borrow — measured history: the 155k-ref
+  fetch path. `redundant_clone` is enforced, so a surviving clone is
+  structural; when reviewing one, the question is "which copy is the truth
+  afterwards?", not "how many bytes?" (that question found the apply
+  reviewed-set loss).
 
 ## Testing
 
