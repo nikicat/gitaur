@@ -8,13 +8,15 @@ aliases resolved through `command::parse`), and the **`aur_approval`** config kn
 are all in. Remaining: the native combined commit (phase 6), plus optional
 prompt-string/history-size config knobs.
 
-> **Partially superseded by [shell-ux.md](shell-ux.md):** the number-resolution
-> design (the `View` enum, live cart lists, the sorted-cart "№ == vector index"
-> coupling from 5b) and post-5c backlog item 2 (post-mutation cart reprints)
-> were replaced by WYSIWYG addressing — a referent snapshot bound to the
-> numbered-table print sites — plus quiet mutations and a status-carrying
-> prompt. This doc stays the record of the shell's overall architecture and
-> the remaining phase-6 work.
+> **Partially superseded by the shell-ux redesign** (its plan doc lived at
+> `docs/plans/shell-ux.md`; completed plans are removed — see git history):
+> the number-resolution design (the `View` enum, live cart lists, the
+> sorted-cart "№ == vector index" coupling from 5b) and post-5c backlog item 2
+> (post-mutation cart reprints) were replaced by WYSIWYG addressing — a
+> referent snapshot bound to the numbered-table print sites (`NumberedList`
+> in the shell root) — plus quiet mutations and a status-carrying prompt.
+> This doc stays the record of the shell's overall architecture and the
+> remaining phase-6 work.
 
 ## Goal
 
@@ -744,7 +746,7 @@ Mirrors the existing two-tier philosophy (`docs/TESTING.md`) and the loop's seam
 | `src/build.rs` | `resolve_targets`, `apply_plan`, `cmd_install`, `Target::{with_hint,bare}`, `RunReport` | the apply engine + fold |
 | `src/build/review.rs` | `review()` → approve/skip/discard/view/edit | the `review` command's diff cycle |
 | `src/ui/change_set.rs` | `change_set_table`, `batch_size_total`/`batch_time_total` | grows into the **one** unified transaction renderer (phase 5a); totals feed `apply`'s summary line |
-| `src/ui/tables.rs` | `render_row`, `col_widths`, `sort_for_display` | shared verdiff version-rendering primitive both tables call; unchanged for the `-Qu`/`-Syu` flag path. *Later superseded: every table now renders through one layout engine — `render_row`/`col_widths` are gone; see [table-unification.md](table-unification.md)* |
+| `src/ui/tables.rs` | `render_row`, `col_widths`, `sort_for_display` | shared verdiff version-rendering primitive both tables call; unchanged for the `-Qu`/`-Syu` flag path. *Later superseded: every table now renders through one layout engine (`ui/grid.rs`) — `render_row`/`col_widths` are gone; the table-unification plan is in git history* |
 | `src/ui/tables.rs` | `select_upgrades` | **flag path only** — the shell never calls it |
 | `src/pacman/preflight.rs` | `files`, `sysupgrade`, `Issue` | read-only trans_prepare simulations — native-txn template for `__commit-txn`; "will remove" preview; the sysupgrade gate + preview warnings in `apply`/`show` |
 | `src/pacman/invoke.rs` | `exec_pacman`, `confirm_escalation`, `preflight_pacman` | pacman spawn + the log-only preflight on `-U`/`-S…u` argv |

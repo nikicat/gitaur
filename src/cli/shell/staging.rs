@@ -54,8 +54,9 @@ impl State {
         let changed = self.edit_cart(|s| s.stage_targets(targets, policy, env));
         // One status line, not a table dump: the cart's standing stays on
         // screen without printing row numbers that aren't addressable (the
-        // shell-ux plan's quiet-mutation rule). Skipped when nothing actually
-        // changed (all already-staged / unknown), so a no-op `add` stays quiet.
+        // quiet-mutation rule — see `State::summarize`). Skipped when nothing
+        // actually changed (all already-staged / unknown), so a no-op `add`
+        // stays quiet.
         if changed {
             self.summarize(env);
         }

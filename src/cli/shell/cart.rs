@@ -349,8 +349,8 @@ impl Cart {
     /// Inserts keeping [`Self::items`] sorted (repo-rank → repo → name) so the
     /// table renders stably grouped however the cart was assembled. Number
     /// resolution no longer reads this vector live — `show` snapshots the
-    /// rendered rows into the referent (`docs/plans/shell-ux.md`), so numbers
-    /// stay bound to what was printed even across a re-sort.
+    /// rendered rows into the referent (see `NumberedList` in the shell root),
+    /// so numbers stay bound to what was printed even across a re-sort.
     pub fn add(&mut self, item: CartItem) -> StageResult {
         if self.items.iter().any(|i| i.spec() == item.spec()) {
             return StageResult::AlreadyStaged;
