@@ -110,8 +110,31 @@ jobs:
           set -euo pipefail
           raw="https://raw.githubusercontent.com/nikicat/aurox-ci-media/main/pr-$PR"
           play="https://nikicat.github.io/aurox-ci-media/play.html?cast=pr-$PR"
-          jq -n --arg sha "$HEAD_SHA" --arg raw "$raw" --arg play "$play" '
-            def gif(n; c): {alt: n, image_url: ($raw + "/" + n + ".gif"), caption: c};
+
+          # The GIFs are embedded as markdown images in the summary, not via
+          # the check-run `output.images[]` gallery — that field is silently
+          # dropped by the API. Markdown images resolve lazily, but GitHub's
+          # camo proxy fetches (and may cache a 404 for) the URL the moment
+          # the check renders, so wait for the just-pushed GIF to actually be
+          # served by raw.githubusercontent before creating the check.
+          for _ in $(seq 1 30); do
+            curl -fsS -o /dev/null "$raw/search-install.gif" && break
+            sleep 5
+          done
+
+          demos='[
+            ["search-install","shell: search, stage, review gate, apply"],
+            ["cli-install","aurox -S: PKGBUILD review, streamed build, sudo gate"],
+            ["repo-install","aurox -S repo package: pacman-parity fast path"],
+            ["upgrade","whole-system upgrade: repo + AUR in one change set"]
+          ]'
+          jq -n --arg sha "$HEAD_SHA" --arg raw "$raw" --arg play "$play" \
+                --argjson demos "$demos" '
+            ($demos | map(
+              "#### \(.[0]) — \(.[1])\n\n"
+              + "[![\(.[0])](\($raw)/\(.[0]).gif)](\($play)/\(.[0]).cast)\n\n"
+              + "▶ [interactive player](\($play)/\(.[0]).cast) — scrub the timeline, copy text"
+            ) | join("\n\n")) as $gallery |
             {
               name: "screencasts",
               head_sha: $sha,
@@ -119,21 +142,12 @@ jobs:
               conclusion: "neutral",
               output: {
                 title: "Demo screencasts recorded from this PR",
-                summary: ("Recorded hermetically from this PR'\''s tree by `demos/build.sh` "
-                  + "(same command locally; GIF gallery below). Interactive players — "
-                  + "scrub the timeline, copy text:\n\n"
-                  + "- [search-install](\($play)/search-install.cast)\n"
-                  + "- [cli-install](\($play)/cli-install.cast)\n"
-                  + "- [repo-install](\($play)/repo-install.cast)\n"
-                  + "- [upgrade](\($play)/upgrade.cast)\n\n"
-                  + "Base (`main`) recordings for comparison: "
-                  + "[player index](https://nikicat.github.io/aurox-ci-media/)."),
-                images: [
-                  gif("search-install"; "shell: search → stage → review gate → apply"),
-                  gif("cli-install";    "aurox -S: PKGBUILD review, streamed build, sudo gate"),
-                  gif("repo-install";   "aurox -S repo package: pacman-parity fast path"),
-                  gif("upgrade";        "whole-system upgrade: repo + AUR in one change set")
-                ]
+                summary: ("Recorded hermetically from this PR by `demos/build.sh` "
+                  + "(the same command reproduces them locally). Click any GIF for "
+                  + "the interactive player.\n\n"
+                  + $gallery
+                  + "\n\nBase (`main`) recordings for comparison: "
+                  + "[player index](https://nikicat.github.io/aurox-ci-media/).")
               }
             }' \
           | gh api "repos/${{ github.repository }}/check-runs" --input -
