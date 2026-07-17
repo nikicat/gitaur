@@ -1,0 +1,25 @@
+name: Auto-assign issues
+
+# Assign every newly opened issue to the repository owner. The repo isn't
+# watched, so new issues would otherwise arrive silently (this was issue
+# #18's story): being assigned generates a notification regardless of watch
+# state, and it puts the issue in the owner's triage queue. Assignee is
+# derived from github.repository_owner — nothing to keep in sync by hand.
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  assign:
+    name: assign to owner
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Assign issue to owner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          OWNER: ${{ github.repository_owner }}
+        run: gh issue edit "$ISSUE_URL" --add-assignee "$OWNER"
