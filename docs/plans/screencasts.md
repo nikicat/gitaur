@@ -114,21 +114,35 @@ real-repo rows would blank exactly the content worth watching for change;
 stripping real repos (as the upgrade seed does) would trade the demos' README
 realism for determinism. Not worth it.
 
-What ships instead:
+The move is to drop the *committed, gated* transcript but keep the transcript
+*value* as a non-committed, human-read artifact — which sidesteps the whole
+obstacle (nothing is committed, nothing gates the merge, so base-image
+version drift is just diff noise a reviewer skims, exactly as in the GIF).
+What ships:
 
 - **The path filter is the change gate.** The whole Screencasts workflow only
   runs when UI-affecting files change (`src/**`, `demos/**`, `examples/**`,
   `pty-harness/**`, the fixtures, the Dockerfile). Coarser than a transcript —
   it can fire on a visually-neutral refactor — but robust, with zero flake.
-- **The human judges "did it actually change"** via the base-vs-PR
-  side-by-side player (`compare.html?pr=<N>` on the media repo's Pages): two
-  asciinema-players under one scrub bar, `main` beside the PR, lined up frame
-  for frame. That is the "webui screencast testing" the whole effort was for —
-  a reviewer watching, not a byte-diff gating.
+- **The human judges "did it actually change"** two ways, both from the casts
+  already stored in the media repo (`main/` = base, `pr-<N>/` = head — no base
+  re-recording):
+  - `compare.html?pr=<N>` — the base-vs-PR **side-by-side player**: two
+    asciinema-players under one scrub bar, `main` beside the PR, frame for
+    frame.
+  - `diff.html?pr=<N>` — the base-vs-PR **text diff**: each cast rendered to
+    plain text (`asciinema convert -f txt`), normalized by
+    `demos/transcript-scrub.sed` (scrubs makepkg `(DATE)` stamps and
+    `(AGE ago)` cells), then an LCS line diff `main` vs the PR. This is the
+    "precise change detection" the original plan wanted — delivered as an
+    ephemeral CI artifact instead of a committed snapshot, which is the part
+    that makes it robust. It shows a `+adds/−dels` summary (or "no output
+    change") but gates nothing.
 
-A deterministic transcript gate stays possible *if* a fully-hermetic,
-fixture-only demo variant is ever added (no real repos); until then it would
-be a flaky gate, so it is explicitly out.
+Both links are posted on the PR's sticky comment. A deterministic *gated*
+transcript stays possible only if a fully-hermetic, fixture-only demo variant
+is ever added (no real repos); until then a gate would flake, so it is out —
+but the diff *view* above needs no such determinism.
 
 ## Demo set (each 15–30 s, 100 cols) — all recorded
 
@@ -162,17 +176,17 @@ see docs/TODO.md "Demos".
    (`docs/demo/search-install.gif`, 833 KB / 20.6 s).
 3. **(done)** Sidecar repo
    [aurox-ci-media](https://github.com/nikicat/aurox-ci-media): `main/`
-   demos + self-hosted asciinema-player and a synced base-vs-PR
-   `compare.html` on Pages (<https://nikicat.github.io/aurox-ci-media/>),
-   pushed to by the Screencasts workflow
-   (`.github/workflows/screencasts.yml`) which records the demo set on
-   UI-path PRs, publishes `pr-<N>/`, refreshes `main/` on merges, attaches a
-   `screencasts` check run (GIF gallery + player links), and posts/updates a
-   sticky PR comment with the gallery + the side-by-side compare link (fork
-   PRs skipped — needs the `CI_MEDIA_DEPLOY_KEY` secret). Change gate is the
-   path filter + human-judged side-by-side (see "Change detection" above for
-   why committed transcripts were dropped). Follow-up content only:
-   remove/first-launch/clone/refresh demos (docs/TODO.md).
+   demos + self-hosted asciinema-player, a synced base-vs-PR `compare.html`,
+   and a base-vs-PR `diff.html` (normalized transcript diff) on Pages
+   (<https://nikicat.github.io/aurox-ci-media/>), pushed to by the Screencasts
+   workflow (`.github/workflows/screencasts.yml`) which records the demo set
+   on UI-path PRs, publishes `pr-<N>/` (GIFs + casts + `.txt` transcripts),
+   refreshes `main/` on merges, attaches a `screencasts` check run (GIF
+   gallery + player links), and posts/updates a sticky PR comment with the
+   gallery + the side-by-side + text-diff links (fork PRs skipped — needs the
+   `CI_MEDIA_DEPLOY_KEY` secret). Change gate is the path filter + the
+   human-judged side-by-side/diff (see "Change detection" above). Follow-up
+   content only: remove/first-launch/clone/refresh demos (docs/TODO.md).
 
 ## Findings from the hero demo (the review loop paying out)
 

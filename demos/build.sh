@@ -92,6 +92,13 @@ for name in "${demos[@]}"; do
         "$IMAGE" \
         agg --font-family "JetBrains Mono" --font-size 16 --idle-time-limit 2 \
             "/casts/$name.cast" "/out/$name.gif"
+
+    # Plain-text transcript for the base-vs-PR diff view (pushed to the media
+    # repo, never committed — see docs/plans/screencasts.md). asciinema renders
+    # the cast in-image; sed scrubs the per-run wall-clock noise on the host.
+    "$CONTAINER" run --rm --user 0:0 -v "$casts_dir:/casts" "$IMAGE" \
+        asciinema convert -f txt "/casts/$name.cast" - \
+      | sed -E -f "$REPO_ROOT/demos/transcript-scrub.sed" > "$casts_dir/$name.txt"
 done
 
 echo

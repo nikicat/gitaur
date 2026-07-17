@@ -83,8 +83,10 @@ jobs:
             dest="main"
           fi
           mkdir -p "media/$dest"
-          rm -f "media/$dest"/*.gif "media/$dest"/*.cast
-          cp docs/demo/*.gif target/demo-casts/*.cast "media/$dest/"
+          rm -f "media/$dest"/*.gif "media/$dest"/*.cast "media/$dest"/*.txt
+          # GIFs for the gallery, casts for the players, normalized .txt
+          # transcripts for the base-vs-PR diff view (diff.html).
+          cp docs/demo/*.gif target/demo-casts/*.cast target/demo-casts/*.txt "media/$dest/"
           cd media
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -170,6 +172,7 @@ jobs:
           raw="https://raw.githubusercontent.com/nikicat/aurox-ci-media/main/pr-$PR"
           play="https://nikicat.github.io/aurox-ci-media/play.html?cast=pr-$PR"
           compare="https://nikicat.github.io/aurox-ci-media/compare.html?pr=$PR"
+          textdiff="https://nikicat.github.io/aurox-ci-media/diff.html?pr=$PR"
           marker="<!-- aurox-screencasts -->"
           demos='[
             ["search-install","shell: search, stage, review gate, apply"],
@@ -178,7 +181,7 @@ jobs:
             ["upgrade","whole-system upgrade: repo + AUR in one change set"]
           ]'
           jq -n --arg raw "$raw" --arg play "$play" --arg compare "$compare" \
-                --arg marker "$marker" --argjson demos "$demos" '
+                --arg textdiff "$textdiff" --arg marker "$marker" --argjson demos "$demos" '
             {
               body: ($marker + "\n## 🎬 Screencasts for this PR\n\n"
                 + "Recorded hermetically from this PR by `demos/build.sh` "
@@ -189,7 +192,9 @@ jobs:
                     + "▶ [interactive player](\($play)/\(.[0]).cast)"
                   ) | join("\n\n"))
                 + "\n\n**[▶ base-vs-PR side-by-side](\($compare))** — one scrub bar drives both "
-                + "players, so you can line up `main` and this PR frame for frame.\n\n"
+                + "players, so you can line up `main` and this PR frame for frame.\n"
+                + "**[≡ base-vs-PR text diff](\($textdiff))** — the normalized transcript diff, "
+                + "so you can read exactly what output changed vs `main`.\n\n"
                 + "_Recordings: [aurox-ci-media](https://github.com/nikicat/aurox-ci-media). "
                 + "Base `main` set: [player index](https://nikicat.github.io/aurox-ci-media/)._")
             }' > /tmp/comment.json

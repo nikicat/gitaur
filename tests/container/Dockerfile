@@ -62,9 +62,11 @@ RUN printf '\n[local-repo]\nSigLevel = Optional TrustAll\nServer = file:///srv/l
 # Screencast toolchain (docs/plans/screencasts.md): agg renders the casts that
 # pty-harness records, with the fonts the README GIFs are typeset in
 # (JetBrains Mono + color emoji for the change-set total line's 📥/🔨).
-# Baked here so demos/build.sh renders are pinned to image tooling, never
-# host tool versions. agg has no repo package; pin the release binary by hash.
-RUN pacman -S --noconfirm --needed ttf-jetbrains-mono noto-fonts-emoji \
+# asciinema renders each cast to a plain-text transcript (`convert -f txt`)
+# for the base-vs-PR diff view. Baked here so demos/build.sh output is pinned
+# to image tooling, never host tool versions. agg has no repo package; pin
+# the release binary by hash.
+RUN pacman -S --noconfirm --needed ttf-jetbrains-mono noto-fonts-emoji asciinema \
     && pacman -Scc --noconfirm \
     && curl -fsSL -o /usr/local/bin/agg \
         https://github.com/asciinema/agg/releases/download/v1.9.0/agg-x86_64-unknown-linux-musl \
