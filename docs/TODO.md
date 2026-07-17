@@ -2,11 +2,15 @@
 
 ## AUR
 
-- show time since last commit for aur packages in upgrade/install tables (like in yay)
 - account for already downloaded sources when printing download sizes in tables
-- save review approvals for concrete versions persistently
+- save review approvals for concrete versions persistently (the shell's
+  reviewed set — including mid-apply approvals since `ApplyRun` — is
+  session-only today)
 
 <!-- Done:
+- show time since last commit for AUR packages: the transaction table renders
+  a dimmed `(Xd ago)` age cell per AUR row (from the pkgbase's branch-tip
+  commit time), and search ranks AUR ties freshest-first.
 - remove ~ before times/sizes: the approximate prefix is gone everywhere
   (per-cell + totals + search list); an estimate now reads as the bare figure.
   A *summed* total that under-counts because a row's figure is unknown is a

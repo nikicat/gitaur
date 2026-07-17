@@ -6,7 +6,15 @@ invariant) **done**; phase 5c **done** — **tab-completion** (the rustyline
 inline type-ahead, colour-mode aware), **`help <topic>`** (per-command detail,
 aliases resolved through `command::parse`), and the **`aur_approval`** config knob
 are all in. Remaining: the native combined commit (phase 6), plus optional
-prompt/history-size config knobs.
+prompt-string/history-size config knobs.
+
+> **Partially superseded by [shell-ux.md](shell-ux.md):** the number-resolution
+> design (the `View` enum, live cart lists, the sorted-cart "№ == vector index"
+> coupling from 5b) and post-5c backlog item 2 (post-mutation cart reprints)
+> were replaced by WYSIWYG addressing — a referent snapshot bound to the
+> numbered-table print sites — plus quiet mutations and a status-carrying
+> prompt. This doc stays the record of the shell's overall architecture and
+> the remaining phase-6 work.
 
 ## Goal
 
