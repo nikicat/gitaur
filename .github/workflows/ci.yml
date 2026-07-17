@@ -153,6 +153,20 @@ jobs:
         # Codecov for diagnosis even when a test fails.
         run: bash scripts/coverage.sh
 
+      - name: Upload PTY session recordings
+        # Asciicasts of every PTY-driven scenario (run.sh --record via
+        # coverage.sh). Tiny (~15 KB each), and the main consumer is a red
+        # run: download, `asciinema play` the failing test, and watch the
+        # session up to the hang instead of reconstructing it from screen
+        # dumps. `if: always()` because failures are exactly when they matter.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pty-casts
+          path: target/casts/*.cast
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Upload rust coverage to Codecov
         if: always()
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0

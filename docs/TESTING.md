@@ -185,6 +185,26 @@ podman run --rm -it -v "$PWD:/work:ro" -v "$(mktemp -d):/tmp/target" \
 Inside the container the aurox binary is at `/work/target/debug/aurox`,
 `RUST_LOG=aurox=debug` is the helpful verbosity level.
 
+### Session recordings (`--record`)
+
+PTY-driven scenarios (the `examples/*_e2e.rs` drivers) can be *watched*
+instead of reconstructed from screen dumps:
+
+```sh
+tests/container/run.sh --record extended/04_shell_upgrade_repo.sh
+asciinema play target/casts/extended_04_shell_upgrade_repo.cast
+```
+
+`--record` makes pty-harness tee the raw PTY stream of every spawn into an
+asciicast v2 file under `target/casts/` (one per spawn, named after the test;
+`PTY_CAST_DIR`/`PTY_CAST_NAME` are the underlying knobs). Recording is
+best-effort and never affects the test outcome. CI runs the whole suite with
+`--record` and uploads `target/casts/` as the `pty-casts` artifact
+(14-day retention) — on a red run, download it and play the failing test's
+cast to see the session up to the exact hang. Render one to a GIF with
+`agg` if you need to share it. Bash-driven tests (the `aurox()` wrapper in
+`lib.sh`) don't use a PTY and produce no cast.
+
 ### Common pitfalls
 
 - **`makepkg` refuses root.** The image's `builder` user owns

@@ -140,10 +140,11 @@ set -e
 # binary rather than the default target/debug/aurox path (and lib.sh resolves the
 # example drivers next to it). This is the container-suite CI gate — a failure
 # here fails the job (overall_status below), so it gates merges alongside the
-# `ci` job's cargo tests.
+# `ci` job's cargo tests. --record tees every PTY scenario into target/casts/
+# for the ci.yml artifact upload — a failed e2e comes with a watchable session.
 set +e
 AUROX="/work/target/coverage-build/debug/aurox" \
-    bash tests/container/run.sh --coverage "$PROFRAW_PODMAN" all
+    bash tests/container/run.sh --record --coverage "$PROFRAW_PODMAN" all
 [[ $? -eq 0 ]] || { echo "scripts/coverage.sh: podman tests failed" >&2; overall_status=1; }
 set -e
 

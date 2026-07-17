@@ -16,11 +16,14 @@
 //! that `use pty_harness::Pty;` and scripts its own flow — adding one is a new
 //! file, not a branch in a growing dispatch.
 
+use cast::CastRecorder;
 use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use vt100::Parser;
+
+mod cast;
 
 const ROWS: u16 = 40;
 const COLS: u16 = 100;
@@ -81,9 +84,14 @@ impl Pty {
 
         let reader = pty.master.try_clone_reader().expect("clone reader");
         let writer = pty.master.take_writer().expect("take writer");
+        let title = if args.is_empty() {
+            "aurox".to_owned()
+        } else {
+            format!("aurox {}", args.join(" "))
+        };
         Self {
             parser: Parser::new(ROWS, COLS, 0),
-            rx: spawn_reader(reader),
+            rx: spawn_reader(reader, CastRecorder::from_env(&title)),
             writer,
             child,
             _master: pty.master,
@@ -183,7 +191,10 @@ fn pump_for(parser: &mut Parser, rx: &mpsc::Receiver<Vec<u8>>, dur: Duration) {
     }
 }
 
-fn spawn_reader(mut reader: Box<dyn Read + Send>) -> mpsc::Receiver<Vec<u8>> {
+fn spawn_reader(
+    mut reader: Box<dyn Read + Send>,
+    mut recorder: Option<CastRecorder>,
+) -> mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel();
     // pty-harness is a standalone dev crate with no aurox thread-locals to
     // propagate, so the `context::spawn` rule (src/context.rs) doesn't apply.
@@ -191,9 +202,25 @@ fn spawn_reader(mut reader: Box<dyn Read + Send>) -> mpsc::Receiver<Vec<u8>> {
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         while let Ok(n) = reader.read(&mut buf) {
-            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+            if n == 0 {
                 break;
             }
+            // Tee into the cast here, at read time, so event timing reflects
+            // when output appeared — not when `expect` got around to recv it.
+            if let Some(rec) = recorder.as_mut()
+                && let Err(err) = rec.record(&buf[..n])
+            {
+                eprintln!("pty-harness: cast recording stopped: {err}");
+                recorder = None;
+            }
+            if tx.send(buf[..n].to_vec()).is_err() {
+                // Receiver gone (scenario killed) — stop pumping, but still
+                // fall through to flush the cast's carried bytes below.
+                break;
+            }
+        }
+        if let Some(rec) = recorder.as_mut() {
+            rec.finish().ok();
         }
     });
     rx

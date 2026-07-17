@@ -20,6 +20,13 @@
 #                      `cargo build` step (the caller is expected to have
 #                      already built an instrumented binary and to set
 #                      AUROX=<path-inside-/work>). Driven by scripts/coverage.sh.
+#
+# Recording:
+#   --record           Tee every PTY-driven scenario into an asciicast at
+#                      target/casts/<tier>_<test>[.n].cast (pty-harness reads
+#                      PTY_CAST_DIR/PTY_CAST_NAME). Watch one with
+#                      `asciinema play`; CI uploads the directory as an
+#                      artifact. Wiped at the start of each --record run.
 
 set -euo pipefail
 
@@ -31,11 +38,13 @@ TESTS_DIR="$REPO_ROOT/tests/container"
 rebuild=0
 jobs="$(nproc)"
 coverage_dir=""
+record=0
 selectors=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --rebuild) rebuild=1 ;;
         --coverage) coverage_dir="$2"; shift ;;
+        --record) record=1 ;;
         -j) jobs="$2"; shift ;;
         -j*) jobs="${1#-j}" ;;
         smoke|extended|all) selectors+=("$1") ;;
@@ -63,6 +72,21 @@ if [[ -z "$coverage_dir" ]]; then
     ( cd "$REPO_ROOT" && cargo build --bin aurox --examples )
 else
     mkdir -p "$coverage_dir"
+fi
+
+# Cast recordings land in one flat, world-writable host dir. Flat + 777 is
+# deliberate: test containers run as `builder`, which rootless podman maps to
+# a subuid, so (a) the dir must be writable by that uid without engine-specific
+# chown mounts, and (b) keeping files flat in a host-owned dir means the host
+# can always delete them afterwards (unlink needs only parent-dir write —
+# subuid-owned *subdirs* would wedge cleanup). Wiped per run so the directory
+# is exactly one run's worth — what CI uploads.
+casts_dir=""
+if [[ "$record" == "1" ]]; then
+    casts_dir="$REPO_ROOT/target/casts"
+    mkdir -p "$casts_dir"
+    chmod 777 "$casts_dir"
+    rm -f "$casts_dir"/*.cast
 fi
 
 # Resolve selectors into a flat list of test scripts.
@@ -111,10 +135,24 @@ run_one() {
         [[ -n "${AUROX:-}" ]] && cov_args+=(-e "AUROX=$AUROX")
     fi
 
+    # Cast-recording args: one shared mount, per-test cast name (the test's
+    # tier/name with / flattened) so parallel containers never collide.
+    local rec_args=()
+    if [[ -n "${CASTS_DIR:-}" ]]; then
+        local scenario="${rel#tests/container/}"
+        scenario="${scenario%.sh}"
+        rec_args=(
+            -v "$CASTS_DIR:/casts"
+            -e "PTY_CAST_DIR=/casts"
+            -e "PTY_CAST_NAME=${scenario//\//_}"
+        )
+    fi
+
     if "$CONTAINER" run --rm \
             -v "$REPO_ROOT:/work:ro" \
             -v "$(mktemp -d):/tmp/target" \
             "${cov_args[@]}" \
+            "${rec_args[@]}" \
             "$IMAGE" \
             bash -c "set -e; cd /work && bash $rel" >"$out" 2>&1; then
         echo "PASS $rel"
@@ -137,6 +175,7 @@ run_one() {
 export -f run_one
 export CONTAINER IMAGE REPO_ROOT results_dir
 export COVERAGE_DIR="$coverage_dir"
+export CASTS_DIR="$casts_dir"
 export AUROX="${AUROX:-}"
 
 pass=0 fail=0
@@ -157,6 +196,9 @@ printf '%s\n' "${scripts[@]}" \
 read -r pass fail < "$results_dir/.counters"
 echo
 echo "== $pass passed, $fail failed =="
+if [[ -n "$casts_dir" ]]; then
+    echo "casts written to $casts_dir ($(ls "$casts_dir" | wc -l) files)"
+fi
 if [[ "$fail" -gt 0 ]]; then
     keep_results=1
     echo "captured logs preserved in $results_dir"
