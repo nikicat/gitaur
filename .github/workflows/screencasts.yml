@@ -151,15 +151,15 @@ jobs:
               conclusion: "neutral",
               output: {
                 title: "Demo screencasts recorded from this PR",
-                summary: ("Recorded hermetically from this PR by `demos/build.sh` "
-                  + "(the same command reproduces them locally). Click any GIF for "
-                  + "the interactive player.\n\n"
-                  + $gallery
-                  + "\n\n**[▶ base-vs-PR side-by-side](\($compare))** — two players, one "
+                summary: ("**[▶ base-vs-PR side-by-side](\($compare))** — two players, one "
                   + "scrub bar, `main` beside this PR, frame for frame.\n"
                   + "**[≡ base-vs-PR text diff](\($textdiff))** — the normalized transcript "
                   + "diff, to read exactly what output changed vs `main`.\n\n"
-                  + "_Recordings: [aurox-ci-media](https://github.com/nikicat/aurox-ci-media). "
+                  + "Recorded hermetically from this PR by `demos/build.sh` "
+                  + "(the same command reproduces them locally). Click any GIF for "
+                  + "the interactive player.\n\n"
+                  + $gallery
+                  + "\n\n_Recordings: [aurox-ci-media](https://github.com/nikicat/aurox-ci-media). "
                   + "The `main` base fills in once the first screencast PR merges._")
               }
             }' \
