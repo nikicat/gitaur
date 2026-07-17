@@ -51,43 +51,46 @@ impl State {
             return;
         }
         let policy = env.aur_policy();
-        let before = self.cart.clone();
-        let mut changed = false;
-        let mut any_unknown = false;
-        for t in targets.into_iter().map(|r| r.target) {
-            let Some(StageClass { source, repo }) = env.classify(&t) else {
-                env.print(&format!("unknown package `{}` — not staged", t.as_str()));
-                any_unknown = true;
-                continue;
-            };
-            let name = t.as_str().to_owned();
-            // Show the concrete repo (`core`/`extra`) when known, else the
-            // coarse source label.
-            let label = repo
-                .clone()
-                .map_or_else(|| source.label().to_owned(), RepoName::into_inner);
-            match self.cart.add(CartItem::new(t, source, repo, policy)) {
-                StageResult::Staged => {
-                    env.print(&format!("staged {name} ({label})"));
-                    changed = true;
-                }
-                StageResult::AlreadyStaged => {
-                    env.print(&format!("{name} is already staged"));
+        let changed = self.edit_cart(|s| {
+            let mut changed = false;
+            let mut any_unknown = false;
+            for t in targets.into_iter().map(|r| r.target) {
+                let Some(StageClass { source, repo }) = env.classify(&t) else {
+                    env.print(&format!("unknown package `{}` — not staged", t.as_str()));
+                    any_unknown = true;
+                    continue;
+                };
+                let name = t.as_str().to_owned();
+                // Show the concrete repo (`core`/`extra`) when known, else the
+                // coarse source label.
+                let label = repo
+                    .clone()
+                    .map_or_else(|| source.label().to_owned(), RepoName::into_inner);
+                match s.cart.add(CartItem::new(t, source, repo, policy)) {
+                    StageResult::Staged => {
+                        env.print(&format!("staged {name} ({label})"));
+                        changed = true;
+                    }
+                    StageResult::AlreadyStaged => {
+                        env.print(&format!("{name} is already staged"));
+                    }
                 }
             }
-        }
-        // With the AUR enabled but unsynced, "unknown" may just mean "only in
-        // the AUR" — one nudge for the whole batch. Pacman-only mode is a
-        // standing choice and stays quiet.
-        if any_unknown && env.aur_state() == index::AurState::NotSetUp {
-            env.print("unknown names may be in the AUR — `refresh aur` syncs it (one-time ~2 GiB)");
-        }
+            // With the AUR enabled but unsynced, "unknown" may just mean "only
+            // in the AUR" — one nudge for the whole batch. Pacman-only mode is
+            // a standing choice and stays quiet.
+            if any_unknown && env.aur_state() == index::AurState::NotSetUp {
+                env.print(
+                    "unknown names may be in the AUR — `refresh aur` syncs it (one-time ~2 GiB)",
+                );
+            }
+            changed
+        });
         // One status line, not a table dump: the cart's standing stays on
         // screen without printing row numbers that aren't addressable (the
         // shell-ux plan's quiet-mutation rule). Skipped when nothing actually
         // changed (all already-staged / unknown), so a no-op `add` stays quiet.
         if changed {
-            self.push_undo(before);
             self.summarize(env);
         }
     }
@@ -113,21 +116,22 @@ impl State {
             env.print("drop: nothing in the cart matched");
             return;
         }
-        let before = self.cart.clone();
-        let mut changed = false;
-        for r in targets {
-            match self.cart.unstage(&r.target) {
-                UnstageResult::Unstaged => {
-                    env.print(&drop_ack(&r));
-                    changed = true;
+        let changed = self.edit_cart(|s| {
+            let mut changed = false;
+            for r in targets {
+                match s.cart.unstage(&r.target) {
+                    UnstageResult::Unstaged => {
+                        env.print(&drop_ack(&r));
+                        changed = true;
+                    }
+                    UnstageResult::NotStaged => env.print(&s.miss_note(&r)),
                 }
-                UnstageResult::NotStaged => env.print(&self.miss_note(&r)),
             }
-        }
+            changed
+        });
         // One status line (or "cart is empty" once the last row goes) — see
         // `add` for the quiet-mutation rule.
         if changed {
-            self.push_undo(before);
             self.summarize(env);
         }
     }
@@ -149,21 +153,24 @@ impl State {
                 return;
             }
         };
-        let before = self.cart.clone();
-        match self.cart.keep(targets.iter().map(|r| &r.target)) {
+        let changed = self.edit_cart(|s| match s.cart.keep(targets.iter().map(|r| &r.target)) {
             KeepResult::NoMatch => {
                 env.print("keep: nothing in the cart matched — cart unchanged");
+                false
             }
             KeepResult::Kept { dropped } if dropped.is_empty() => {
                 env.print("keep: every staged package is already kept — nothing dropped");
+                false
             }
             KeepResult::Kept { dropped } => {
                 for spec in &dropped {
                     env.print(&format!("dropped {}", spec.as_str()));
                 }
-                self.push_undo(before);
-                self.summarize(env);
+                true
             }
+        });
+        if changed {
+            self.summarize(env);
         }
     }
 
@@ -194,54 +201,55 @@ impl State {
             env.print("remove: nothing matched");
             return;
         }
-        let before = self.cart.clone();
-        let mut changed = false;
-        for t in targets.into_iter().map(|r| r.target) {
-            // `Some(is_upgrade)` when the target is a staged install row.
-            match self.cart.item(&t).map(|i| i.upgrade.is_some()) {
-                // A fresh-install row isn't installed — you can't uninstall
-                // it. Point at `drop`, which is what "get rid of this cart
-                // row" means, and stage nothing.
-                Some(false) => {
-                    env.print(&format!(
-                        "{name} is staged for install, not installed — `drop {name}` to unstage it",
-                        name = t.as_str()
-                    ));
-                    continue;
-                }
-                // An upgrade row is an installed package: removing it wins
-                // over upgrading it, so the row makes way for the removal.
-                Some(true) => {
-                    self.cart.unstage(&t);
-                    changed = true;
-                    let name = PkgName::from(t.into_inner());
-                    match self.cart.stage_remove(name.clone()) {
-                        StageResult::Staged => env.print(&format!(
-                            "{name} was staged for upgrade — staged removal instead"
-                        )),
-                        StageResult::AlreadyStaged => env.print(&format!(
-                            "{name}: dropped the staged upgrade; already staged for removal"
-                        )),
+        let changed = self.edit_cart(|s| {
+            let mut changed = false;
+            for t in targets.into_iter().map(|r| r.target) {
+                // `Some(is_upgrade)` when the target is a staged install row.
+                match s.cart.item(&t).map(|i| i.upgrade.is_some()) {
+                    // A fresh-install row isn't installed — you can't
+                    // uninstall it. Point at `drop`, which is what "get rid
+                    // of this cart row" means, and stage nothing.
+                    Some(false) => {
+                        env.print(&format!(
+                            "{name} is staged for install, not installed — `drop {name}` to unstage it",
+                            name = t.as_str()
+                        ));
+                        continue;
                     }
-                    continue;
+                    // An upgrade row is an installed package: removing it wins
+                    // over upgrading it, so the row makes way for the removal.
+                    Some(true) => {
+                        s.cart.unstage(&t);
+                        changed = true;
+                        let name = PkgName::from(t.into_inner());
+                        match s.cart.stage_remove(name.clone()) {
+                            StageResult::Staged => env.print(&format!(
+                                "{name} was staged for upgrade — staged removal instead"
+                            )),
+                            StageResult::AlreadyStaged => env.print(&format!(
+                                "{name}: dropped the staged upgrade; already staged for removal"
+                            )),
+                        }
+                        continue;
+                    }
+                    None => {}
                 }
-                None => {}
+                let name = PkgName::from(t.into_inner());
+                match s.cart.stage_remove(name.clone()) {
+                    StageResult::Staged => {
+                        env.print(&format!("staged removal of {name}"));
+                        changed = true;
+                    }
+                    StageResult::AlreadyStaged => {
+                        env.print(&format!("{name} is already staged for removal"));
+                    }
+                }
             }
-            let name = PkgName::from(t.into_inner());
-            match self.cart.stage_remove(name.clone()) {
-                StageResult::Staged => {
-                    env.print(&format!("staged removal of {name}"));
-                    changed = true;
-                }
-                StageResult::AlreadyStaged => {
-                    env.print(&format!("{name} is already staged for removal"));
-                }
-            }
-        }
+            changed
+        });
         // One status line (its counts include the new "will remove" row) — see
         // `add` for the quiet-mutation rule.
         if changed {
-            self.push_undo(before);
             self.summarize(env);
         }
     }
@@ -265,28 +273,29 @@ impl State {
             env.print("approve: nothing in the cart matched");
             return;
         }
-        let before = self.cart.clone();
-        let mut changed = false;
-        for r in targets {
-            let t = &r.target;
-            match self.cart.approve(t) {
-                ApproveResult::Approved => {
-                    if let Some(pb) = env.pkgbase_of(t) {
-                        self.cart.mark_reviewed(pb);
+        let changed = self.edit_cart(|s| {
+            let mut changed = false;
+            for r in targets {
+                let t = &r.target;
+                match s.cart.approve(t) {
+                    ApproveResult::Approved => {
+                        if let Some(pb) = env.pkgbase_of(t) {
+                            s.cart.mark_reviewed(pb);
+                        }
+                        env.print(&format!("approved {}", t.as_str()));
+                        changed = true;
                     }
-                    env.print(&format!("approved {}", t.as_str()));
-                    changed = true;
+                    ApproveResult::AlreadyApproved => {
+                        env.print(&format!("{} is already approved", t.as_str()));
+                    }
+                    ApproveResult::NotStaged => env.print(&s.miss_note(&r)),
                 }
-                ApproveResult::AlreadyApproved => {
-                    env.print(&format!("{} is already approved", t.as_str()));
-                }
-                ApproveResult::NotStaged => env.print(&self.miss_note(&r)),
             }
-        }
+            changed
+        });
         // The status line surfaces the "all approved — run `apply`" moment the
         // instant the last gate clears (or how many gates remain).
         if changed {
-            self.push_undo(before);
             self.summarize(env);
         }
     }
@@ -327,65 +336,67 @@ impl State {
             env.print("review: nothing in the cart matched");
             return;
         }
-        let before = self.cart.clone();
-        let mut approved_any = false;
-        // Flips to `Auto` once the user picks "approve all": the remaining AUR
-        // items clear without opening another diff.
-        let mut prompting = review::Prompting::default();
-        for r in targets {
-            let t = &r.target;
-            // Copy out (source, approval) so the cart isn't borrowed across the
-            // `env.review` call (which then mutates the cart on approval).
-            match self.cart.item(t).map(|i| (i.source, i.approval)) {
-                // A selector that resolved to something unstaged is worth a
-                // note (it was silently skipped before) — with row provenance
-                // when a number picked it.
-                None => env.print(&self.miss_note(&r)),
-                Some((Source::Repo, _)) => {
-                    env.print(&format!(
-                        "{} is a repo package — nothing to review",
-                        t.as_str()
-                    ));
-                }
-                Some((_, Approval::Approved)) => {
-                    env.print(&format!("{} is already approved", t.as_str()));
-                }
-                Some((Source::Aur, Approval::NeedsReview)) => {
-                    if prompting == review::Prompting::Auto {
-                        // "approve all" was chosen earlier — no more diffs.
-                        self.approve_reviewed(t, env);
-                        approved_any = true;
-                        continue;
+        let approved_any = self.edit_cart(|s| {
+            let mut approved_any = false;
+            // Flips to `Auto` once the user picks "approve all": the remaining
+            // AUR items clear without opening another diff.
+            let mut prompting = review::Prompting::default();
+            for r in targets {
+                let t = &r.target;
+                // Copy out (source, approval) so the cart isn't borrowed across
+                // the `env.review` call (which then mutates the cart on
+                // approval).
+                match s.cart.item(t).map(|i| (i.source, i.approval)) {
+                    // A selector that resolved to something unstaged is worth a
+                    // note (it was silently skipped before) — with row
+                    // provenance when a number picked it.
+                    None => env.print(&s.miss_note(&r)),
+                    Some((Source::Repo, _)) => {
+                        env.print(&format!(
+                            "{} is a repo package — nothing to review",
+                            t.as_str()
+                        ));
                     }
-                    match env.review(t) {
-                        Ok(ReviewOutcome::Approved) => {
-                            self.approve_reviewed(t, env);
+                    Some((_, Approval::Approved)) => {
+                        env.print(&format!("{} is already approved", t.as_str()));
+                    }
+                    Some((Source::Aur, Approval::NeedsReview)) => {
+                        if prompting == review::Prompting::Auto {
+                            // "approve all" was chosen earlier — no more diffs.
+                            s.approve_reviewed(t, env);
                             approved_any = true;
+                            continue;
                         }
-                        Ok(ReviewOutcome::ApprovedAll) => {
-                            self.approve_reviewed(t, env);
-                            approved_any = true;
-                            prompting = review::Prompting::Auto;
-                        }
-                        Ok(ReviewOutcome::Skipped) => {
-                            env.print(&format!("{} left for review", t.as_str()));
-                        }
-                        Ok(ReviewOutcome::Aborted) => {
-                            env.print("review aborted");
-                            break;
-                        }
-                        Err(e) => {
-                            env.print(&format!("review {}: {e}", t.as_str()));
-                            break;
+                        match env.review(t) {
+                            Ok(ReviewOutcome::Approved) => {
+                                s.approve_reviewed(t, env);
+                                approved_any = true;
+                            }
+                            Ok(ReviewOutcome::ApprovedAll) => {
+                                s.approve_reviewed(t, env);
+                                approved_any = true;
+                                prompting = review::Prompting::Auto;
+                            }
+                            Ok(ReviewOutcome::Skipped) => {
+                                env.print(&format!("{} left for review", t.as_str()));
+                            }
+                            Ok(ReviewOutcome::Aborted) => {
+                                env.print("review aborted");
+                                break;
+                            }
+                            Err(e) => {
+                                env.print(&format!("review {}: {e}", t.as_str()));
+                                break;
+                            }
                         }
                     }
                 }
             }
-        }
+            approved_any
+        });
         // Same status line as `approve` — a review pass that cleared the last
         // gate announces readiness without a `show`.
         if approved_any {
-            self.push_undo(before);
             self.summarize(env);
         }
     }

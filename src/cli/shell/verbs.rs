@@ -192,8 +192,10 @@ impl State {
                 if self.cart.is_empty() {
                     env.print("cart is already empty");
                 } else {
-                    self.push_undo(self.cart.clone());
-                    self.cart.clear();
+                    self.edit_cart(|s| {
+                        s.cart.clear();
+                        true
+                    });
                     env.print("cart cleared — `undo` to restore");
                 }
                 Flow::Continue
@@ -294,16 +296,15 @@ impl State {
             }
         };
         let policy = env.aur_policy();
-        let before = self.cart.clone();
         let mut staged = 0;
-        for u in to_seed {
-            if self.cart.add(CartItem::from_upgrade(u, policy)) == StageResult::Staged {
-                staged += 1;
+        self.edit_cart(|s| {
+            for u in to_seed {
+                if s.cart.add(CartItem::from_upgrade(u, policy)) == StageResult::Staged {
+                    staged += 1;
+                }
             }
-        }
-        if staged > 0 {
-            self.push_undo(before);
-        }
+            staged > 0
+        });
         let noun = if staged == 1 { "upgrade" } else { "upgrades" };
         env.print(&format!("{staged} {noun} staged"));
         // `show` prints the seeded transaction and re-arms the referent.
@@ -505,11 +506,25 @@ impl State {
         self.referent.as_ref().map_or(&[], |l| &l.rows)
     }
 
+    /// Run one undoable cart edit: snapshot the cart, run `edit`, and push the
+    /// snapshot onto the undo stack iff the edit reports it changed something
+    /// (so a no-op never consumes an undo step). Returns that report for the
+    /// caller's follow-up printing. This is the *single* clone site for the
+    /// undo feature — a cart-editing verb structurally cannot forget the
+    /// snapshot or push an unchanged one.
+    pub(super) fn edit_cart(&mut self, edit: impl FnOnce(&mut Self) -> bool) -> bool {
+        let before = self.cart.clone();
+        let changed = edit(self);
+        if changed {
+            self.push_undo(before);
+        }
+        changed
+    }
+
     /// Snapshot the pre-change cart onto the `undo` stack (bounded) and discard
-    /// any redo branch. Call with the cart as it was *before* a cart-changing
-    /// command mutates it — only when the command actually changed something, so
-    /// a no-op never consumes an undo step.
-    pub(super) fn push_undo(&mut self, before: Cart) {
+    /// any redo branch. [`Self::edit_cart`]'s push half — only ever called with
+    /// the cart as it was before an edit that really changed something.
+    fn push_undo(&mut self, before: Cart) {
         self.history.push(before);
         if self.history.len() > UNDO_DEPTH {
             self.history.remove(0);
