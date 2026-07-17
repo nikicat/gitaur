@@ -110,37 +110,28 @@ impl ChangeSet<'_> {
     /// pin the plain rendering.
     pub fn table(&self, paint: Paint) -> Table {
         let fig = self.figures();
+        // A figure column with nothing to say says nothing: when every size
+        // (or every build time) in the batch is unknown, a column of `?`s
+        // carries zero information, so its cells render empty and the column
+        // collapses — and the total drops the matching term (see
+        // [`total_line`]). A column with *some* figures keeps `?` on its
+        // unknown rows: there the mark is an honest aligned gap, and the
+        // total becomes a `>` lower bound.
+        let layout = FigureLayout::of(&fig, paint);
         let versions = VersionColumn::measure(
             self.roots
                 .iter()
                 .map(|r| (r.old_ver.as_ref(), r.new_ver.as_ref())),
         );
 
-        // The size and build-time columns span the root rows *and* the dep
-        // block: measure each over the union once and hand both grids the
-        // result as a width floor, so the figures line up across sections.
-        let size_w = Width::widest(
-            fig.root_sizes
-                .iter()
-                .chain(&fig.repo_dep_sizes)
-                .chain(&fig.aur_dep_sizes)
-                .map(|s| Width::of(&s.render())),
-        );
-        let time_w = Width::widest(
-            fig.root_costs
-                .iter()
-                .chain(&fig.aur_dep_costs)
-                .map(|c| c.cell(paint).width()),
-        );
-
         let mut roots = Grid::new(vec![
-            Col::right(),             // №
-            Col::left(),              // repo
-            Col::left(),              // approval
-            Col::left(),              // name
-            Col::left(),              // version block
-            Col::right().min(size_w), // size — shared with the dep block
-            Col::right().min(time_w), // build time — shared with the dep block
+            Col::right(),                    // №
+            Col::left(),                     // repo
+            Col::left(),                     // approval
+            Col::left(),                     // name
+            Col::left(),                     // version block
+            Col::right().min(layout.size_w), // size — shared with the dep block
+            Col::right().min(layout.time_w), // build time — shared with the dep block
         ]);
         for (i, ((root, size), cost)) in self
             .roots
@@ -156,8 +147,8 @@ impl ChangeSet<'_> {
                     root.approval.cell(paint),
                     Cell::plain(root.name.as_str()),
                     versions.cell(root.old_ver.as_ref(), root.new_ver.as_ref(), paint),
-                    Cell::plain(size.render()),
-                    cost.cell(paint),
+                    layout.size_cell(*size),
+                    layout.time_cell(*cost, paint),
                 ])
                 .tail(format!(
                     "{}{}",
@@ -172,13 +163,14 @@ impl ChangeSet<'_> {
             self.repo_deps,
             self.aur_deps,
             &fig,
-            size_w,
-            time_w,
+            &layout,
             paint,
         ));
         out.append(removal_lines(self.removals, paint));
 
-        out.push(total_line(&fig));
+        if let Some(total) = total_line(&fig) {
+            out.push(total);
+        }
         out
     }
 
@@ -243,14 +235,14 @@ impl ChangeSet<'_> {
 
 /// The indented "pulls in:" block: the repo deps (`(install)`) then the AUR
 /// build deps (`(build)`), each with its size and — for AUR rows — build-time
-/// cell. Empty (no marker) when nothing is pulled in. `size_w` / `time_w` are
-/// the columns shared with the root rows so the figures line up beneath them.
+/// cell. Empty (no marker) when nothing is pulled in. `layout` carries the
+/// column decisions + widths shared with the root rows so the figures line up
+/// beneath them (and collapse together).
 fn dep_lines(
     repo_deps: &[PkgName],
     aur_deps: &[PkgBase],
     fig: &Figures,
-    size_w: Width,
-    time_w: Width,
+    layout: &FigureLayout,
     paint: Paint,
 ) -> Table {
     if repo_deps.is_empty() && aur_deps.is_empty() {
@@ -261,15 +253,15 @@ fn dep_lines(
         // "(install)" is the widest tag — a floor so the size column lines up
         // across install and build rows even when only "(build)" rows exist.
         Col::left().min(Width::of("(install)")),
-        Col::right().min(size_w), // size — shared with the root rows
-        Col::right().min(time_w), // build time — shared with the root rows
+        Col::right().min(layout.size_w), // size — shared with the root rows
+        Col::right().min(layout.time_w), // build time — shared with the root rows
     ])
     .indent("        ");
     for (name, size) in repo_deps.iter().zip(&fig.repo_dep_sizes) {
         grid.push(GridRow::new(vec![
             Cell::plain(name.as_str()),
             Cell::plain("(install)"),
-            Cell::plain(size.render()),
+            layout.size_cell(*size),
             Cell::plain(""),
         ]));
     }
@@ -282,8 +274,8 @@ fn dep_lines(
             GridRow::new(vec![
                 Cell::plain(name.as_str()),
                 Cell::plain("(build)"),
-                Cell::plain(size.render()),
-                cost.cell(paint),
+                layout.size_cell(*size),
+                layout.time_cell(*cost, paint),
             ])
             .tail(built_suffix(*cost, paint)),
         );
@@ -388,19 +380,91 @@ impl Figures {
     }
 }
 
-/// The batch `total` line for the table: the size figure behind 📥, the
-/// build-time figure behind 🔨. The build term joins only when something was
-/// actually *measured* — a pure-repo batch has no build tail, and an
-/// all-unknown one shows nothing rather than a noisy `🔨 ?` (the per-row `?`
-/// cells already carry that; the one-line [`ChangeSet::summary`] keeps its
-/// explicit `? build`).
-fn total_line(fig: &Figures) -> String {
+/// The batch `total` line for the table, or `None` when no figure exists to
+/// total. Each term joins only when something was actually *measured*: the
+/// 🔨 build term always worked that way (a pure-repo batch has no build tail,
+/// an all-unknown one shows nothing rather than a noisy `🔨 ?`), and the 📥
+/// size term now follows the same rule — an all-unknown size total says
+/// nothing instead of `📥 ?`. With both terms gone the line itself goes; the
+/// one-line [`ChangeSet::summary`] keeps its explicit `?` wording.
+fn total_line(fig: &Figures) -> Option<String> {
+    let mut terms = Vec::new();
     let size = fig.size_total();
-    let mut line = format!("-> total  📥 {}", size.render());
-    if let TimeTotal::Measured { total, bound } = fig.time_total() {
-        write!(line, "   🔨 {}{}", bound.marker(), human_duration(total)).ok();
+    if matches!(size, SizeTotal::Known { .. }) {
+        terms.push(format!("📥 {}", size.render()));
     }
-    line
+    if let TimeTotal::Measured { total, bound } = fig.time_total() {
+        terms.push(format!("🔨 {}{}", bound.marker(), human_duration(total)));
+    }
+    if terms.is_empty() {
+        None
+    } else {
+        Some(format!("-> total  {}", terms.join("   ")))
+    }
+}
+
+/// Which figure columns render, and at what shared width — decided once from
+/// the batch totals so the root grid and the dep block agree (they share the
+/// same columns, so they must collapse together).
+struct FigureLayout {
+    show_size: bool,
+    show_time: bool,
+    size_w: Width,
+    time_w: Width,
+}
+
+impl FigureLayout {
+    /// Decide the columns from the batch totals, measuring the shared width
+    /// floors only for the columns that render.
+    fn of(fig: &Figures, paint: Paint) -> Self {
+        let show_size = fig.size_total() != SizeTotal::Unknown;
+        let show_time = matches!(fig.time_total(), TimeTotal::Measured { .. });
+        let size_w = if show_size {
+            Width::widest(
+                fig.root_sizes
+                    .iter()
+                    .chain(&fig.repo_dep_sizes)
+                    .chain(&fig.aur_dep_sizes)
+                    .map(|s| Width::of(&s.render())),
+            )
+        } else {
+            Width::of("")
+        };
+        let time_w = if show_time {
+            Width::widest(
+                fig.root_costs
+                    .iter()
+                    .chain(&fig.aur_dep_costs)
+                    .map(|c| c.cell(paint).width()),
+            )
+        } else {
+            Width::of("")
+        };
+        Self {
+            show_size,
+            show_time,
+            size_w,
+            time_w,
+        }
+    }
+
+    /// One row's size cell — empty when the whole column is collapsed.
+    fn size_cell(&self, size: SizeEst) -> Cell {
+        if self.show_size {
+            Cell::plain(size.render())
+        } else {
+            Cell::plain("")
+        }
+    }
+
+    /// One row's build-time cell — empty when the whole column is collapsed.
+    fn time_cell(&self, cost: RowCost, paint: Paint) -> Cell {
+        if self.show_time {
+            cost.cell(paint)
+        } else {
+            Cell::plain("")
+        }
+    }
 }
 
 /// A section marker line (`-> pulls in:` / `-> will remove:`), dimmed when
@@ -832,6 +896,40 @@ mod tests {
         let total = table.lines().last().unwrap();
         assert_regex!(total, r"^-> total  📥 \S");
         assert_not_contains!(total, "🔨", "pure-repo total has no build term");
+    }
+
+    /// An all-unknown batch has nothing to total and nothing to put in the
+    /// figure columns: never-installed AUR rows render without a wall of `?`
+    /// cells, and the `-> total  📥 ?` line disappears entirely — the same
+    /// nothing-to-say rule the 🔨 term always followed.
+    #[test]
+    fn transaction_table_all_unknown_collapses_figures_and_total() {
+        let pac = PacmanIndex::default(); // knows no sizes at all
+        let roots = vec![
+            root("aur", "newthing", None, Some("1.0-1")),
+            root("aur", "otherthing", None, Some("2.0-1")),
+        ];
+        let table = cs(&roots, &[], &[], &[], &pac, &PreviewMetrics::empty()).table(Paint::Plain);
+        let joined = table.lines().join("\n");
+        assert_not_contains!(joined, "?", "no ? cells when no figure exists at all");
+        assert_not_contains!(joined, "-> total", "nothing to total");
+    }
+
+    /// A partially-unknown batch keeps the `?` marks — there they are honest
+    /// aligned gaps next to real figures — and bounds the total with `>`.
+    /// Collapsing is only for columns with nothing to say.
+    #[test]
+    fn transaction_table_partial_unknown_keeps_marks_and_bounds_total() {
+        let mut pac = PacmanIndex::default();
+        pac.sync_download_size.insert("glibc".into(), mib(12));
+        let roots = vec![
+            root("core", "glibc", Some("1-1"), Some("1-2")),
+            root("aur", "ghost", None, Some("1.0-1")), // never installed: size unknown
+        ];
+        let table = cs(&roots, &[], &[], &[], &pac, &PreviewMetrics::empty()).table(Paint::Plain);
+        let lines = table.lines();
+        assert_regex!(lines[1], r"ghost\s+1\.0-1\s+\?$");
+        assert_regex!(lines.last().unwrap(), r"^-> total  📥 >12\.00 MiB$");
     }
 
     /// A measured AUR build joins the total as the 🔨 term — exact when every
