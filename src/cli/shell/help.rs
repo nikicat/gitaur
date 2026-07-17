@@ -26,8 +26,8 @@ commands:
   quit                  leave the shell (also: Ctrl-D)
 selectors: `3` (row), `5-8` (range), `glibc` (name), `python-*` (glob),
            `aur`/`core`/… (whole repo — e.g. `drop aur`, `add extra`)
-numbers index the list you last brought up — search results (`search`) or the
-transaction (`show`/`upgrade`/`drop`/`keep`)";
+a number names a row of the last numbered table printed — the search results
+(`search`) or the transaction (`show`, and `upgrade`/`undo` print through it)";
 
 /// Per-command help shown by `help <topic>`, keyed by canonical [`Verb`] (the
 /// same order as [`Verb::ALL`]). Each body opens with a usage line (and any
@@ -93,7 +93,8 @@ const TOPICS: &[(Verb, &str)] = &[
         Verb::Show,
         "show   (aliases: status, ls)\n  \
          Preview the staged transaction: the change-set table with download sizes,\n  \
-         build time, and totals.",
+         build time, and totals. Its row numbers become what a bare number\n  \
+         (`drop 2`) addresses, until the next numbered table prints.",
     ),
     (
         Verb::Apply,

@@ -7,7 +7,7 @@
 
 use super::cart::{ApplyOutcome, AurApproval, Cart, ReviewOutcome, Source, StageClass};
 use super::command;
-use super::{Flow, ListItem, ShellEnv, State};
+use super::{Flow, ListItem, ListSource, NumberedList, ShellEnv, State};
 use crate::error::Result;
 use crate::index;
 use crate::mirror;
@@ -105,6 +105,9 @@ pub(super) struct FakeEnv {
     pub(super) refresh_scopes: Vec<mirror::RefreshScope>,
     /// What `aur_state` reports; `None` ⇒ `Ready` (no nudges).
     pub(super) aur_state: Option<index::AurState>,
+    /// How often the transaction table rendered — the quiet-mutation rule's
+    /// observable: `show` renders, `add`/`drop`/… must not.
+    pub(super) render_calls: CallCount,
 }
 
 impl ShellEnv for FakeEnv {
@@ -162,6 +165,8 @@ impl ShellEnv for FakeEnv {
     fn render_cart(&mut self, _cart: &Cart) {
         // The table rendering (color, alignment, age) is RealEnv's job; the
         // pure dispatch core under test prints the header + summary itself.
+        // The call count is the tests' proof of which verbs draw the table.
+        self.render_calls.bump();
     }
     fn apply(&mut self, _cart: &Cart) -> Result<ApplyOutcome> {
         self.apply_calls.bump();
@@ -200,6 +205,18 @@ pub(super) fn li_repo(repo: &str, name: &str) -> ListItem {
     ListItem {
         target: PkgTarget::new(name),
         repo: Some(RepoName::from(repo)),
+    }
+}
+
+/// A `State` with a numbered search table "on screen": its referent is a
+/// search-list snapshot over `rows`, as if that table had just printed.
+pub(super) fn state_showing(rows: Vec<ListItem>) -> State {
+    State {
+        referent: Some(NumberedList {
+            source: ListSource::Search,
+            rows,
+        }),
+        ..State::default()
     }
 }
 

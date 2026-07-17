@@ -6,7 +6,7 @@
 //! scripts the staged-transaction flow against the `test-trivial` AUR fixture:
 //!
 //! ```text
-//!   add test-trivial        → staged, needs review (cart reprinted)
+//!   add test-trivial        → staged, needs review (ack + status line)
 //!   apply                   → refused: the approval gate blocks it
 //!   approve test-trivial    → cleared without opening a diff
 //!   apply                   → cost summary, build, then the sudo gate

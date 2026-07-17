@@ -3,8 +3,8 @@
 //! Turns the arguments of `add` / `info` / `drop` / `review` into concrete
 //! package targets. Each argument is one of:
 //!
-//! - a **number** (`3`) — the 1-based row of the active list (the caller passes
-//!   whichever list is currently on screen — search results or the cart);
+//! - a **number** (`3`) — the 1-based row of the last numbered table printed
+//!   (the caller passes its [`NumberedList`] snapshot);
 //! - a **range** (`5-8`) — inclusive, over that list;
 //! - a **name** (`glibc`) — a literal package name, passed through verbatim;
 //! - a **glob** (`python-*`, `firefox?`) — matched against the name universe.
@@ -14,7 +14,7 @@
 //! de-duplicated. This is the reusable core every cart-staging verb shares; it
 //! is pure (no I/O), so it's exhaustively unit-tested here.
 
-use super::ListItem;
+use super::NumberedList;
 use crate::names::PkgTarget;
 use regex::Regex;
 use std::collections::HashSet;
@@ -32,16 +32,17 @@ enum Selector {
     Glob(Regex),
 }
 
-/// Resolve `args` against the current `list` and the `universe` of names.
+/// Resolve `args` against the numbered `list` snapshot and the `universe` of
+/// names.
 ///
 /// `Err` is reserved for hard errors (a malformed token, or a number/range
 /// that falls outside the current list). A glob that matches nothing is *not*
 /// an error — it simply contributes no targets — so the caller distinguishes
 /// "bad input" from "valid input, nothing matched" by checking the returned
 /// vector for emptiness.
-pub fn resolve(
+pub(super) fn resolve(
     args: &[String],
-    list: &[ListItem],
+    list: Option<&NumberedList>,
     universe: &[PkgTarget],
 ) -> Result<Vec<PkgTarget>, String> {
     let mut raw: Vec<PkgTarget> = Vec::new();
@@ -130,35 +131,49 @@ fn glob_to_regex(glob: &str) -> Result<Regex, String> {
     Regex::new(&pat).map_err(|e| format!("bad pattern `{glob}`: {e}"))
 }
 
-/// One row by 1-based index, or a descriptive error.
-fn row(list: &[ListItem], n: usize) -> Result<PkgTarget, String> {
-    if list.is_empty() {
-        // Numbers index whichever list was last brought up; when none is, point
-        // at both ways to raise one rather than assuming a `search` context.
+/// One row by 1-based index, or a descriptive error naming the list the
+/// number was resolved against.
+fn row(list: Option<&NumberedList>, n: usize) -> Result<PkgTarget, String> {
+    // Numbers name rows of the last numbered table printed; when none was (or
+    // it had no rows), point at both ways to print one rather than assuming a
+    // `search` context.
+    let Some(list) = list.filter(|l| !l.rows.is_empty()) else {
         return Err("no numbered list is up — run `search` or `show` first".into());
-    }
-    list.get(n - 1)
+    };
+    list.rows
+        .get(n - 1)
         .map(|it| it.target.clone())
-        .ok_or_else(|| format!("no row {n} (list has {})", list.len()))
+        .ok_or_else(|| {
+            let count = list.rows.len();
+            let noun = if count == 1 { "row" } else { "rows" };
+            format!(
+                "no row {n} — the {} has {count} {noun}",
+                list.source.label()
+            )
+        })
 }
 
 /// A 1-based inclusive range of rows.
-fn rows(list: &[ListItem], a: usize, b: usize) -> Result<Vec<PkgTarget>, String> {
+fn rows(list: Option<&NumberedList>, a: usize, b: usize) -> Result<Vec<PkgTarget>, String> {
     (a..=b).map(|n| row(list, n)).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::shell::{ListItem, ListSource};
 
-    fn list(names: &[&str]) -> Vec<ListItem> {
-        names
-            .iter()
-            .map(|n| ListItem {
-                target: PkgTarget::new(*n),
-                repo: None,
-            })
-            .collect()
+    fn list(names: &[&str]) -> NumberedList {
+        NumberedList {
+            source: ListSource::Search,
+            rows: names
+                .iter()
+                .map(|n| ListItem {
+                    target: PkgTarget::new(*n),
+                    repo: None,
+                })
+                .collect(),
+        }
     }
 
     fn args(parts: &[&str]) -> Vec<String> {
@@ -176,48 +191,48 @@ mod tests {
     #[test]
     fn number_indexes_the_current_list() {
         let l = list(&["foo", "bar", "baz"]);
-        let got = resolve(&args(&["2"]), &l, &[]).unwrap();
+        let got = resolve(&args(&["2"]), Some(&l), &[]).unwrap();
         assert_eq!(targets(&got), vec!["bar"]);
     }
 
     #[test]
     fn range_is_inclusive() {
         let l = list(&["a", "b", "c", "d"]);
-        let got = resolve(&args(&["2-4"]), &l, &[]).unwrap();
+        let got = resolve(&args(&["2-4"]), Some(&l), &[]).unwrap();
         assert_eq!(targets(&got), vec!["b", "c", "d"]);
     }
 
     #[test]
     fn literal_name_passes_through_even_if_not_in_universe() {
-        let got = resolve(&args(&["some-aur-pkg"]), &[], &[]).unwrap();
+        let got = resolve(&args(&["some-aur-pkg"]), None, &[]).unwrap();
         assert_eq!(targets(&got), vec!["some-aur-pkg"]);
     }
 
     #[test]
     fn hyphenated_name_is_not_a_range() {
         // `yay-bin` must resolve as a name, not be misread as a `N-M` range.
-        let got = resolve(&args(&["yay-bin"]), &[], &[]).unwrap();
+        let got = resolve(&args(&["yay-bin"]), None, &[]).unwrap();
         assert_eq!(targets(&got), vec!["yay-bin"]);
     }
 
     #[test]
     fn glob_matches_the_universe_in_universe_order() {
         let universe = universe(&["python-bar", "python-foo", "ruby"]);
-        let got = resolve(&args(&["python-*"]), &[], &universe).unwrap();
+        let got = resolve(&args(&["python-*"]), None, &universe).unwrap();
         assert_eq!(targets(&got), vec!["python-bar", "python-foo"]);
     }
 
     #[test]
     fn question_mark_glob_matches_single_char() {
         let universe = universe(&["gtk", "gtk2", "gtk3", "gtk-extra"]);
-        let got = resolve(&args(&["gtk?"]), &[], &universe).unwrap();
+        let got = resolve(&args(&["gtk?"]), None, &universe).unwrap();
         assert_eq!(targets(&got), vec!["gtk2", "gtk3"]);
     }
 
     #[test]
     fn glob_with_no_match_is_empty_not_error() {
         let universe = universe(&["foo", "bar"]);
-        let got = resolve(&args(&["zzz-*"]), &[], &universe).unwrap();
+        let got = resolve(&args(&["zzz-*"]), None, &universe).unwrap();
         assert!(got.is_empty());
     }
 
@@ -227,31 +242,38 @@ mod tests {
         let universe = universe(&["foo", "bar", "baz"]);
         // `1` → foo, `bar` literal (dup of nothing yet), `*` → foo,bar,baz;
         // foo+bar already seen, so only baz is new.
-        let got = resolve(&args(&["1", "bar", "*"]), &l, &universe).unwrap();
+        let got = resolve(&args(&["1", "bar", "*"]), Some(&l), &universe).unwrap();
         assert_eq!(targets(&got), vec!["foo", "bar", "baz"]);
     }
 
     #[test]
-    fn index_out_of_range_errors() {
-        let l = list(&["only"]);
-        assert!(resolve(&args(&["5"]), &l, &[]).is_err());
+    fn index_out_of_range_names_the_list() {
+        let err = resolve(&args(&["5"]), Some(&list(&["only"])), &[]).unwrap_err();
+        assert_eq!(err, "no row 5 — the search list has 1 row");
+        let err = resolve(&args(&["5"]), Some(&list(&["a", "b"])), &[]).unwrap_err();
+        assert_eq!(err, "no row 5 — the search list has 2 rows");
     }
 
     #[test]
     fn index_zero_errors() {
         let l = list(&["a"]);
-        assert!(resolve(&args(&["0"]), &l, &[]).is_err());
+        assert!(resolve(&args(&["0"]), Some(&l), &[]).is_err());
     }
 
     #[test]
-    fn number_with_empty_list_errors_helpfully() {
-        let err = resolve(&args(&["1"]), &[], &[]).unwrap_err();
-        assert!(err.contains("search"), "should hint to run search: {err}");
+    fn number_with_no_list_errors_helpfully() {
+        // No numbered table was ever printed — and an empty snapshot (a table
+        // that rendered no rows never becomes one) reads the same way.
+        let empty = list(&[]);
+        for no_rows in [None, Some(&empty)] {
+            let err = resolve(&args(&["1"]), no_rows, &[]).unwrap_err();
+            assert!(err.contains("`search` or `show`"), "should hint: {err}");
+        }
     }
 
     #[test]
     fn reversed_range_errors() {
         let l = list(&["a", "b", "c"]);
-        assert!(resolve(&args(&["3-1"]), &l, &[]).is_err());
+        assert!(resolve(&args(&["3-1"]), Some(&l), &[]).is_err());
     }
 }

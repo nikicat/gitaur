@@ -331,8 +331,10 @@ impl Cart {
     /// already in the cart — re-`add`ing is idempotent, not a duplicate row.
     ///
     /// Inserts keeping [`Self::items`] sorted (repo-rank → repo → name) so the
-    /// row number `show` prints *is* the vector index `resolve_against_cart`
-    /// addresses — the two can't drift (`docs/plans/shell-ui.md`, phase 5b).
+    /// table renders stably grouped however the cart was assembled. Number
+    /// resolution no longer reads this vector live — `show` snapshots the
+    /// rendered rows into the referent (`docs/plans/shell-ux.md`), so numbers
+    /// stay bound to what was printed even across a re-sort.
     pub fn add(&mut self, item: CartItem) -> StageResult {
         if self.items.iter().any(|i| i.spec() == item.spec()) {
             return StageResult::AlreadyStaged;
