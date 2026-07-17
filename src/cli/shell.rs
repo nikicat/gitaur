@@ -66,6 +66,18 @@ pub struct ListItem {
     pub repo: Option<RepoName>,
 }
 
+/// A cart row as a selector/list row — the shape `show` snapshots into the
+/// referent. The conversion owns its clones once, at this named seam, instead
+/// of scattering per-field `.clone()`s over the call sites.
+impl From<&cart::CartItem> for ListItem {
+    fn from(it: &cart::CartItem) -> Self {
+        Self {
+            target: it.spec().clone(),
+            repo: Some(it.repo_label()),
+        }
+    }
+}
+
 /// Which numbered table a [`NumberedList`] snapshot came from — wording only
 /// (error messages name the list a number was resolved against).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

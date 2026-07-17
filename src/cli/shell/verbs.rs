@@ -469,15 +469,7 @@ impl State {
         &self,
         args: &[String],
     ) -> Result<Vec<selector::Resolved>, String> {
-        let rows: Vec<RepoRow> = self
-            .cart
-            .items()
-            .iter()
-            .map(|it| RepoRow {
-                target: it.spec().clone(),
-                repo: Some(it.repo_label()),
-            })
-            .collect();
+        let rows: Vec<RepoRow> = self.cart.items().iter().map(RepoRow::from).collect();
         let args = expand_repo_tokens(args, &rows);
         let universe: Vec<PkgTarget> = rows.iter().map(|r| r.target.clone()).collect();
         selector::resolve(&args, self.referent.as_ref(), &universe)
@@ -493,14 +485,7 @@ impl State {
         args: &[String],
         env: &E,
     ) -> Result<Vec<selector::Resolved>, String> {
-        let rows: Vec<RepoRow> = self
-            .referent_rows()
-            .iter()
-            .map(|it| RepoRow {
-                target: it.target.clone(),
-                repo: it.repo.clone(),
-            })
-            .collect();
+        let rows: Vec<RepoRow> = self.referent_rows().iter().map(RepoRow::from).collect();
         let args = expand_repo_tokens(args, &rows);
         selector::resolve(&args, self.referent.as_ref(), env.names())
     }
@@ -510,14 +495,7 @@ impl State {
     /// the numbers the user reads stay bound to these packages until the next
     /// numbered table prints.
     fn cart_as_list(&self) -> Vec<ListItem> {
-        self.cart
-            .items()
-            .iter()
-            .map(|it| ListItem {
-                target: it.spec().clone(),
-                repo: Some(it.repo_label()),
-            })
-            .collect()
+        self.cart.items().iter().map(ListItem::from).collect()
     }
 
     /// The referent's rows, or an empty slice before any numbered table was
@@ -575,6 +553,47 @@ struct RepoRow {
     repo: Option<RepoName>,
 }
 
+// The three row sources a repo filter runs over. Each conversion owns its
+// clones once, at a named seam, instead of per-field `.clone()`s at the call
+// sites (the shell-layer clone policy: clone freely, but at one place).
+impl From<&CartItem> for RepoRow {
+    fn from(it: &CartItem) -> Self {
+        Self {
+            target: it.spec().clone(),
+            repo: Some(it.repo_label()),
+        }
+    }
+}
+
+impl From<&ListItem> for RepoRow {
+    fn from(it: &ListItem) -> Self {
+        Self {
+            target: it.target.clone(),
+            repo: it.repo.clone(),
+        }
+    }
+}
+
+impl From<&PkgUpgrade> for RepoRow {
+    fn from(u: &PkgUpgrade) -> Self {
+        Self {
+            target: PkgTarget::from(&u.name),
+            repo: Some(u.repo.clone()),
+        }
+    }
+}
+
+/// An upgrade-candidate row as a selector list row (`select_from_candidates`
+/// numbers the candidates it filters).
+impl From<&RepoRow> for ListItem {
+    fn from(r: &RepoRow) -> Self {
+        Self {
+            target: r.target.clone(),
+            repo: r.repo.clone(),
+        }
+    }
+}
+
 /// Rewrite repo-name tokens (`aur`, `core`, `extra`, …) into the targets of the
 /// rows whose repo matches, so `drop aur` / `add extra` act on a whole repo.
 ///
@@ -614,23 +633,11 @@ fn select_from_candidates(
     args: &[String],
     candidates: &[PkgUpgrade],
 ) -> Result<Vec<PkgUpgrade>, String> {
-    let rows: Vec<RepoRow> = candidates
-        .iter()
-        .map(|u| RepoRow {
-            target: PkgTarget::new(u.name.as_str()),
-            repo: Some(u.repo.clone()),
-        })
-        .collect();
+    let rows: Vec<RepoRow> = candidates.iter().map(RepoRow::from).collect();
     let args = expand_repo_tokens(args, &rows);
     let list = NumberedList {
         source: ListSource::UpgradeCandidates,
-        rows: rows
-            .iter()
-            .map(|r| ListItem {
-                target: r.target.clone(),
-                repo: r.repo.clone(),
-            })
-            .collect(),
+        rows: rows.iter().map(ListItem::from).collect(),
     };
     let universe: Vec<PkgTarget> = rows.iter().map(|r| r.target.clone()).collect();
     let picked = selector::resolve(&args, Some(&list), &universe)?;
