@@ -56,6 +56,15 @@ cd aurox
 cargo install --path . --locked
 ```
 
+aurox depends on a git revision of [gitoxide](https://github.com/nikicat/gitoxide)
+(for perf/instrumentation patches not yet in a published `gix` release). The
+checked-in `.cargo/config.toml` sets `net.git-fetch-with-cli = true` so cargo
+fetches it with the system `git`. If you build outside the source tree and your
+git defaults to the `reftable` ref format, cargo's libgit2 backend can't read
+the cached clone and fails with `unknown refstorage format 'unknown'`
+([rust-lang/cargo#15184](https://github.com/rust-lang/cargo/issues/15184)); the
+same `git-fetch-with-cli` setting in your `~/.cargo/config.toml` fixes it.
+
 ## First run
 
 aurox mirrors the whole AUR as one git repo: a one-time **~2 GiB download

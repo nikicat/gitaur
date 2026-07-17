@@ -1,0 +1,15 @@
+# Fetch git dependencies with the system `git` binary instead of libgit2.
+#
+# aurox pins `gix` to a git revision of a gitoxide fork (see Cargo.toml), so
+# cargo must clone that repo into ~/.cargo/git. Cargo's default git backend is
+# libgit2, which cannot read repositories in git's `reftable` ref-storage
+# format. Anyone whose git defaults to reftable (init.defaultRefFormat =
+# reftable, or a repo made with `git init --ref-format=reftable`) then hits:
+#
+#   unknown refstorage format 'unknown'; class=Repository (6); code=Invalid
+#
+# The system git understands reftable, so fetching with the CLI sidesteps the
+# gap. This also matches how aurox already prefers the git CLI for large
+# fetches (libgit2 HTTP is ~100x slower). Upstream: rust-lang/cargo#15184.
+[net]
+git-fetch-with-cli = true
