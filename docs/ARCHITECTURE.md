@@ -701,6 +701,33 @@ specific quirks worth knowing:
 2. Bootstrap clone over HTTPS to `github.com` is slow at the negotiation
    stage; relies on PRs #2604/#2605 against gitoxide.
 
+### Why files + `packed-refs`, not `reftable`?
+
+The mirror keeps all ~155k branch refs in git's classic **files backend**, and
+the fetch forces every update into a single `packed-refs` rewrite
+(`with_write_packed_refs_only(true)` in `mirror/fetch.rs`) — no loose ref files
+ever materialize. git's `reftable` backend is purpose-built for exactly this
+"one branch per package" shape, so the natural question is why we don't use it.
+
+- **We can't.** gix implements only the `file` and `packed` ref-store backends
+  — there is no reftable in gix-ref. The mirror is created and updated
+  *exclusively* through gix, so files is the only format on the table. (This is
+  the runtime mirror-image of the build-time failure in #18: libgit2 can't
+  *read* reftable when cargo fetches our gix dep; gitoxide can't *write* it at
+  runtime. Neither git engine we touch supports reftable.)
+- **All-packed-refs already captures the reftable wins that matter here:** no
+  one-file-per-ref inode explosion across 155k refs; refs live as text lines,
+  so the case-fold / directory-file-conflict hazards never apply (those bite the
+  *loose* layout, which we never create); one packed rewrite per changed fetch,
+  kept permanently all-packed so the fork's packed-only fast paths stay hot (see
+  FETCH_OPTIMIZATION.md). What reftable would add — appending a table instead of
+  rewriting the whole file — is tens of ms against a multi-second fetch, and
+  most fetches change nothing and write nothing at all.
+- **Compatibility bonus:** files + `packed-refs` keeps the mirror readable by
+  libgit2, older `git`, and gitoxide alike. Storing it as reftable would
+  re-introduce the #18 class of breakage at *runtime*, for any tool that opens
+  the mirror directory.
+
 ### Argv parsing — why both clap AND PacFlags?
 
 Pacman accepts flags freely on either side of the operation
