@@ -1,35 +1,37 @@
-//! Minimal reproduction stress for issue #59 — the intermittently lost
-//! Ctrl-C forward that times out `extended/31`.
+//! Reproduction stress for issue #59 — the fork-window SIGINT swallow that
+//! intermittently hung Ctrl-C'd builds.
 //!
 //! This is `build::makepkg::run`'s interrupt dance with everything else
-//! stripped away: a child under a fresh PTY running `sh -c 'echo READY;
-//! sleep 600'` (the `test-sleep-build` fixture in miniature), a reader
-//! thread pumping the PTY master (the `tee`), a signal-hook watcher that
-//! flips a flag and forwards SIGINT to the child's process group, and the
-//! main flow blocked in `child.wait()`. Each round delivers a
-//! group-directed SIGINT to our own process group — the same kernel path a
-//! terminal's `^C` takes to the foreground group — and requires `wait()` to
-//! return promptly with the flag set.
+//! stripped away: a child under a fresh PTY printing `READY` then sleeping
+//! (the `test-sleep-build` fixture in miniature), a reader thread pumping
+//! the PTY master (the `tee`), a signal-hook watcher that flips a flag and
+//! forwards SIGINT to the child's process group, and the main flow blocked
+//! in `child.wait()`. Each round delivers a group-directed SIGINT to our own
+//! process group — the same kernel path a terminal's `^C` takes to the
+//! foreground group — and requires `wait()` to return promptly with the
+//! flag set.
 //!
-//! A stuck round is not just counted, it is *classified* before recovery:
+//! Three modes tell the root-cause story:
 //!
-//!   * watcher flag still false  → the wakeup was lost between the kernel,
-//!     signal-hook's dispatcher, and the iterator. The per-thread
-//!     `SigPnd`/`SigBlk` and process `ShdPnd` dump distinguishes
-//!     "pending-but-blocked everywhere" from "vanished".
-//!   * flag true, child alive    → `killpg` ran but didn't take effect; the
-//!     child's actual pgid from `/proc/<pid>/stat` shows whether the target
-//!     was wrong.
-//!   * a single manual re-forward is then attempted: recovery by retry
-//!     implicates a transient in the first forward, no recovery implicates
-//!     the target.
+//!   * default (untrapped `bash -c`) — the negative control: a SIGINT
+//!     landing in the child's fork→exec window kills the pre-exec child
+//!     under `SIG_DFL`, visibly. Never hangs.
+//!   * `--trap` — makepkg's shape: the same window-hit is *consumed* under
+//!     the inherited trap disposition (`execve` discards the handler's
+//!     flag), `sleep` starts unsignalled, and bash defers its trap until
+//!     that child exits — never. Hangs ~5% of rounds even on an idle host.
+//!   * `--trap --verified` — the fix under test: the watcher re-forwards
+//!     while the condemned group still lives, exactly
+//!     `build::makepkg::forward_until_exit`'s loop. 0 hangs expected.
 //!
-//! Usage: `cargo run --example sigint_forward_stress -- [rounds]`
-//! (default 200), or `--via-pty [rounds]` for tier B, where each round's
-//! SIGINT is a real `^C` byte through an outer PTY's line discipline.
-//! The flake needs a busy host — run several instances concurrently,
-//! ideally alongside a cold `cargo build`. Exits non-zero if any round
-//! misbehaved, printing one `LOST_FORWARD …` line per incident.
+//! A stuck round is classified before recovery (watcher flag, child pgid
+//! from `/proc`, per-thread signal masks/pending sets, a one-shot manual
+//! re-forward that discriminates wakeup-loss from forward-failure), so any
+//! *new* loss mode reports enough to diagnose itself.
+//!
+//! Usage: `cargo run --example sigint_forward_stress -- [--trap]
+//! [--verified] [rounds]` (default 200). Exits non-zero if any round hung,
+//! printing one `LOST_FORWARD …` line per incident.
 
 // std's scope, deliberately: this repro mirrors the *libraries*' behavior
 // (signal-hook, portable-pty, the kernel) and must not pull in the crate's
@@ -56,33 +58,23 @@ const READY_AFTER: Duration = Duration::from_secs(15);
 
 fn main() {
     let mut args = std::env::args().skip(1).peekable();
-    let via_pty = args.peek().is_some_and(|a| a == "--via-pty");
-    if via_pty {
+    let trapped = args.peek().is_some_and(|a| a == "--trap");
+    if trapped {
         args.next();
     }
-    let pty_child = args.peek().is_some_and(|a| a == "--pty-child");
-    if pty_child {
+    let verified = args.peek().is_some_and(|a| a == "--verified");
+    if verified {
         args.next();
     }
     let rounds: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(200);
 
-    if via_pty {
-        // Tier B: same dance, but each round's SIGINT is a real `^C` byte
-        // through a PTY's line discipline (ISIG) — the delivery path the
-        // direct-killpg tier can't exercise.
-        std::process::exit(drive_via_pty(rounds));
-    }
-    if !pty_child {
-        // Our own process group, so the group-directed SIGINT below can't
-        // reach the invoking cargo/shell (which still have SIG_DFL and would
-        // die). The `--pty-child` half skips this: portable-pty already made
-        // it a session leader, where `setpgid` is both an error and moot.
-        setpgid(Pid::from_raw(0), Pid::from_raw(0)).expect("setpgid");
-    }
+    // Our own process group, so the group-directed SIGINT below can't reach
+    // the invoking cargo/shell (which still have SIG_DFL and would die).
+    setpgid(Pid::from_raw(0), Pid::from_raw(0)).expect("setpgid");
 
     let mut lost = 0usize;
     for round in 0..rounds {
-        lost += usize::from(!one_round(round, pty_child));
+        lost += usize::from(!one_round(round, trapped, verified));
     }
     if lost > 0 {
         println!("FAILED: {lost}/{rounds} rounds lost the forward");
@@ -91,78 +83,15 @@ fn main() {
     println!("OK: {rounds} rounds, every forward landed");
 }
 
-/// Tier-B driver: run ourselves as `--pty-child` under a fresh PTY (cooked
-/// termios, ISIG on — exactly what a terminal gives a shell) and answer each
-/// round's `ROUND-READY` fence with a real `^C` byte down the master. The
-/// kernel's line discipline turns it into the group-directed SIGINT; the
-/// child's watcher must forward it to *its* child's group as ever.
-fn drive_via_pty(rounds: usize) -> i32 {
-    use std::io::Write;
-    let pty = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("openpty (driver)");
-    let exe = std::env::current_exe().expect("current_exe");
-    let mut cmd = CommandBuilder::new(exe);
-    cmd.args(["--pty-child".to_owned(), rounds.to_string()]);
-    let mut child = pty.slave.spawn_command(cmd).expect("spawn pty child");
-    drop(pty.slave);
-    let mut reader = pty.master.try_clone_reader().expect("clone reader");
-    let mut writer = pty.master.take_writer().expect("take writer");
-
-    // Scan the child's output for the per-round fences; every READY gets one
-    // `^C`. A stuck child (no progress inside the child's own watchdog + our
-    // slack) fails the run — the child's diagnostics are in `seen`.
-    let mut seen = String::new();
-    let mut buf = [0u8; 4096];
-    let mut next_ready = 0usize;
-    let mut last_progress = Instant::now();
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                seen.push_str(&String::from_utf8_lossy(&buf[..n]));
-                while seen.contains(&format!("ROUND-READY {next_ready}\r\n")) {
-                    writer.write_all(&[0x03]).expect("send ^C");
-                    writer.flush().ok();
-                    last_progress = Instant::now();
-                    next_ready += 1;
-                }
-                if seen.contains("OK:") || seen.contains("FAILED") {
-                    break;
-                }
-            }
-        }
-        // The child's own watchdog reports and recovers within LOST_AFTER+2s;
-        // twice that of silence means the child itself is stuck.
-        if last_progress.elapsed() > LOST_AFTER * 2 + Duration::from_secs(8) {
-            println!("driver: child stalled; captured output follows\n{seen}");
-            kill_group(child.process_id(), Signal::SIGKILL);
-            return 1;
-        }
-    }
-    let status = child.wait().expect("wait pty child");
-    print!("{seen}");
-    i32::from(!status.success())
-}
-
 /// One full spawn → sentinel → SIGINT → interrupted-wait cycle. Returns
 /// whether the forward landed within [`LOST_AFTER`]. Mirrors
 /// `build::makepkg::run` structurally: same crate versions, same
 /// spawn-under-pty, same `Signals` + watcher + `killpg`, same drop order.
-///
-/// The SIGINT itself arrives per `fence`: directly (group-directed killpg to
-/// our own group), or — in `--pty-child` mode — from the tier-B driver
-/// answering our `ROUND-READY` fence with a `^C` byte through the outer
-/// PTY's line discipline. The fence prints only once the round is armed
-/// (inner child sleeping, watcher live): between rounds no `Signals` action
-/// is registered, and signal-hook's permanent dispatcher would swallow an
-/// early `^C` — an artificial loss the real code can't hit.
-fn one_round(round: usize, fence: bool) -> bool {
+/// The SIGINT fires only once the round is armed (inner child sleeping,
+/// watcher live): between rounds no `Signals` action is registered, and
+/// signal-hook's permanent dispatcher would swallow an early delivery — an
+/// artificial loss the real code can't hit.
+fn one_round(round: usize, trapped: bool, verified: bool) -> bool {
     let pty = NativePtySystem::default()
         .openpty(PtySize {
             rows: 24,
@@ -171,8 +100,25 @@ fn one_round(round: usize, fence: bool) -> bool {
             pixel_height: 0,
         })
         .expect("openpty");
-    let mut cmd = CommandBuilder::new("sh");
-    cmd.args(["-c", "echo READY; sleep 600"]);
+    let mut cmd = CommandBuilder::new("bash");
+    if trapped {
+        // makepkg's shape: bash with an INT trap. This is the root-cause
+        // ingredient (#59): the READY echo is the starting gun for both our
+        // SIGINT and bash's fork of `sleep`. A SIGINT landing in that child's
+        // fork→exec window is consumed under the inherited trap disposition
+        // (the handler flag it sets dies with `execve`), `sleep` starts
+        // untouched, and bash — per its wait-and-cooperative-exit rule —
+        // defers the trap until its foreground child exits: never. An
+        // untrapped child turns the same window-hit into a visible kill
+        // (default disposition pre-exec), which is why the plain mode can't
+        // reproduce the hang.
+        cmd.args([
+            "-c",
+            "trap 'echo TRAP-EXIT; exit 130' INT; echo READY; sleep 600",
+        ]);
+    } else {
+        cmd.args(["-c", "echo READY; sleep 600"]);
+    }
     let mut child = pty.slave.spawn_command(cmd).expect("spawn under pty");
     drop(pty.slave);
     let pid = child.process_id();
@@ -184,6 +130,10 @@ fn one_round(round: usize, fence: bool) -> bool {
     // Set once `child.wait()` has returned — the watchdog's view of progress.
     let done = AtomicBool::new(false);
     let (ready_tx, ready_rx) = mpsc::channel::<()>();
+    // `--verified` only: closed when `wait()` returns, unblocking the
+    // watcher's re-forward loop — the fix under test, same shape as
+    // `build::makepkg::run`'s.
+    let (exited_tx, exited_rx) = mpsc::channel::<()>();
 
     let ok = std::thread::scope(|s| {
         // The `tee`: pump the master until EOF, announcing the sentinel once.
@@ -204,11 +154,24 @@ fn one_round(round: usize, fence: bool) -> bool {
                 }
             }
         });
-        // The watcher — verbatim from `makepkg::run`.
-        s.spawn(|| {
-            for _ in &mut signals {
-                interrupted.store(true, Ordering::SeqCst);
+        // The watcher — verbatim from `makepkg::run`. With `--verified`, the
+        // fixed shape: after forwarding, block on the exit channel with a
+        // grace timeout and re-forward while the condemned group still lives
+        // (a fork-window swallow becomes a one-beat delay).
+        let signals_iter = &mut signals;
+        let interrupted_ref = &interrupted;
+        s.spawn(move || {
+            for _ in signals_iter {
+                interrupted_ref.store(true, Ordering::SeqCst);
                 forward_sigint(pid);
+                if verified {
+                    while exited_rx.recv_timeout(Duration::from_millis(300))
+                        == Err(mpsc::RecvTimeoutError::Timeout)
+                    {
+                        forward_sigint(pid);
+                    }
+                    break;
+                }
             }
         });
         // The watchdog: classify and recover a stuck round so the stress can
@@ -219,15 +182,12 @@ fn one_round(round: usize, fence: bool) -> bool {
             println!("LOST_FORWARD round={round} phase=ready-timeout (spawn never printed READY)");
             // Unstick: no signal was sent yet, so just kill the child.
             kill_group(pid, Signal::SIGKILL);
-        } else if fence {
-            // Armed — the tier-B driver answers this with a real `^C` down
-            // the outer PTY.
-            println!("ROUND-READY {round}");
         } else {
             // The terminal's `^C`: a group-directed SIGINT to our own group.
             killpg(getpgrp(), Signal::SIGINT).expect("killpg self group");
         }
         child.wait().expect("wait child");
+        drop(exited_tx);
         done.store(true, Ordering::SeqCst);
         handle.close();
         watchdog.join().expect("watchdog panicked")

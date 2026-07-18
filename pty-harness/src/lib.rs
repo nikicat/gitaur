@@ -32,6 +32,20 @@ const COLS: u16 = 100;
 ///
 /// `_master` is held only to keep the PTY open for the process's lifetime —
 /// the reader/writer are derived from it.
+/// How a bounded [`Pty::try_expect`] watch resolved. A dedicated tri-state
+/// rather than a bool: for a probe, "aurox exited" is a different finding
+/// than "still running but silent" — collapsing them is what cost issue
+/// #59's first failures their diagnosis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expectation {
+    /// The predicate held over the screen.
+    Matched,
+    /// The deadline passed without the predicate ever holding.
+    TimedOut,
+    /// aurox exited before the predicate held (the screen stays readable).
+    Exited,
+}
+
 pub struct Pty {
     parser: Parser,
     rx: mpsc::Receiver<Vec<u8>>,
@@ -165,6 +179,35 @@ impl Pty {
                     "aurox exited before {what} appeared\n--- screen ---\n{}\n--- end ---",
                     self.parser.screen().contents()
                 ),
+            }
+        }
+    }
+
+    /// Non-panicking [`Self::expect`] with a caller-chosen deadline: pump the
+    /// PTY until `pred` holds and report how the watch resolved. For probe
+    /// drivers that classify a failure and keep interrogating the session
+    /// (issue #59's second-`^C` probe) instead of dying on the first miss.
+    /// The screen stays readable via [`Self::screen`] on every outcome.
+    pub fn try_expect<F>(&mut self, timeout: Duration, mut pred: F) -> Expectation
+    where
+        F: FnMut(&str) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if pred(&self.parser.screen().contents()) {
+                return Expectation::Matched;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Expectation::TimedOut;
+            }
+            match self
+                .rx
+                .recv_timeout(remaining.min(Duration::from_millis(200)))
+            {
+                Ok(bytes) => self.parser.process(&bytes),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Expectation::Exited,
             }
         }
     }

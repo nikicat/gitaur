@@ -1108,7 +1108,7 @@ fn run_build(cfg: &Config, prep: &Prep<'_>) -> Result<Vec<PathBuf>> {
     // a single build + version-gated collection is correct and skips the extra
     // makepkg pass.
     let (outputs, expected) = if prep.pkgbase.is_vcs() {
-        makepkg::run(cfg, &prep.wt.path, &["--nobuild"], true)?;
+        makepkg::run(cfg, &prep.wt.path, &["--nobuild"], makepkg::LogMode::Fresh)?;
         let expected = makepkg::package_list(cfg, &prep.wt.path)?;
         debug!(expected = ?expected, "froze package list before build");
 
@@ -1128,14 +1128,19 @@ fn run_build(cfg: &Config, prep: &Prep<'_>) -> Result<Vec<PathBuf>> {
             return Ok(on_disk);
         }
 
-        makepkg::run(cfg, &prep.wt.path, &["--noextract"], false)?;
+        makepkg::run(
+            cfg,
+            &prep.wt.path,
+            &["--noextract"],
+            makepkg::LogMode::Append,
+        )?;
         let produced = install::find_produced(&prep.wt.path)?;
         (
             select_produced(&produced, &expected, &prep.required),
             Some(expected),
         )
     } else {
-        makepkg::run(cfg, &prep.wt.path, &[], true)?;
+        makepkg::run(cfg, &prep.wt.path, &[], makepkg::LogMode::Fresh)?;
         let produced = install::find_produced(&prep.wt.path)?;
         (
             select_outputs(&produced, &prep.required, &prep.new_ver),
