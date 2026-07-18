@@ -45,6 +45,21 @@
 - account for already downloaded sources when printing download sizes in tables
 
 <!-- Done:
+- Ctrl-C at the *idle* shell prompt exits aurox (130 = 128+SIGINT), like
+  Ctrl-D — mid-operation ^C still bails to the prompt, but an idle ^C now
+  means "leave the shell" instead of being swallowed. Demoed by
+  examples/demo_ctrlc_quit.rs (a bash-visible `echo $?` shows the 130);
+  pinned by extended/38.
+- Ctrl-C during the *official-repo* DB refresh aborts the download promptly
+  instead of waiting the transfer out: libalpm's internal downloader can't be
+  interrupted from outside (pacman _Exits on ^C), so the refresh handle now
+  registers aurox's own fetch callback (src/pacman/dload.rs, curl) whose
+  progress meter watches the SIGINT flag; `refresh_sync_db` runs under
+  `interrupt::cancel_on_sigint` (moved out of mirror.rs), which also stops a
+  repo-only refresh from dying to the default SIGINT disposition. Same
+  If-Modified-Since/mtime semantics as libalpm's downloader, `file://`
+  included. Demoed by examples/demo_ctrlc_repo_refresh.rs (against
+  hung_mirror); pinned by extended/39 + smoke/55.
 - save review approvals for concrete versions persistently: consented
   approvals (diff answered at the prompt, explicit `approve`) land in
   `reviews.db` keyed by (pkgbase, PKGBUILD commit) — src/build/reviews.rs.

@@ -23,6 +23,11 @@ pub enum Error {
     #[error("alpm: {0}")]
     Alpm(#[from] alpm::Error),
 
+    /// curl setup/transfer error from the repo-DB downloader
+    /// ([`crate::pacman::dload`]).
+    #[error("curl: {0}")]
+    Curl(#[from] curl::Error),
+
     /// TOML parse failure from config.
     #[error("toml: {0}")]
     Toml(#[from] TomlDeError),
@@ -67,12 +72,13 @@ pub enum Error {
     #[error("user aborted")]
     UserAbort,
 
-    /// An operation was interrupted by SIGINT (Ctrl+C). Raised in two places,
-    /// both so an interrupt bails the *operation* rather than killing aurox: a
-    /// makepkg build (caught by the build pipeline as a per-pkgbase "interrupted"
-    /// outcome — the no-arg loop bails back to the table) and a mirror
-    /// fetch/clone (caught by `mirror::cancel_on_sigint` — the shell's
-    /// refresh/upgrade dispatchers return to the prompt).
+    /// An operation was interrupted by SIGINT (Ctrl+C). Raised in three
+    /// places, all so an interrupt bails the *operation* rather than killing
+    /// aurox: a makepkg build (caught by the build pipeline as a per-pkgbase
+    /// "interrupted" outcome — the no-arg loop bails back to the table), a
+    /// mirror fetch/clone, and the repo-DB refresh (both caught by
+    /// [`crate::interrupt::cancel_on_sigint`] — the shell's refresh/upgrade
+    /// dispatchers return to the prompt).
     #[error("interrupted")]
     Interrupted,
 

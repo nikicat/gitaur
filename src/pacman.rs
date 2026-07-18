@@ -5,6 +5,7 @@
 //! [`verdiff`].
 
 pub mod alpm_db;
+pub mod dload;
 pub mod invoke;
 pub mod preflight;
 pub mod sync;

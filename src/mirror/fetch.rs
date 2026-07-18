@@ -5,7 +5,8 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::mirror::{MirrorRepo, boxed_http_options, cancel_on_sigint};
+use crate::interrupt::cancel_on_sigint;
+use crate::mirror::{MirrorRepo, boxed_http_options};
 use crate::ui::{GixProgress, Operation};
 use gix::ObjectId;
 use gix::bstr::ByteSlice;

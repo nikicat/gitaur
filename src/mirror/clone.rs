@@ -5,7 +5,8 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::mirror::{cancel_on_sigint, http_transport_options};
+use crate::interrupt::cancel_on_sigint;
+use crate::mirror::http_transport_options;
 use crate::ui;
 use gix::remote::Direction;
 use indicatif::MultiProgress;

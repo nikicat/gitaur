@@ -9,10 +9,16 @@
 //! configured repos, and call [`update`] — a normal-user download into aurox's
 //! state dir. No root, no `fakeroot`, no subprocess.
 //!
-//! libalpm drives the download through its own libcurl backend and reports
-//! per-file [`AnyDownloadEvent`]s, which [`DlProgress`] turns into one indicatif
-//! byte-row per repo DB. The caller shares its [`MultiProgress`] so those rows
-//! sit alongside the AUR fetch's rows in a single display.
+//! The download itself is **not** libalpm's: its internal curl backend cannot
+//! be aborted from outside (nothing external reaches its interrupt static —
+//! pacman itself just `_Exit`s on Ctrl+C), so a Ctrl+C would sit out the whole
+//! transfer. We register [`crate::pacman::dload`] as the handle's *fetch
+//! callback* instead — libalpm then delegates every file (each repo DB and its
+//! optional `.sig`) to our curl code, which draws one indicatif byte-row per
+//! repo DB into the caller's shared [`MultiProgress`] and aborts within a beat
+//! when the [`cancel_on_sigint`] guard wrapping the whole refresh flips its
+//! flag. One fetch-callback call downloads one file, sequentially — with 3-5
+//! small repo DBs per refresh, parallelism would buy nothing.
 //!
 //! The downloaded DBs persist between runs (incremental `If-Modified-Since`
 //! fetches), and [`synced_db_path`] hands them to the upgrade-check readers
@@ -34,16 +40,19 @@
 
 use crate::context;
 use crate::error::{Error, Result};
+use crate::interrupt::cancel_on_sigint;
 use crate::pacman::alpm_db;
+use crate::pacman::dload::{FetchOutcome, FetchSpec};
 use crate::paths;
 use crate::ui;
-use alpm::{AnyDownloadEvent, DownloadEvent};
-use indicatif::{MultiProgress, ProgressBar};
+use alpm::FetchResult;
+use indicatif::MultiProgress;
 use signal_hook::consts::SIGINT;
 use signal_hook::iterator::Signals;
-use std::collections::HashMap;
 use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Duration;
 use tracing::{debug, instrument, warn};
@@ -60,17 +69,29 @@ pub enum SyncOutcome {
 
 /// Refresh the official-repo sync DBs into aurox's private dbpath, rootless.
 ///
-/// Opens a mutable alpm handle at [`paths::sync_db_path`], wires a per-repo
-/// download UI into `mp`, and runs [`alpm::AlpmList::update`] over every
-/// registered sync DB. The handle is built and used entirely on the calling
-/// thread (alpm is `!Sync`); only the shared [`MultiProgress`] crosses threads,
-/// and that is safe.
+/// Runs under a [`cancel_on_sigint`] guard: a Ctrl+C anywhere in the critical
+/// section — the lock wait, or mid-download via [`DbFetcher`]'s abort — bails
+/// out as [`Error::Interrupted`] instead of killing aurox or sitting out the
+/// transfer. The guard's `Signals` coexists with the AUR half's own guard when
+/// both run in parallel; one Ctrl+C reaches both.
 ///
 /// Errors (unreadable `pacman.conf`, a download/verify failure, …) are returned
 /// for the caller to downgrade to a warning — a repo-sync failure must never
 /// fail the AUR refresh it runs beside.
 #[instrument(skip(mp))]
 pub fn refresh_sync_db(mp: &MultiProgress) -> Result<SyncOutcome> {
+    cancel_on_sigint(|interrupt| refresh_guarded(mp, interrupt))
+}
+
+/// The critical section proper, with the guard's `interrupt` flag in hand.
+///
+/// Opens a mutable alpm handle at [`paths::sync_db_path`], registers
+/// [`DbFetcher`] as the handle's fetch callback (our interruptible downloader —
+/// see [`crate::pacman::dload`]), and runs [`alpm::AlpmList::update`] over
+/// every registered sync DB. The handle is built and used entirely on the
+/// calling thread (alpm is `!Sync`); only the shared [`MultiProgress`] crosses
+/// threads, and that is safe.
+fn refresh_guarded(mp: &MultiProgress, interrupt: &Arc<AtomicBool>) -> Result<SyncOutcome> {
     let db = paths::sync_db_path();
     prepare_db_dir(&db)?;
     // Hold the advisory refresh lock for the whole critical section: it waits
@@ -83,14 +104,20 @@ pub fn refresh_sync_db(mp: &MultiProgress) -> Result<SyncOutcome> {
     // A refresh killed mid-download strands libalpm's `db.lck`; clear that
     // orphan before updating or every subsequent sync fails with
     // `ALPM_ERR_HANDLE_LOCK` ("unable to lock database"). The path comes from
-    // the handle, not a reconstructed guess (owned because `set_dl_cb` below
-    // needs the handle mutably).
+    // the handle, not a reconstructed guess (owned because `set_fetch_cb`
+    // below needs the handle mutably).
     let alpm_lockfile = PathBuf::from(alpm.lockfile());
     lock.clear_stale_lock(&alpm_lockfile)?;
-    // Route alpm's per-file download events to indicatif rows. `DlProgress` is
+    // Delegate every download to aurox's interruptible fetcher. `DbFetcher` is
     // moved into the handle as the callback's user data and lives until the
     // handle drops at the end of this function.
-    alpm.set_dl_cb(DlProgress::new(mp.clone()), DlProgress::on_event);
+    alpm.set_fetch_cb(
+        DbFetcher {
+            multi: mp.clone(),
+            interrupt: Arc::clone(interrupt),
+        },
+        DbFetcher::on_fetch,
+    );
 
     debug!(dbpath = %db.display(), "updating sync dbs (rootless)");
     // `update` wraps `alpm_db_update`, which returns 1 when *all* DBs were
@@ -322,67 +349,66 @@ fn ensure_symlink(target: &Path, link: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Renders libalpm's per-file download events as one indicatif byte-row per
-/// repo DB, in the shared [`MultiProgress`] so they line up with the AUR fetch
-/// rows. Moved into the alpm handle as `set_dl_cb` user data; bars are cleared
-/// as each file completes, with the caller's `mp.clear()` as a final backstop.
-struct DlProgress {
+/// libalpm's fetch callback: downloads one file per call through
+/// [`crate::pacman::dload`], rendering repo DBs as one indicatif byte-row each
+/// in the shared [`MultiProgress`] so they line up with the AUR fetch rows.
+/// Moved into the alpm handle as `set_fetch_cb` user data.
+struct DbFetcher {
     multi: MultiProgress,
-    /// Live bars keyed by alpm's download filename (e.g. `core.db`).
-    bars: HashMap<String, ProgressBar>,
+    /// The [`cancel_on_sigint`] guard's flag; a Ctrl+C aborts the transfer
+    /// in flight from curl's progress meter.
+    interrupt: Arc<AtomicBool>,
 }
 
-impl DlProgress {
-    fn new(multi: MultiProgress) -> Self {
-        Self {
-            multi,
-            bars: HashMap::new(),
-        }
-    }
-
-    /// `set_dl_cb` callback. alpm fires `Init` → `Progress`* → `Completed` per
-    /// file; we only surface the repo DBs themselves, not their detached
-    /// signatures (`*.db.sig`) which are tiny and would just add noise.
+impl DbFetcher {
+    /// `set_fetch_cb` callback: fetch `url` into the directory `dest_dir`.
     ///
-    /// `event` is taken by value because that's the shape libalpm's callback ABI
-    /// dictates (`FnMut(&str, AnyDownloadEvent, &mut T)`); it isn't consumed.
-    #[allow(clippy::needless_pass_by_value)]
-    fn on_event(filename: &str, event: AnyDownloadEvent<'_>, this: &mut Self) {
-        if Path::new(filename)
+    /// The return value speaks libalpm's protocol: [`FetchResult::Ok`] = a new
+    /// copy landed, [`FetchResult::FileExists`] = unchanged since the copy on
+    /// disk (its mtime, sent as `If-Modified-Since`, is how "unchanged" is
+    /// known), [`FetchResult::Err`] = this URL failed — libalpm then tries the
+    /// repo's next server, so a hard failure surfaces from `update()` only
+    /// once every server declined. Only repo DBs get a progress row; their
+    /// detached signatures (`*.db.sig`, requested per the repo's siglevel) are
+    /// tiny and would just add noise.
+    fn on_fetch(url: &str, dest_dir: &str, force: bool, this: &mut Self) -> FetchResult {
+        let spec = FetchSpec {
+            url,
+            dest_dir: Path::new(dest_dir),
+            force,
+            interrupt: &this.interrupt,
+        };
+        let name = url.rsplit('/').next().unwrap_or(url);
+        let bar = Path::new(name)
             .extension()
-            .is_none_or(|ext| !ext.eq_ignore_ascii_case("db"))
-        {
-            return;
-        }
-        match event.event() {
-            DownloadEvent::Init(_) => {
-                this.bar_for(filename);
-            }
-            DownloadEvent::Progress(p) => {
-                let bar = this.bar_for(filename);
-                let total = u64::try_from(p.total).unwrap_or(0);
-                if total > 0 {
-                    ui::promote_byte_bar(bar, total);
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("db"))
+            .then(|| {
+                let bar = this.multi.add(ui::bar_bytes_streaming(name));
+                ui::tick(&bar);
+                bar
+            });
+        let outcome = spec.run(|progress| {
+            if let Some(bar) = &bar {
+                if let Some(total) = progress.total {
+                    ui::promote_byte_bar(bar, total.bytes());
                 }
-                bar.set_position(u64::try_from(p.downloaded).unwrap_or(0));
+                bar.set_position(progress.downloaded.bytes());
             }
-            DownloadEvent::Completed(_) => {
-                if let Some(bar) = this.bars.remove(filename) {
-                    bar.finish_and_clear();
-                }
-            }
-            DownloadEvent::Retry(_) => {}
+        });
+        if let Some(bar) = bar {
+            bar.finish_and_clear();
         }
-    }
-
-    /// The bar for `filename`, lazily created (and added to the shared
-    /// `MultiProgress`) on first sighting.
-    fn bar_for(&mut self, filename: &str) -> &ProgressBar {
-        self.bars.entry(filename.to_owned()).or_insert_with(|| {
-            let bar = self.multi.add(ui::bar_bytes_streaming(filename));
-            ui::tick(&bar);
-            bar
-        })
+        match outcome {
+            Ok(FetchOutcome::Downloaded) => FetchResult::Ok,
+            Ok(FetchOutcome::Unchanged) => FetchResult::FileExists,
+            Err(e) => {
+                // Best-effort per-URL diagnostics only: an optional `.sig`
+                // 404ing here is routine, and a real failure is reported by
+                // the caller once `update()` gives up.
+                debug!(url, error = %e, "repo-db fetch failed");
+                FetchResult::Err
+            }
+        }
     }
 }
 

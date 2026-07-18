@@ -3,5 +3,7 @@
   ["cli-install", "aurox -S: PKGBUILD review, streamed build, sudo gate"],
   ["repo-install", "aurox -S repo package: pacman-parity fast path"],
   ["upgrade", "whole-system upgrade: repo + AUR in one change set"],
-  ["ctrlc-refresh", "Ctrl-C during a hung refresh bails to the prompt, not out of aurox"]
+  ["ctrlc-refresh", "Ctrl-C during a hung refresh bails to the prompt, not out of aurox"],
+  ["ctrlc-repo-refresh", "Ctrl-C aborts a hung repo-DB download instantly, then quits from the prompt"],
+  ["ctrlc-quit", "Ctrl-C at the idle prompt quits the shell (exit 130)"]
 ]

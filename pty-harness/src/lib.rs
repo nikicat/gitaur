@@ -17,7 +17,9 @@
 //! file, not a branch in a growing dispatch.
 
 use cast::CastRecorder;
-use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
+use portable_pty::{
+    Child, CommandBuilder, ExitStatus, MasterPty, NativePtySystem, PtySize, PtySystem,
+};
 use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -237,6 +239,28 @@ impl Pty {
     /// Close the input, drain remaining output, and assert `aurox` exited 0.
     /// Consumes the harness — the scenario is over.
     pub fn finish_clean(self) {
+        let (status, screen) = self.finish();
+        assert!(
+            status.success(),
+            "aurox exited non-zero ({status:?})\n--- screen ---\n{screen}"
+        );
+    }
+
+    /// Like [`Self::finish_clean`] but asserting a specific exit code — e.g.
+    /// 130 (128+SIGINT) for the idle-prompt Ctrl-C quit, which a wrapper must
+    /// be able to tell apart from `quit`'s 0.
+    pub fn finish_with_code(self, expected: u32) {
+        let (status, screen) = self.finish();
+        assert_eq!(
+            status.exit_code(),
+            expected,
+            "aurox exit code ({status:?})\n--- screen ---\n{screen}"
+        );
+    }
+
+    /// Shared teardown: close the input, drain remaining output, reap `aurox`,
+    /// and hand back its exit status plus the final screen for the assertion.
+    fn finish(self) -> (ExitStatus, String) {
         let Self {
             mut parser,
             rx,
@@ -248,11 +272,7 @@ impl Pty {
         drop(writer);
         pump_for(&mut parser, &rx, Duration::from_secs(5));
         let status = child.wait().expect("wait aurox");
-        assert!(
-            status.success(),
-            "aurox exited non-zero ({status:?})\n--- screen ---\n{}",
-            parser.screen().contents()
-        );
+        (status, parser.screen().contents())
     }
 
     /// Kill `aurox` and reap it — for scenarios whose assertion is complete once

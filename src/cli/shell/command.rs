@@ -218,7 +218,7 @@ pub enum Command {
     System(Option<SystemAction>),
     /// `help [command]` — command list (optional per-command topic).
     Help(Option<String>),
-    /// `quit` / `exit` / Ctrl-D — leave the shell.
+    /// `quit` / `exit` / Ctrl-D (or Ctrl-C at the prompt) — leave the shell.
     Quit,
     /// Blank or whitespace-only line — a no-op.
     Empty,

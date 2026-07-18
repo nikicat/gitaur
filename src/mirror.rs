@@ -15,12 +15,10 @@ use crate::paths;
 use crate::ui;
 use gix::protocol::transport::client::blocking_io::http;
 use indicatif::MultiProgress;
-use signal_hook::consts::SIGINT;
-use signal_hook::iterator::Signals;
 use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
@@ -91,57 +89,6 @@ pub(crate) fn boxed_http_options(
         download_progress,
         should_interrupt,
     ))
-}
-
-/// Run a blocking gix fetch/clone under a scoped SIGINT guard, so a terminal
-/// Ctrl+C aborts *the fetch* instead of killing aurox.
-///
-/// gix's `receive`/`fetch_only` poll a caller-supplied `&AtomicBool` and unwind
-/// cooperatively once it flips — but nothing flips it on its own, and without a
-/// signal handler a Ctrl+C during the multi-second fetch hits the kernel's
-/// default SIGINT disposition and terminates the whole process. Inside the
-/// shell that means a `-Sy`/`upgrade`/`refresh` refresh takes the whole session
-/// down mid-fetch.
-///
-/// This closes that gap with the same `Signals` pattern as [`crate::build::makepkg`]
-/// and [`crate::pacman::sync`]: install a scoped handler that suppresses the
-/// default die-on-SIGINT for the fetch's duration, run a watcher thread that
-/// blocks on the signal pipe (no polling) and flips the `interrupt` flag on each
-/// Ctrl+C, and let `run` unwind cooperatively. The RAII drop of `Signals`
-/// restores the previous disposition, so Ctrl+C at the shell prompt is
-/// unaffected. On interrupt this returns [`Error::Interrupted`] (regardless of
-/// the raw gix error the flip provoked); the shell's refresh/upgrade dispatchers
-/// catch it, print it, and return to a live prompt.
-///
-/// The flag drives two interrupt paths off one Ctrl+C. gix's `receive`/`fetch_only`
-/// poll it *cooperatively* — between pack reads and during CPU-bound
-/// negotiation/index phases — so the `run` closure passes it there. Cloned into
-/// [`http::Options::should_interrupt`] (see [`http_transport_options`]), it also
-/// reaches the curl backend's transfer meter, which fires even while gix is
-/// blocked in a read on an idle or slow socket — the one window the cooperative
-/// check can't see. Hence the shared `Arc<AtomicBool>`: `run` both hands it to
-/// gix and clones it into the transport options.
-pub(crate) fn cancel_on_sigint<T>(run: impl FnOnce(&Arc<AtomicBool>) -> Result<T>) -> Result<T> {
-    let interrupt = Arc::new(AtomicBool::new(false));
-    let mut signals = Signals::new([SIGINT])?;
-    let handle = signals.handle();
-    let outcome = context::scope(|s| {
-        // Watcher: blocks on the signal pipe and flips the flag on each Ctrl+C;
-        // `handle.close()` ends it once `run` returns (whether the fetch
-        // completed or unwound).
-        s.spawn(|| {
-            for _ in &mut signals {
-                interrupt.store(true, Ordering::SeqCst);
-            }
-        });
-        let outcome = run(&interrupt);
-        handle.close();
-        outcome
-    });
-    if interrupt.load(Ordering::SeqCst) {
-        return Err(Error::Interrupted);
-    }
-    outcome
 }
 
 /// Handle to the bare AUR mirror on disk.
@@ -277,9 +224,10 @@ fn report_repo_sync(joined: std::thread::Result<Result<SyncOutcome>>) {
     match joined {
         Ok(Ok(SyncOutcome::Refreshed)) => ui::note("official package databases refreshed"),
         Ok(Ok(SyncOutcome::AlreadyCurrent)) => ui::note("official package databases up to date"),
-        // Ctrl+C while waiting out a concurrent refresh's advisory lock — a
-        // deliberate skip, not a failure.
-        Ok(Err(Error::Interrupted)) => ui::note("official-repo refresh skipped"),
+        // Ctrl+C during the sync — waiting out a concurrent refresh's advisory
+        // lock, or mid-download (the fetcher aborts the transfer). Deliberate,
+        // not a failure.
+        Ok(Err(Error::Interrupted)) => ui::note("official-repo refresh interrupted"),
         Ok(Err(e)) => ui::warn(&format!("official-repo refresh failed: {e}")),
         Err(_) => ui::warn("official-repo refresh thread panicked"),
     }
@@ -407,58 +355,4 @@ fn is_bootstrapped(path: &Path) -> bool {
         return false;
     };
     iter.next().is_some()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // The watcher-thread → real-signal path is covered end-to-end by the
-    // container suite (a PTY sends a real Ctrl+C mid-fetch), not here: raising
-    // SIGINT in-process would fire *every* live `Signals` instance's action —
-    // the single OS handler runs them all — and so corrupt any other
-    // `cancel_on_sigint` running in parallel under `cargo test`. These tests
-    // stand in for the watcher by flipping the cooperative flag directly, which
-    // exercises the guard's own logic (scope/teardown + flag→outcome mapping)
-    // with no signal in flight.
-
-    /// Happy path: `run` finishes without an interrupt, so its value passes
-    /// through untouched and the guard tears down cleanly.
-    #[test]
-    fn returns_the_run_value_when_uninterrupted() {
-        let out = cancel_on_sigint(|_interrupt| Ok(42u32));
-        assert!(matches!(out, Ok(42)));
-    }
-
-    /// A non-interrupt error propagates verbatim — the guard rewrites the
-    /// outcome only when its flag was actually flipped.
-    #[test]
-    fn passes_through_a_non_interrupt_error() {
-        let out: Result<()> = cancel_on_sigint(|_interrupt| Err(Error::other("boom")));
-        assert!(matches!(out, Err(Error::Other(msg)) if msg == "boom"));
-    }
-
-    /// Once the cooperative flag is flipped — as the watcher does on Ctrl+C —
-    /// the outcome is normalized to `Error::Interrupted`, replacing whatever
-    /// error gix surfaced when it noticed the flag and unwound.
-    #[test]
-    fn maps_a_flipped_flag_to_interrupted() {
-        let out: Result<()> = cancel_on_sigint(|interrupt| {
-            interrupt.store(true, Ordering::SeqCst);
-            Err(Error::gix("receive", std::io::Error::other("cancelled")))
-        });
-        assert!(matches!(out, Err(Error::Interrupted)));
-    }
-
-    /// The flag is authoritative even if `run` happened to finish `Ok` in the
-    /// same instant the interrupt landed — mirrors the build path, which treats
-    /// a set flag as interrupted regardless of makepkg's exit status.
-    #[test]
-    fn prefers_interrupted_over_a_racing_ok() {
-        let out = cancel_on_sigint(|interrupt| {
-            interrupt.store(true, Ordering::SeqCst);
-            Ok(7u32)
-        });
-        assert!(matches!(out, Err(Error::Interrupted)));
-    }
 }

@@ -9,6 +9,7 @@ pub mod context;
 pub mod error;
 pub mod git;
 pub mod index;
+pub mod interrupt;
 pub mod logging;
 pub mod mirror;
 pub mod names;

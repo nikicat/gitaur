@@ -17,8 +17,16 @@ use crate::ui;
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
 use rustyline::{ColorMode as RlColorMode, Config as RlConfig, Editor};
+use signal_hook::consts::SIGINT;
 use std::rc::Rc;
 use tracing::{debug, info, instrument};
+
+/// Exit code for the Ctrl-C quit: the shell convention `128 + signal number`
+/// for SIGINT, derived from the same constant the signal handlers use rather
+/// than a re-typed 130. Scripts driving the shell can tell this interrupt
+/// quit from `quit`/Ctrl-D's 0.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+const CTRL_C_EXIT_CODE: u8 = 128 + SIGINT as u8;
 
 /// The pre-prompt banner: what this session covers. Pure so the wording is
 /// testable. Runs *after* the first-launch question, so `NotSetUp` here means
@@ -198,8 +206,11 @@ pub fn run(config: &ConfigHandle, devel: DevelPolicy, initial_search: &[SearchTe
                     break code;
                 }
             }
-            // Ctrl-C cancels the current line; it does NOT leave the shell.
-            Err(ReadlineError::Interrupted) => {}
+            // Ctrl-C at the prompt leaves the shell, like Ctrl-D — during a
+            // long operation it aborts back to the prompt instead (each op
+            // holds its own SIGINT guard), so quitting is what an *idle* ^C
+            // can still usefully mean.
+            Err(ReadlineError::Interrupted) => break CTRL_C_EXIT_CODE,
             // Ctrl-D at the prompt exits cleanly.
             Err(ReadlineError::Eof) => break 0,
             Err(e) => return Err(Error::other(format!("shell: read line: {e}"))),
@@ -218,6 +229,14 @@ mod tests {
     use super::*;
 
     use crate::assert_contains;
+
+    /// The derived Ctrl-C quit code is the exact value the docs, the e2e
+    /// drivers, and any wrapper script rely on — an external contract, so
+    /// the concrete number is the assertion.
+    #[test]
+    fn ctrl_c_exit_code_is_the_shell_convention() {
+        assert_eq!(CTRL_C_EXIT_CODE, 130);
+    }
 
     /// The pre-prompt banner: a ready session gets the one-liner, a "later"
     /// answer gets one reminder line (the launch question already pitched

@@ -23,7 +23,7 @@ commands:
   refresh [aur|pacman]  re-fetch the AUR mirror and/or the official repo DBs
   system show|prune     disk usage of aurox's state / delete the caches
   help [topic]          this list, or `help <command>` for detail on one
-  quit                  leave the shell (also: Ctrl-D)
+  quit                  leave the shell (also: Ctrl-D, Ctrl-C)
 selectors: `3` (row), `5-8` (range), `glibc` (name), `python-*` (glob),
            `aur`/`core`/… (whole repo — e.g. `drop aur`, `add extra`)
 a number names a row of the last numbered table printed — the search results
@@ -148,7 +148,7 @@ const TOPICS: &[(Verb, &str)] = &[
     ),
     (
         Verb::Quit,
-        "quit   (aliases: exit, q; also Ctrl-D)\n  Leave the shell.",
+        "quit   (aliases: exit, q; also Ctrl-D or Ctrl-C at the prompt)\n  Leave the shell.",
     ),
 ];
 

@@ -106,6 +106,9 @@ rayon = "1.10"
 alpm = "5"
 alpm-utils = "5"
 pacmanconf = "3"
+# The official-repo DB downloader (pacman/dload.rs): libalpm's internal one
+# can't be aborted mid-transfer, ours can. Same curl gix's transport links.
+curl = "0.4"
 rkyv = { version = "0.8", features = ["bytecheck"] }
 memmap2 = "0.9"
 serde = { version = "1", features = ["derive"] }
