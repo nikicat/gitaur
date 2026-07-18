@@ -24,7 +24,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # name → examples/demo_<name//-/_>.rs; a demos/seed-<name>.sh, if present, is
 # sourced in the record container before the driver (outdated installs etc.).
-ALL_DEMOS=(search-install cli-install repo-install upgrade ctrlc-refresh)
+# The demo set + titles live in one registry, demos/demos.json; the CI check
+# run and the media-repo player pages consume the very same file (published
+# per-dir as manifest.json), so adding a demo is a one-file edit — no list to
+# keep in sync here, in the workflow, or in the player dropdowns.
+mapfile -t ALL_DEMOS < <(jq -r '.[][0]' "$REPO_ROOT/demos/demos.json")
 
 demos=("$@")
 [[ ${#demos[@]} -gt 0 ]] || demos=("${ALL_DEMOS[@]}")

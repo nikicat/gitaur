@@ -1,0 +1,7 @@
+[
+  ["search-install", "shell: search, stage, review gate, apply"],
+  ["cli-install", "aurox -S: PKGBUILD review, streamed build, sudo gate"],
+  ["repo-install", "aurox -S repo package: pacman-parity fast path"],
+  ["upgrade", "whole-system upgrade: repo + AUR in one change set"],
+  ["ctrlc-refresh", "Ctrl-C during a hung refresh bails to the prompt, not out of aurox"]
+]

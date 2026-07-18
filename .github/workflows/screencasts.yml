@@ -82,10 +82,14 @@ jobs:
             dest="main"
           fi
           mkdir -p "media/$dest"
-          rm -f "media/$dest"/*.gif "media/$dest"/*.cast "media/$dest"/*.txt
+          rm -f "media/$dest"/*.gif "media/$dest"/*.cast "media/$dest"/*.txt "media/$dest/manifest.json"
           # GIFs for the gallery, casts for the players, normalized .txt
-          # transcripts for the base-vs-PR diff view (diff.html).
+          # transcripts for the base-vs-PR diff view (diff.html), and the demo
+          # registry as manifest.json — the player pages read it to populate
+          # their demo dropdown from this dir's actual set (one source of truth:
+          # demos/demos.json, the same list demos/build.sh recorded from).
           cp docs/demo/*.gif target/demo-casts/*.cast target/demo-casts/*.txt "media/$dest/"
+          cp demos/demos.json "media/$dest/manifest.json"
           cd media
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -126,13 +130,10 @@ jobs:
             sleep 5
           done
 
-          demos='[
-            ["search-install","shell: search, stage, review gate, apply"],
-            ["cli-install","aurox -S: PKGBUILD review, streamed build, sudo gate"],
-            ["repo-install","aurox -S repo package: pacman-parity fast path"],
-            ["upgrade","whole-system upgrade: repo + AUR in one change set"],
-            ["ctrlc-refresh","Ctrl-C during a hung refresh bails to the prompt, not out of aurox"]
-          ]'
+          # The demo set + titles come from the one registry, demos/demos.json —
+          # the same file published per-dir as manifest.json above, so the check
+          # gallery and the player dropdowns can never disagree on the demo list.
+          demos="$(jq -c . demos/demos.json)"
           # Everything lives in the check run (kept out of the PR conversation
           # deliberately — the GIF gallery would swamp the log). base-vs-PR
           # compare/diff links are here too; the `main` base is empty until
