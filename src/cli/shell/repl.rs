@@ -40,6 +40,16 @@ fn startup_lines(aur: index::AurState) -> Vec<&'static str> {
     }
 }
 
+/// Whether the launch splash may blink its eyes: the banner must be showing
+/// *and* be the last thing on screen before the prompt. The blink steps a fixed
+/// number of rows up to the eyes ([`ui::SplashBlink::arm`]), so anything printed
+/// between the banner and the prompt — a seeded search's result table — would
+/// leave it stamping the eyes onto the wrong row (or off a scrolled banner).
+/// Pure so the rule is unit-tested.
+const fn splash_may_blink(banner_shown: bool, seeded_search: bool) -> bool {
+    banner_shown && !seeded_search
+}
+
 /// The shell's first-launch question, asked while the AUR is enabled but was
 /// never synced: sync now / pacman-only from now on / later.
 ///
@@ -112,12 +122,19 @@ pub fn run(config: &ConfigHandle, devel: DevelPolicy, initial_search: &[SearchTe
     // The splash, behind the `banner` knob (default on). After the
     // first-launch question — art must never bury a prompt — and before the
     // session banner, so the one-liner reads as its caption.
+    let paint = ui::Paint::detect();
     if cfg.banner {
-        env.print_table(&ui::launch_banner(ui::Paint::detect()));
+        env.print_table(&ui::launch_banner(paint));
     }
-    for line in startup_lines(aur_state) {
+    let captions = startup_lines(aur_state);
+    for line in captions.iter().copied() {
         env.print(line);
     }
+    // Arm the splash's idle eye-blink, gated further on the terminal by `arm`.
+    // `mut` so the first prompt can `take` it.
+    let mut blink = splash_may_blink(cfg.banner, !initial_search.is_empty())
+        .then(|| ui::SplashBlink::arm(paint, captions.len()))
+        .flatten();
 
     // Seed the session with the launch-time search (`aurox <term>…`): run it once
     // up front so the numbered result list is on screen before the first prompt,
@@ -143,11 +160,27 @@ pub fn run(config: &ConfigHandle, devel: DevelPolicy, initial_search: &[SearchTe
     // A missing history file on first run is expected, not an error.
     rl.load_history(&history).ok();
 
+    // Hand the blink its off switch: the helper fires it on the first keystroke
+    // so the wink never lands on a line in progress. The blink itself — thread,
+    // channel and timing — lives behind `SplashBlink::run`.
+    if let Some(blink) = &blink
+        && let Some(helper) = rl.helper_mut()
+    {
+        helper.watch_first_keystroke(blink.cancel_on_keystroke());
+    }
+
     let code = loop {
         // The prompt is recomputed per line: it carries the cart's standing
         // (counts + open review gates), so state stays ambient at the prompt
         // instead of being reprinted after every command.
-        match rl.readline(&state.prompt()) {
+        let prompt = state.prompt();
+        // The first prompt runs the read with the eyes blinking behind it; every
+        // prompt after is a plain read.
+        let readline = match blink.take() {
+            Some(blink) => blink.run(|| rl.readline(&prompt)),
+            None => rl.readline(&prompt),
+        };
+        match readline {
             Ok(line) => {
                 if !line.trim().is_empty() {
                     // Best-effort: a full history ring shouldn't abort input.
@@ -209,5 +242,47 @@ mod tests {
             "pacman-only mode must not nag: {pacman_only:?}"
         );
         assert_contains!(pacman_only[0], "(pacman-only)");
+    }
+
+    /// The splash blink steps by relative cursor moves, which only land while
+    /// nothing has wrapped; [`ui::SplashBlink::arm`] guarantees that by
+    /// requiring [`ui::SPLASH_MIN_COLS`] columns, so every caption must fit
+    /// inside that floor — this catches a future caption that grows past it.
+    #[test]
+    fn startup_captions_fit_the_blink_width() {
+        for aur in [
+            index::AurState::Ready,
+            index::AurState::NotSetUp,
+            index::AurState::Disabled,
+        ] {
+            for line in startup_lines(aur) {
+                assert!(
+                    line.chars().count() < ui::SPLASH_MIN_COLS as usize,
+                    "caption wider than the blink's width floor: {line:?}"
+                );
+            }
+        }
+    }
+
+    /// Regression: `aurox <term>` seeds a search whose result table prints
+    /// between the banner and the prompt, burying the eyes — so the splash must
+    /// not blink and stamp itself onto a result row. Only a plain launch (banner,
+    /// then straight to the prompt) blinks; a disabled banner never does.
+    #[test]
+    fn splash_blinks_only_with_the_banner_last_before_the_prompt() {
+        let (seeded, plain) = (true, false);
+        assert!(
+            splash_may_blink(true, plain),
+            "plain launch: banner, then the prompt"
+        );
+        assert!(
+            !splash_may_blink(true, seeded),
+            "a seeded search buries the eyes under its results"
+        );
+        assert!(
+            !splash_may_blink(false, plain),
+            "no banner means no eyes to blink"
+        );
+        assert!(!splash_may_blink(false, seeded));
     }
 }

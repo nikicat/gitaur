@@ -29,6 +29,7 @@ use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 use std::borrow::Cow;
 use std::rc::Rc;
+use std::sync::mpsc;
 
 /// Cap on candidates one Tab offers, so a bare `add <Tab>` over the ~100k-name
 /// universe doesn't dump the whole index into the terminal. The universe is
@@ -103,6 +104,13 @@ pub struct ShellHelper {
     /// address a cart row (`drop yay-bin`), the same currency the
     /// [`selector`](super::selector) resolver accepts.
     cart: Vec<PkgTarget>,
+    /// One-shot cancel for the launch splash's idle eye-blink. The shell
+    /// installs a `Sender` here for the first prompt only
+    /// ([`watch_first_keystroke`](Self::watch_first_keystroke)); the first
+    /// non-empty line the user types fires it, so the wink never lands on top
+    /// of a line in progress. `None` when the splash isn't animating (a non-TTY
+    /// or `--color never` session, and every unit test).
+    first_key: Option<mpsc::Sender<()>>,
 }
 
 impl ShellHelper {
@@ -112,7 +120,15 @@ impl ShellHelper {
         Self {
             universe,
             cart: Vec::new(),
+            first_key: None,
         }
+    }
+
+    /// Arm the launch-splash blink's first-keystroke cancel (see
+    /// [`first_key`](Self::first_key)): the shell calls this once, before the
+    /// first prompt, only when the splash is set to animate.
+    pub fn watch_first_keystroke(&mut self, cancel: mpsc::Sender<()>) {
+        self.first_key = Some(cancel);
     }
 
     /// Refresh the per-command snapshots: the staged cart specs, and (cheaply,
@@ -352,6 +368,15 @@ impl Hinter for ShellHelper {
     type Hint = String;
 
     fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<String> {
+        // The first non-empty line cancels the launch splash's idle eye-blink
+        // (see `ui::SplashBlink` and repl): once the user is typing, the wink
+        // must not reposition the cursor over the line. Best-effort — the
+        // receiver is gone once the blink window has closed.
+        if !line.is_empty()
+            && let Some(cancel) = &self.first_key
+        {
+            cancel.send(()).ok();
+        }
         self.hint_for(line, pos)
     }
 }
