@@ -93,6 +93,17 @@ impl Row<'_> {
         }
     }
 
+    /// Whether this is a VCS pkgbase (`-git`/`-svn`/…). Repo rows are never VCS
+    /// here (they carry no PKGBUILD of their own). Drives the freshness clamp:
+    /// a VCS PKGBUILD's age is stable packaging, not abandonment, so it must
+    /// never read (or rank) as stale — see [`ui::AgeScale::badge`].
+    fn is_vcs(&self) -> bool {
+        match self {
+            Row::Repo(_) => false,
+            Row::Aur(e) => e.pkgbase.is_vcs(),
+        }
+    }
+
     /// The row's one-line description, if its source carries one.
     fn desc(&self) -> Option<String> {
         match self {
@@ -141,13 +152,14 @@ fn ranked_best_first<'a>(
     repo_hits: Vec<RepoHit>,
     aur_hits: Vec<&'a IndexEntry>,
     regexes: &[regex::Regex],
+    scale: &ui::AgeScale,
 ) -> Vec<RankedRow<'a>> {
     let rows: Vec<Row<'a>> = repo_hits
         .into_iter()
         .map(Row::Repo)
         .chain(aur_hits.into_iter().map(Row::Aur))
         .collect();
-    let ranked = rank_rows(rows, regexes);
+    let ranked = rank_rows(rows, regexes, scale);
     info!(rows = ranked.len(), "search results");
     ranked
 }
@@ -160,8 +172,9 @@ fn merged_rows<'a>(
     repo_hits: Vec<RepoHit>,
     aur_hits: Vec<&'a IndexEntry>,
     regexes: &[regex::Regex],
+    scale: &ui::AgeScale,
 ) -> Vec<RankedRow<'a>> {
-    let mut ranked = ranked_best_first(repo_hits, aur_hits, regexes);
+    let mut ranked = ranked_best_first(repo_hits, aur_hits, regexes, scale);
     ranked.reverse();
     ranked
 }
@@ -177,7 +190,11 @@ fn merged_rows<'a>(
 pub fn cmd_search(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
     let regexes = compile_terms(terms)?;
     let (repo_hits, aur_data) = gather(cfg, terms)?;
-    let rows = merged_rows(repo_hits, aur_data.search(&regexes), &regexes);
+    // `-Ss` shows no freshness column, but ranking still weights health, so it
+    // classifies AUR ages against the same clock + thresholds as the interactive
+    // list — every surface ranks identically.
+    let scale = ui::AgeScale::now(cfg.age_thresholds());
+    let rows = merged_rows(repo_hits, aur_data.search(&regexes), &regexes, &scale);
     if rows.is_empty() {
         return Ok(1);
     }
@@ -226,7 +243,10 @@ fn write_search_result<W: std::io::Write>(
 pub fn cmd_search_install(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
     let regexes = compile_terms(terms)?;
     let (repo_hits, aur_data) = gather(cfg, terms)?;
-    let rows = ranked_best_first(repo_hits, aur_data.search(&regexes), &regexes);
+    // One clock + thresholds for the whole render: ranking (health weight) and
+    // the freshness badges classify AUR ages against the same `scale`.
+    let scale = ui::AgeScale::now(cfg.age_thresholds());
+    let rows = ranked_best_first(repo_hits, aur_data.search(&regexes), &regexes, &scale);
 
     if rows.is_empty() {
         ui::info(&format!(
@@ -246,7 +266,6 @@ pub fn cmd_search_install(cfg: &Config, terms: &[SearchTerm]) -> Result<u8> {
     // stays dense single-line here). `pac` backs the installed-state lookup in
     // `search_row`; the best-first rows print best-last.
     let pac = PacmanIndex::build(&alpm_db::open()?);
-    let scale = ui::AgeScale::now(cfg.age_thresholds());
     let search_rows: Vec<ui::SearchRow> = rows.iter().map(|r| r.search_row(&pac, &scale)).collect();
     let table = ui::SearchList {
         rows: &search_rows,
@@ -306,8 +325,13 @@ impl RankedRow<'_> {
         ui::SearchRow {
             note: self.class.note.clone(),
             // AUR rows carry the freshness badge; repo rows have no commit of
-            // their own, so `commit_time` is `None` → no badge.
-            freshness: self.row.commit_time().and_then(|c| scale.badge(c)),
+            // their own, so `commit_time` is `None` → no badge. A VCS pkgbase
+            // clamps out of the stale band (its old PKGBUILD is stable, not
+            // abandoned).
+            freshness: self
+                .row
+                .commit_time()
+                .and_then(|c| scale.badge(c, self.row.is_vcs())),
             ..search_row(&self.row, pac)
         }
     }
@@ -316,20 +340,31 @@ impl RankedRow<'_> {
 /// Classify + rank merged repo/AUR search `rows`, best match first.
 ///
 /// The order the shell list and the non-interactive listing both use:
-///   1. **match tier** — the [`MatchTier`] ladder, from name-prefix down to
+///   1. **match tier** — the [`MatchTier`] ladder, from exact-name down to
 ///      provides-substring. (`regexes` is already applied as the AND filter
 ///      that produced `rows`, so every row matches *somewhere*; the tier
-///      records *where* — see [`MatchClass::of`].)
-///   2. **shorter name wins** within a tier — `claude` before
-///      `claude-desktop`; the length is the name that *earned* the tier, so a
-///      split pkgbase pulled in by a long member ranks by that member, not by
-///      its short pkgbase name.
+///      records *where* — see [`MatchClass::of`].) An **exact** name hit is its
+///      own top tier, so a package named precisely what you typed never loses
+///      its spot (freshness can't demote it — it only wears the stale badge).
+///   2. **health** within a tier — an abandoned AUR row (a non-VCS PKGBUILD
+///      untouched past the stale threshold) sinks below the healthy ones, so a
+///      fresh, maintained package outranks a stale one it would otherwise trail
+///      on name length. Everything not abandoned counts as healthy (repo rows,
+///      VCS pkgbases at any age, and the fresh/maturing/caution bands) and keeps
+///      its existing order — freshness is a *weight*, never a relevance override.
+///      `scale` supplies "now" + the configured age thresholds.
 ///   3. repo rows sit ahead of AUR rows of otherwise-equal rank (pacman owns
-///      the name), then AUR ties break **freshest-commit-first**, then name,
-///      for a stable total order.
+///      the name), then **shorter name wins** (`claude` before `claude-desktop`;
+///      the length is the name that *earned* the tier, so a split pkgbase pulled
+///      in by a long member ranks by that member), then AUR ties break
+///      **freshest-commit-first**, then name — a stable total order.
 ///
 /// `pub(crate)` so [`crate::cli::shell`] ranks its combined list identically.
-pub(crate) fn rank_rows<'a>(rows: Vec<Row<'a>>, regexes: &[regex::Regex]) -> Vec<RankedRow<'a>> {
+pub(crate) fn rank_rows<'a>(
+    rows: Vec<Row<'a>>,
+    regexes: &[regex::Regex],
+    scale: &ui::AgeScale,
+) -> Vec<RankedRow<'a>> {
     let mut ranked: Vec<RankedRow<'a>> = rows
         .into_iter()
         .map(|row| {
@@ -337,17 +372,15 @@ pub(crate) fn rank_rows<'a>(rows: Vec<Row<'a>>, regexes: &[regex::Regex]) -> Vec
             RankedRow { row, class }
         })
         .collect();
-    ranked.sort_by_cached_key(RankKey::of);
-    let mut by_tier = [0usize; 5];
-    for r in &ranked {
-        by_tier[r.class.tier as usize] += 1;
-    }
+    ranked.sort_by_cached_key(|r| RankKey::of(r, scale));
+    let in_tier = |tier: MatchTier| ranked.iter().filter(|r| r.class.tier == tier).count();
     debug!(
-        name_prefix = by_tier[MatchTier::NamePrefix as usize],
-        name_substring = by_tier[MatchTier::NameSubstring as usize],
-        provides_exact = by_tier[MatchTier::ProvidesExact as usize],
-        desc = by_tier[MatchTier::Desc as usize],
-        provides_substring = by_tier[MatchTier::ProvidesSubstring as usize],
+        name_exact = in_tier(MatchTier::NameExact),
+        name_prefix = in_tier(MatchTier::NamePrefix),
+        name_substring = in_tier(MatchTier::NameSubstring),
+        provides_exact = in_tier(MatchTier::ProvidesExact),
+        desc = in_tier(MatchTier::Desc),
+        provides_substring = in_tier(MatchTier::ProvidesSubstring),
         "ranked search rows"
     );
     ranked
@@ -357,48 +390,86 @@ pub(crate) fn rank_rows<'a>(rows: Vec<Row<'a>>, regexes: &[regex::Regex]) -> Vec
 /// meanings. Field declaration order *is* the comparison order (derived `Ord`).
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct RankKey {
+    /// Where the query matched (exact-name first). The primary key: relevance
+    /// dominates, and freshness never crosses a tier.
     tier: MatchTier,
+    /// Coarse freshness weight *within* a tier — [`Health::Stale`] (an abandoned
+    /// non-VCS AUR PKGBUILD) sinks below [`Health::Healthy`]; everything else
+    /// ties, keeping its existing order.
+    health: Health,
+    /// Repo before AUR when everything above ties (pacman owns the name).
+    source: SourceRank,
     /// Length of the name that earned the tier (see [`MatchClass`]).
     name_len: usize,
-    source: SourceRank,
     /// Breaks AUR ties freshest-commit-first; repo rows all tie here (they've
     /// already been separated by `source`).
-    freshness: Freshness,
+    recency: CommitRecency,
     /// Final lexical tie-break — the row's install identity (`PkgTarget`).
     name: PkgTarget,
 }
 
 impl RankKey {
-    fn of(r: &RankedRow<'_>) -> Self {
-        let (source, freshness) = match &r.row {
-            Row::Repo(_) => (SourceRank::Repo, Freshness::STALE),
-            Row::Aur(e) => (SourceRank::Aur, Freshness(e.commit_time)),
+    fn of(r: &RankedRow<'_>, scale: &ui::AgeScale) -> Self {
+        let (source, recency) = match &r.row {
+            Row::Repo(_) => (SourceRank::Repo, CommitRecency::NONE),
+            Row::Aur(e) => (SourceRank::Aur, CommitRecency(e.commit_time)),
         };
         Self {
             tier: r.class.tier,
-            name_len: r.class.name_len,
+            health: Health::of(&r.row, scale),
             source,
-            freshness,
+            name_len: r.class.name_len,
+            recency,
             name: r.row.picked(),
         }
     }
 }
 
-/// A row's freshness for ranking: its AUR branch-tip commit time, ordered so
-/// **fresher sorts first** — a later commit is the better tie-break. Wrapping
+/// A row's coarse freshness *health* for ranking — two buckets, not the full
+/// display gradient: only a genuinely abandoned package sinks, so the healthy
+/// majority keeps its intuitive short-name-first order (the finer band is a
+/// display signal, not a sort key). Variant order is the rank order.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum Health {
+    /// Repo packages (curated, no PKGBUILD age), VCS pkgbases (a stable recipe,
+    /// never abandoned), and the fresh/maturing/caution AUR bands.
+    Healthy,
+    /// A non-VCS AUR PKGBUILD untouched past the stale threshold — likely
+    /// abandoned, so it sinks to the bottom of its match tier.
+    Stale,
+}
+
+impl Health {
+    /// A row's health via the shared freshness band ([`ui::AgeScale::badge`],
+    /// which already applies the VCS clamp): only the [`Stale`](ui::FreshnessBand::Stale)
+    /// band demotes. A row with no commit (repo, or an unknown/future AUR time)
+    /// is [`Healthy`](Self::Healthy) — never sink what we can't date.
+    fn of(row: &Row<'_>, scale: &ui::AgeScale) -> Self {
+        match row {
+            Row::Repo(_) => Self::Healthy,
+            Row::Aur(e) => match scale.badge(e.commit_time, e.pkgbase.is_vcs()) {
+                Some(f) if f.band() == ui::FreshnessBand::Stale => Self::Stale,
+                _ => Self::Healthy,
+            },
+        }
+    }
+}
+
+/// A row's commit recency for ranking: its AUR branch-tip commit time, ordered
+/// so **fresher sorts first** — a later commit is the better tie-break. Wrapping
 /// [`IndexEntry::commit_time`] keeps that "fresher wins" polarity in one
 /// place (an `impl Ord`) instead of scattering a bare `Reverse<_>` through
 /// the sort key.
 #[derive(PartialEq, Eq)]
-struct Freshness(UnixTime);
+struct CommitRecency(UnixTime);
 
-impl Freshness {
+impl CommitRecency {
     /// Rows with no commit of their own (repo packages) — older than any real
-    /// AUR commit, so they never win a freshness tie-break.
-    const STALE: Self = Self(UnixTime::MIN);
+    /// AUR commit, so they never win a recency tie-break.
+    const NONE: Self = Self(UnixTime::MIN);
 }
 
-impl Ord for Freshness {
+impl Ord for CommitRecency {
     fn cmp(&self, other: &Self) -> Ordering {
         // Larger commit time = fresher = "less", so it lands first in the
         // best-first `RankKey` order.
@@ -406,7 +477,7 @@ impl Ord for Freshness {
     }
 }
 
-impl PartialOrd for Freshness {
+impl PartialOrd for CommitRecency {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -415,8 +486,10 @@ impl PartialOrd for Freshness {
 /// Where the query matched a row, best to worst — variant order *is* the
 /// rank order (derived `Ord`).
 ///
-/// The name tiers require the term(s) in a package name. `ProvidesExact` is
-/// a whole-name hit on a `provides=` entry — the user typed a virtual name
+/// The name tiers require the term(s) in a package name. `NameExact` is a
+/// whole-name hit (`^foo$`) — the strongest signal of intent, so it tops the
+/// list and no freshness weight can demote it. `ProvidesExact` is a whole-name
+/// hit on a `provides=` entry — the user typed a virtual name
 /// (`wireguard-module`), so its providers outrank description matches.
 /// `Desc` covers descriptions, repo groups, and the no-site fallback. And
 /// `ProvidesSubstring` — a term merely *inside* a provides name, like
@@ -424,7 +497,9 @@ impl PartialOrd for Freshness {
 /// everything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum MatchTier {
-    /// Some name starts with (or equals) the query.
+    /// A name equals the query in full (`^foo$`) — exact intent.
+    NameExact,
+    /// Some name starts with the query (but no name equals it).
     NamePrefix,
     /// Some name contains the whole query, but none as a prefix.
     NameSubstring,
@@ -627,7 +702,8 @@ fn consider_repo_sites<'e>(
 /// keeps a query like `^foo$` classified as the exact-name match it is.
 const fn name_tier(anchor: Option<NameMatch>) -> Option<MatchTier> {
     match anchor {
-        Some(NameMatch::Exact | NameMatch::Prefix) => Some(MatchTier::NamePrefix),
+        Some(NameMatch::Exact) => Some(MatchTier::NameExact),
+        Some(NameMatch::Prefix) => Some(MatchTier::NamePrefix),
         Some(NameMatch::Inside) => Some(MatchTier::NameSubstring),
         None => None,
     }
@@ -738,9 +814,26 @@ mod tests {
         terms.iter().map(|t| t.compile().unwrap()).collect()
     }
 
+    /// A fixed-clock scale for ranking tests, so the health weight doesn't
+    /// depend on the wall clock: a far-future "now" means any real (positive)
+    /// commit time reads as long-past (→ `Stale` for a non-VCS row), while the
+    /// `mk` default `commit_time` of 0 reads as unknown (→ no badge → `Healthy`).
+    fn test_scale() -> ui::AgeScale {
+        let now = UnixTime::new(100_000 * 86_400)
+            .system_time()
+            .expect("positive time");
+        ui::AgeScale::at(now, ui::AgeThresholds::default())
+    }
+
+    /// A commit time `days` before [`test_scale`]'s fixed "now" — so a test can
+    /// place a row in a specific freshness band (10 → fresh, 1000 → stale).
+    fn commit_days_ago(days: i64) -> UnixTime {
+        UnixTime::new((100_000 - days) * 86_400)
+    }
+
     /// Rank `rows` against `terms` and return the install identities in order.
     fn ranked(rows: Vec<Row<'_>>, terms: &[SearchTerm]) -> Vec<PkgTarget> {
-        rank_rows(rows, &compiled(terms))
+        rank_rows(rows, &compiled(terms), &test_scale())
             .iter()
             .map(|r| r.row.picked())
             .collect()
@@ -787,7 +880,7 @@ mod tests {
     fn rank_puts_repo_ahead_of_aur_on_equal_match() {
         let aur = mk("claude", None, None);
         let rows = vec![Row::Aur(&aur), Row::Repo(repo("claude", None, false))];
-        let ranked = rank_rows(rows, &compiled(&[SearchTerm::new("claude")]));
+        let ranked = rank_rows(rows, &compiled(&[SearchTerm::new("claude")]), &test_scale());
         assert!(
             matches!(ranked[0].row, Row::Repo(_)),
             "repo should lead the tie"
@@ -795,12 +888,64 @@ mod tests {
         assert!(matches!(ranked[1].row, Row::Aur(_)));
     }
 
-    /// `Freshness` is the domain key behind the AUR tie-break: a newer commit
-    /// sorts *before* an older one, and repo rows' `STALE` sorts last.
+    /// `CommitRecency` is the domain key behind the AUR tie-break: a newer commit
+    /// sorts *before* an older one, and repo rows' `NONE` sorts last.
     #[test]
-    fn freshness_orders_newer_before_older() {
-        assert!(Freshness(UnixTime::new(900)) < Freshness(UnixTime::new(100)));
-        assert!(Freshness(UnixTime::new(100)) < Freshness::STALE);
+    fn commit_recency_orders_newer_before_older() {
+        assert!(CommitRecency(UnixTime::new(900)) < CommitRecency(UnixTime::new(100)));
+        assert!(CommitRecency(UnixTime::new(100)) < CommitRecency::NONE);
+    }
+
+    /// The health weight: within a match tier, an abandoned (stale) AUR row
+    /// sinks below a fresh one it would otherwise beat on name length — so the
+    /// maintained package wins even though its name is longer.
+    #[test]
+    fn rank_sinks_stale_below_fresh_within_tier() {
+        let mut stale = mk("fooo", None, None); // shorter, but abandoned
+        stale.commit_time = commit_days_ago(1000); // > 730d → stale
+        let mut fresh = mk("foobar-ng", None, None); // longer, but maintained
+        fresh.commit_time = commit_days_ago(10); // fresh
+        // Both are name-prefix hits for "foo"; only health separates them.
+        let rows = vec![Row::Aur(&stale), Row::Aur(&fresh)];
+        assert_eq!(
+            ranked(rows, &[SearchTerm::new("foo")]),
+            [PkgTarget::from("foobar-ng"), PkgTarget::from("fooo")],
+            "a maintained package outranks a stale one it would beat on length alone"
+        );
+    }
+
+    /// A VCS pkgbase is never sunk for a stale *PKGBUILD*: its recipe rebuilds
+    /// from HEAD, so an old `foo-git` reads healthy and outranks a genuinely
+    /// abandoned non-VCS row in the same tier (despite the longer name).
+    #[test]
+    fn rank_does_not_sink_stale_vcs_pkgbase() {
+        let mut vcs = mk("foo-git", None, None);
+        vcs.commit_time = commit_days_ago(1000); // ancient PKGBUILD, but VCS
+        let mut stale = mk("fooo", None, None);
+        stale.commit_time = commit_days_ago(1000); // ancient non-VCS → stale
+        let rows = vec![Row::Aur(&vcs), Row::Aur(&stale)];
+        assert_eq!(
+            ranked(rows, &[SearchTerm::new("foo")]),
+            [PkgTarget::from("foo-git"), PkgTarget::from("fooo")],
+            "a VCS pkgbase stays healthy despite an old PKGBUILD, outranking a stale one"
+        );
+    }
+
+    /// An exact-name match is its own top tier, so freshness never demotes it:
+    /// an abandoned package named exactly what you typed still beats a fresh
+    /// package that only *starts* with the query.
+    #[test]
+    fn rank_exact_name_beats_fresher_prefix() {
+        let mut exact_stale = mk("foo", None, None);
+        exact_stale.commit_time = commit_days_ago(1000); // abandoned, but exact
+        let mut fresh_prefix = mk("foo-ng", None, None);
+        fresh_prefix.commit_time = commit_days_ago(10); // fresh, but only a prefix
+        let rows = vec![Row::Aur(&fresh_prefix), Row::Aur(&exact_stale)];
+        assert_eq!(
+            ranked(rows, &[SearchTerm::new("foo")]),
+            [PkgTarget::from("foo"), PkgTarget::from("foo-ng")],
+            "the exact-name hit tops the list even when abandoned"
+        );
     }
 
     /// End to end, that tie-break beats the lexical fallback (`aaa-` would
@@ -818,14 +963,15 @@ mod tests {
         );
     }
 
-    /// An anchored regex (`^name$`) still classifies as an exact name-prefix
-    /// match — the tier is computed from the compiled regex, not raw text.
+    /// An anchored regex (`^name$`) classifies as the exact-name tier — the
+    /// tier is computed from the compiled regex, not raw text — so it tops the
+    /// list and no freshness weight can demote it.
     #[test]
-    fn rank_treats_anchored_regex_as_name_prefix() {
+    fn rank_treats_anchored_regex_as_name_exact() {
         let hit = mk("test-trivial", None, None);
         let miss = mk("unrelated", None, None);
         let terms = [SearchTerm::new("^test-trivial$")];
-        assert_eq!(class(&Row::Aur(&hit), &terms).tier, MatchTier::NamePrefix);
+        assert_eq!(class(&Row::Aur(&hit), &terms).tier, MatchTier::NameExact);
         assert_eq!(class(&Row::Aur(&miss), &terms).tier, MatchTier::Desc);
     }
 
@@ -1038,7 +1184,7 @@ mod tests {
         let desc = mk("toolkit", Some("wraps claude"), None);
         let terms = [SearchTerm::new("claude")];
         let c = class(&Row::Aur(&name), &terms);
-        assert_eq!((c.tier, c.note), (MatchTier::NamePrefix, None));
+        assert_eq!((c.tier, c.note), (MatchTier::NameExact, None));
         let c = class(&Row::Aur(&desc), &terms);
         assert_eq!((c.tier, c.note), (MatchTier::Desc, None));
     }
