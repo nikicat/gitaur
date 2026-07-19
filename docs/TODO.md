@@ -14,17 +14,18 @@
   repo/name/version. Whatever palette lands, the installed flag must stay
   clearly visible (today it's row emphasis plus the `old → new` version
   cell, which color alone could drown out).
-- search ranking should *weight* freshness, not just tie-break on it. Today the
-  order is match-tier → shorter-name → repo-before-AUR → freshest-commit, where
-  freshness is only the final AUR tie-break (`src/cli/search.rs` `RankKey`). So a
-  stale/abandoned AUR package that matches the name a little better outranks a
-  fresh, maintained one — now glaring since the freshness-age risk band renders the
-  staleness right at the top of the list (bottom-up = nearest the prompt). Fold
-  the freshness *band* (`ui::freshness::FreshnessBand`) into the sort so
-  stale/abandoned rows sink and healthy ones rise *within* a match tier; consider
-  also demoting the too-fresh *caution* band (recency is non-monotonic — see the
-  band model). Name-match quality stays primary; freshness is a secondary weight,
-  not an override.
+- search ranking still isn't optimal — **research it and rethink from scratch**.
+  Today's formula (`src/cli/search.rs` `RankKey`: exact-name → match-tier →
+  health → repo>AUR → shorter-name → freshest-commit → lexical) is a reasonable
+  hand-tuned heuristic, but it's a lexicographic key *stack* accreted one
+  tie-break at a time, not a model grounded in what actually predicts the row a
+  user wants. Study the alternatives properly before iterating further: how
+  pacman/yay/paru weight relevance; whether a *scored* model (weighted signals
+  summed, with a learned/tuned weighting) beats strict tiers; how name-match
+  quality, provenance (repo vs AUR), freshness/health, popularity we don't have,
+  and installed-state should really trade off; and whether the bottom-up
+  "best nearest the prompt" order interacts badly with any of it. Come back with
+  a from-first-principles design, not another appended tie-break.
 - renderer-agnostic table model (so a **web-UI table renderer** can attach).
   Today the whole grid stack is a *terminal-string* engine: `ui::Cell` stores
   an already-ANSI-baked `String` (via the `Cell::paint(plain, paint, f)`
@@ -66,6 +67,19 @@
 - account for already downloaded sources when printing download sizes in tables
 
 <!-- Done:
+- search ranking weights freshness (health), not just tie-breaks on it
+  (`src/cli/search.rs` `RankKey`): the chain is now exact-name → match-tier →
+  health → repo-before-AUR → shorter-name → freshest-commit → lexical. An
+  abandoned AUR row (a *non-VCS* PKGBUILD past the stale threshold) sinks to the
+  bottom of its tier via a 2-bucket `Health {Healthy, Stale}` weight, so a fresh
+  maintained package outranks a stale one it would beat on name length alone.
+  Decisions: an **exact-name** hit is its own top tier and can't be demoted by
+  freshness (you typed it → you get it, stale-badged); the too-fresh *caution*
+  band stays a color warning only, not a sort demotion; and a **VCS** pkgbase
+  (`PkgBase::is_vcs`) never reads stale — its old PKGBUILD is stable packaging,
+  not abandonment, so `AgeScale::badge`/`FreshnessBand::vcs_clamped` clamp stale →
+  maturing for both the ranking health and the displayed badge. `rank_rows` now
+  threads the `AgeScale` so every surface (shell, pipe, `-Ss`) ranks identically.
 - config-selectable two-line search rows, pacman-style (`№ repo/name version
   [installed] [age]` headline + indented description line): a typed
   `SearchLayout` knob (`auto`/`single`/`double`, default `auto`) resolved by

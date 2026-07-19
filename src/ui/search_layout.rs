@@ -270,7 +270,7 @@ mod tests {
         let sec_per_day = 86_400;
         let now = UnixTime::new(1_000 * sec_per_day).system_time()?;
         let scale = AgeScale::at(now, AgeThresholds::from_days(2, 180, 730));
-        scale.badge(UnixTime::new((1_000 - days_old) * sec_per_day))
+        scale.badge(UnixTime::new((1_000 - days_old) * sec_per_day), false)
     }
 
     /// `SearchLayout` parses from the lowercase toml spellings and defaults to

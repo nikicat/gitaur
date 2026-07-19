@@ -98,6 +98,24 @@ impl FreshnessBand {
             Self::Stale => dim(text).to_string(),
         }
     }
+
+    /// The band as read for a VCS pkgbase (`-git`/`-svn`/…): its freshness is
+    /// the *PKGBUILD's* last-change age, but a VCS recipe rebuilds from upstream
+    /// HEAD every time — an old PKGBUILD is *stable packaging*, not abandonment.
+    /// So [`Stale`](Self::Stale) never applies to a VCS pkgbase; it clamps up to
+    /// [`Maturing`](Self::Maturing) ("alive, just not recently repackaged").
+    ///
+    /// The too-fresh [`Caution`](Self::Caution) end still holds — a PKGBUILD that
+    /// changed hours ago is unvetted whether or not upstream is a VCS. A no-op
+    /// for a non-VCS package.
+    #[must_use]
+    const fn vcs_clamped(self, is_vcs: bool) -> Self {
+        if is_vcs && matches!(self, Self::Stale) {
+            Self::Maturing
+        } else {
+            self
+        }
+    }
 }
 
 /// The age boundaries between the four [`FreshnessBand`]s, ascending
@@ -221,11 +239,17 @@ impl AgeScale {
 
     /// The badge for a commit time, or `None` when it is unknown or in the
     /// future (clock skew) — no badge rather than a bogus zero-age caution.
-    pub fn badge(&self, commit_time: UnixTime) -> Option<Freshness> {
+    ///
+    /// `is_vcs` clamps the [`FreshnessBand::Stale`] end away for VCS pkgbases
+    /// (`-git`/`-svn`/…), whose old PKGBUILD is stable packaging rather than
+    /// abandonment — see [`FreshnessBand::vcs_clamped`]. The same band feeds the
+    /// displayed tag and the search ranking, so a VCS row is never shown *or*
+    /// sorted as abandoned.
+    pub fn badge(&self, commit_time: UnixTime, is_vcs: bool) -> Option<Freshness> {
         let age = self.now.duration_since(commit_time.system_time()?).ok()?;
         Some(Freshness {
             age,
-            band: FreshnessBand::classify(age, &self.thresholds),
+            band: FreshnessBand::classify(age, &self.thresholds).vcs_clamped(is_vcs),
         })
     }
 }
@@ -295,15 +319,47 @@ mod tests {
 
         // 3 days ago → Fresh.
         let three_days_ago = UnixTime::new(997 * 86_400);
-        let badge = scale.badge(three_days_ago).expect("known past time badges");
+        let badge = scale
+            .badge(three_days_ago, false)
+            .expect("known past time badges");
         assert_eq!(badge.band(), FreshnessBand::Fresh);
 
         // Future commit (clock skew) → no badge.
         let future = UnixTime::new(1_100 * 86_400);
-        assert_eq!(scale.badge(future), None, "future commit → no badge");
+        assert_eq!(scale.badge(future, false), None, "future commit → no badge");
 
         // Unknown sentinel (≤ 0) → no badge.
-        assert_eq!(scale.badge(UnixTime::new(0)), None);
+        assert_eq!(scale.badge(UnixTime::new(0), false), None);
+    }
+
+    /// A VCS pkgbase never reads as `Stale`: an old `-git` PKGBUILD is stable
+    /// packaging, not abandonment, so its stale-age badge clamps up to
+    /// `Maturing`. A non-VCS pkgbase of the same age still reads `Stale`; and
+    /// the too-fresh `Caution` end is unaffected by the clamp.
+    #[test]
+    fn vcs_pkgbase_never_reads_stale() {
+        let now = SystemTime::UNIX_EPOCH + days(2_000);
+        let scale = AgeScale::at(now, T);
+        // 1000 days old (> the 730d stale threshold).
+        let ancient = UnixTime::new(1_000 * 86_400);
+        assert_eq!(
+            scale.badge(ancient, false).map(|f| f.band()),
+            Some(FreshnessBand::Stale),
+            "non-VCS old PKGBUILD is stale"
+        );
+        assert_eq!(
+            scale.badge(ancient, true).map(|f| f.band()),
+            Some(FreshnessBand::Maturing),
+            "VCS old PKGBUILD clamps stale → maturing"
+        );
+
+        // The clamp only touches the stale end — a fresh VCS PKGBUILD is unmoved.
+        let recent = UnixTime::new(1_990 * 86_400); // 10 days old → Fresh
+        assert_eq!(
+            scale.badge(recent, true).map(|f| f.band()),
+            Some(FreshnessBand::Fresh),
+            "a recently-changed VCS PKGBUILD keeps its band"
+        );
     }
 
     /// Each band paints its tag in the intended style: caution/fresh/stale carry
@@ -343,7 +399,7 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH + days(1_000);
         let scale = AgeScale::at(now, T);
         let badge = scale
-            .badge(UnixTime::new(999 * 86_400))
+            .badge(UnixTime::new(999 * 86_400), false)
             .expect("known past");
         assert_eq!(badge.band(), FreshnessBand::Caution);
 

@@ -212,11 +212,15 @@ impl ShellEnv for RealEnv<'_> {
             .lookup()
             .search(self.aur_data.index(), &regexes);
         rows.extend(aur.into_iter().map(Row::Aur));
-        // Rank the merged repo+AUR list best-first (the `MatchTier` ladder;
-        // shorter names win; AUR ties break freshest-first). `State::search`
-        // prints this reversed, so row 1 — the best match — lands right above
-        // the prompt.
-        let ranked = rank_rows(rows, &regexes);
+        // One clock + thresholds for the whole render: ranking (the health
+        // weight) and the freshness badges classify AUR ages against the same
+        // `scale`.
+        let scale = ui::AgeScale::now(self.cfg.age_thresholds());
+        // Rank the merged repo+AUR list best-first (the `MatchTier` ladder; an
+        // abandoned AUR row sinks within its tier; shorter names win; AUR ties
+        // break freshest-first). `State::search` prints this reversed, so row 1
+        // — the best match — lands right above the prompt.
+        let ranked = rank_rows(rows, &regexes, &scale);
 
         // Resolve installed state + versions against the live pacman DBs and
         // render the aligned table (installed rows emphasized, the installed
@@ -225,7 +229,6 @@ impl ShellEnv for RealEnv<'_> {
         // renders in the printed table; the remembered list carries only
         // selector data.
         let pac = upgrade::system_pac()?;
-        let scale = ui::AgeScale::now(self.cfg.age_thresholds());
         let search_rows: Vec<ui::SearchRow> =
             ranked.iter().map(|r| r.search_row(&pac, &scale)).collect();
         // Render best-first rows (row 1 = best) into the configured layout; the
