@@ -1,0 +1,15 @@
+# Official-repo fixture that PUBLISHES pkgname `aurpin` into the local sync DB
+# (the fixture dir differs from the pkgname on purpose — official fixtures are
+# keyed by the built pkgname, not the dir). Its AUR namesake lives in the
+# `aurpin` fixture at a newer version; `aurpin` here is the pacman-owned name an
+# explicit AUR pick must be able to override. See that fixture's header.
+pkgname=aurpin
+pkgver=1.0
+pkgrel=1
+pkgdesc='aurox test fixture: sync package aurpin, shadowed by an AUR namesake'
+arch=('any')
+license=('MIT')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/repo-marker"
+}
