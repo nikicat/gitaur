@@ -7,10 +7,13 @@
 //! real `aurox test-trivial` under a PTY and asserts:
 //!
 //! ```text
-//!   (launch)  → shell banner, then the seeded numbered result list, at a prompt
+//!   (launch)  → shell caption, then the seeded numbered result list, at a prompt
 //!   add 1     → the row is addressable by its number (seeded list remembered)
 //!   quit      → clean exit
 //! ```
+//!
+//! A seeded launch shows no ox art — the splash is reserved for a bare `aurox`
+//! (its result table would bury the art) — only the `aurox shell …` caption.
 //!
 //! The `.sh` runs `aurox -Sy` first so the on-disk index can classify
 //! `test-trivial` as an AUR package (the shell does not fetch at startup).
@@ -22,8 +25,9 @@ fn main() {
     // list to the single `test-trivial` fixture so `add 1` is unambiguous.
     let mut pty = Pty::spawn_aurox_args(&["^test-trivial$"]);
 
-    // The shell still prints its banner…
-    pty.expect("shell banner", |s| s.contains("aurox shell"));
+    // The shell still prints its caption (the ox art is suppressed on a seeded
+    // launch — its result table would bury it — but the one-liner stays)…
+    pty.expect("shell caption", |s| s.contains("aurox shell"));
     // …and the seeded search ran before the prompt: the numbered row is on
     // screen without the user typing `search`. The aligned table renders repo +
     // name as separate columns, so the row reads `1  aur   test-trivial …`.
