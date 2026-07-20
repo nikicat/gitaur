@@ -48,14 +48,17 @@ fn startup_lines(aur: index::AurState) -> Vec<&'static str> {
     }
 }
 
-/// Whether the launch splash may blink its eyes: the banner must be showing
-/// *and* be the last thing on screen before the prompt. The blink steps a fixed
-/// number of rows up to the eyes ([`ui::SplashBlink::arm`]), so anything printed
-/// between the banner and the prompt — a seeded search's result table — would
-/// leave it stamping the eyes onto the wrong row (or off a scrolled banner).
-/// Pure so the rule is unit-tested.
-const fn splash_may_blink(banner_shown: bool, seeded_search: bool) -> bool {
-    banner_shown && !seeded_search
+/// Whether the launch splash — the ox art and its idle eye-blink — shows.
+/// Only a bare `aurox` launch qualifies: the `banner` knob must be on (default)
+/// *and* there must be no seeded search. `aurox <term>` seeds a `search` whose
+/// numbered result table prints between the art and the prompt — it would bury
+/// the art, and (since the blink steps a fixed number of rows up to the eyes)
+/// stamp any wink onto the wrong row (or off a scrolled banner) — so a seeded
+/// launch goes straight to its results with no splash. Every explicit op
+/// (`-Su`, `-Ss`, …) never enters the shell at all. Pure so the rule is
+/// unit-tested.
+const fn splash_shown(banner_enabled: bool, seeded_search: bool) -> bool {
+    banner_enabled && !seeded_search
 }
 
 /// The shell's first-launch question, asked while the AUR is enabled but was
@@ -126,11 +129,14 @@ pub fn run(config: &ConfigHandle, devel: DevelPolicy, initial_search: &[SearchTe
     };
     let mut state = State::default();
 
-    // The splash, behind the `banner` knob (default on). After the
-    // first-launch question — art must never bury a prompt — and before the
-    // session banner, so the one-liner reads as its caption.
+    // The splash — ox art, behind the `banner` knob (default on) — but only on a
+    // bare `aurox` launch: a seeded `aurox <term>` goes straight to its results
+    // (see `splash_shown`). After the first-launch question — art must never bury
+    // a prompt — and before the caption, so the one-liner reads as the art's
+    // caption whenever the art is there.
     let paint = ui::Paint::detect();
-    if cfg.banner {
+    let banner_shown = splash_shown(cfg.banner, !initial_search.is_empty());
+    if banner_shown {
         env.print_table(&ui::launch_banner(paint));
     }
     let captions = startup_lines(aur_state);
@@ -138,8 +144,8 @@ pub fn run(config: &ConfigHandle, devel: DevelPolicy, initial_search: &[SearchTe
         env.print(line);
     }
     // Arm the splash's idle eye-blink, gated further on the terminal by `arm`.
-    // `mut` so the first prompt can `take` it.
-    let mut blink = splash_may_blink(cfg.banner, !initial_search.is_empty())
+    // `mut` so the first prompt can `take` it. No banner ⇒ no eyes to blink.
+    let mut blink = banner_shown
         .then(|| ui::SplashBlink::arm(paint, captions.len()))
         .flatten();
 
@@ -282,25 +288,26 @@ mod tests {
         }
     }
 
-    /// Regression: `aurox <term>` seeds a search whose result table prints
-    /// between the banner and the prompt, burying the eyes — so the splash must
-    /// not blink and stamp itself onto a result row. Only a plain launch (banner,
-    /// then straight to the prompt) blinks; a disabled banner never does.
+    /// The splash shows only on a bare `aurox` launch with the banner knob on.
+    /// `aurox <term>` seeds a search whose result table would print between the
+    /// art and the prompt (burying the art and the fixed-row eye-blink), so a
+    /// seeded launch shows no splash — it goes straight to its results. A
+    /// disabled banner never shows it either way.
     #[test]
-    fn splash_blinks_only_with_the_banner_last_before_the_prompt() {
-        let (seeded, plain) = (true, false);
+    fn splash_shows_only_on_a_bare_launch() {
+        let (seeded, bare) = (true, false);
         assert!(
-            splash_may_blink(true, plain),
-            "plain launch: banner, then the prompt"
+            splash_shown(true, bare),
+            "bare launch with the knob on: the ox shows, then the prompt"
         );
         assert!(
-            !splash_may_blink(true, seeded),
-            "a seeded search buries the eyes under its results"
+            !splash_shown(true, seeded),
+            "a seeded search goes straight to its results — no art to bury"
         );
         assert!(
-            !splash_may_blink(false, plain),
-            "no banner means no eyes to blink"
+            !splash_shown(false, bare),
+            "the banner knob off means no splash"
         );
-        assert!(!splash_may_blink(false, seeded));
+        assert!(!splash_shown(false, seeded));
     }
 }
