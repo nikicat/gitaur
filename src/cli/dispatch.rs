@@ -10,9 +10,10 @@ use crate::error::{Error, Result};
 use crate::index;
 use crate::mirror::{self, RefreshOutcome, RefreshReason, RefreshScope, SkipCause};
 use crate::names::{PkgTarget, SearchTerm};
-use crate::pacman::invoke;
+use crate::pacman::{invoke, sync};
 use crate::ui;
 use std::io::IsTerminal;
+use tracing::debug;
 
 /// Top-level routing entry — clap already pre-scanned for pacman-owned ops,
 /// so by this point `cli.args` is aurox's responsibility (`-S` family,
@@ -182,7 +183,21 @@ fn handle_s(config: &ConfigHandle, cli: &Cli, f: &PacFlags, argv: &[String]) -> 
     Ok(0)
 }
 
-/// Drive `pacman -Syu` for the selected repo packages.
+/// Drive `pacman -Su` for the selected repo packages, **against aurox's rootless
+/// synced db** rather than a fresh `-Sy`.
+///
+/// The shell resolves the whole cart at `add`/`upgrade` and freezes the plan;
+/// `apply` must install exactly the versions that plan was resolved against, so
+/// the repo lane upgrades from the synced store the last `refresh` populated
+/// ([`sync::synced_db_path`]) — no apply-time `-Sy` that could pull newer
+/// versions and drift from the frozen plan. That store's `sync/*.db` are the
+/// refresh-fetched official-repo dbs and its `local` symlinks the system
+/// localdb, so pacman installs the frozen versions into the real system.
+/// Refresh is the *only* point the sync DBs move.
+///
+/// If that store isn't populated yet (no `refresh` this session — e.g. a repo
+/// upgrade staged before the first sync), fall back to a full `-Syu` so the
+/// upgrade still runs; pacman does its own `-Sy` in that case.
 ///
 /// If the user deselected any rows, those pkgnames become `--ignore=<csv>` —
 /// pacman still resolves the full upgrade graph (partial-upgrade safety) but
@@ -205,9 +220,22 @@ pub(crate) fn run_repo_upgrade(cfg: &Config, sel: &ui::UpgradeSelection) -> Resu
             sel.repo_skipped.len()
         ));
     }
-    let mut argv: Vec<String> = vec!["-Syu".into(), "--noconfirm".into()];
+    let mut argv: Vec<String> = if let Some(db) = sync::synced_db_path() {
+        // `-Su` (no `-y`) against the frozen synced db: install the resolved
+        // versions, don't re-fetch.
+        vec![
+            "-Su".to_owned(),
+            "--noconfirm".to_owned(),
+            "--dbpath".to_owned(),
+            db.to_string_lossy().into_owned(),
+        ]
+    } else {
+        // No synced store yet — a full `-Syu` still gets the upgrade done.
+        debug!("no rootless synced db; repo upgrade falls back to a full -Syu");
+        vec!["-Syu".to_owned(), "--noconfirm".to_owned()]
+    };
     if !sel.repo_skipped.is_empty() {
-        argv.push("--ignore".into());
+        argv.push("--ignore".to_owned());
         argv.push(sel.repo_skipped.join(","));
     }
     invoke::exec_pacman(cfg, &argv).map(|_| ())
