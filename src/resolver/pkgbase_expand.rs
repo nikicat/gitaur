@@ -16,11 +16,11 @@
 //! Targets that already resolve as pkgname / provides / pacman are passed
 //! through unchanged — preserving any version constraint suffix.
 
+use super::classify::{AurHit, AurVia, classify_full};
 use crate::build::{SourcePin, Target};
 use crate::error::{Error, Result};
-use crate::index::lookup::Lookup;
 use crate::index::schema::IndexEntry;
-use crate::index::{AurIndexData, IndexFile};
+use crate::index::{AurIndexData, EntryIdx, IndexFile};
 use crate::names::{PkgBase, PkgName, PkgTarget};
 use crate::pacman::alpm_db::PacmanIndex;
 use std::collections::{HashMap, HashSet};
@@ -112,34 +112,38 @@ pub fn expand_pkgbase_targets(
 
     for t in targets {
         let bare = t.spec.bare();
-        // Hint recording runs *unconditionally* — the rewrite decision
-        // below may short-circuit (pacman wins, passthrough, …), but the
-        // resolver still classifies the spec via `resolve_target_source`
-        // and can land on an AUR pkgbase even when expand did no rewrite.
-        // The dotnet-runtime regression: a foreign virtual that's installed
-        // hits `pac.owns_name` → passes through → resolver routes to
-        // pkgbase via `by_provides` → without a hint, counterpart picks the
-        // first declared provides (wrong). Record the hint here so it's in
-        // the map regardless of what expand decides next.
-        record_target_hint(by, idx, t, bare, &mut out.counterpart_hints);
+        // Classify the name ONCE — the single `by_name / by_provides /
+        // by_pkgbase` ladder. `class.aur` (the AUR entry that claims the name,
+        // if any) then feeds both the hint recorder and the rewrite deciders,
+        // so neither re-walks it.
+        let class = classify_full(idx, by, pac, bare);
+        let aur = class.aur.as_ref();
 
-        // Per-branch deciders return a TargetDecision; no `&mut` flows into
-        // the branches themselves. Order matches the resolver's fallback
-        // chain in `resolve_target_source`. An explicit pick (`t.pin`)
-        // overrides that chain — the row already disambiguated the source.
+        // Hint recording runs *unconditionally* — the rewrite decision below may
+        // short-circuit (pacman wins, passthrough, …), but the resolver can
+        // still land on an AUR pkgbase even when expand did no rewrite. The
+        // dotnet-runtime regression: a foreign virtual that's installed passes
+        // through → resolver routes to the pkgbase via `by_provides` → without a
+        // hint, counterpart picks the first declared provides (wrong). Record
+        // the hint here so it's in the map regardless of what expand decides.
+        record_target_hint(idx, aur, t, bare, &mut out.counterpart_hints);
+
+        // An explicit pick (`t.pin`) overrides classification — the row already
+        // disambiguated the source.
         let decision = match t.pin {
             // Repo pick: keep it on the pacman lane, never rewrite to an AUR
             // pkgbase. Pacman precedence + the resolver's foreign-gate route
             // it; a same-named AUR entry can't hijack the choice.
             Some(SourcePin::Repo) => TargetDecision::passthrough(t.spec.clone()),
-            // No pick where pacman owns the name: pacman wins the shared name.
-            None if pac.owns_name(bare) => decide_pacman_wins(idx, by, t, bare),
-            // AUR pick, or an un-owned name: walk the AUR chain. For an AUR pick
-            // this deliberately ignores pacman ownership; the pin travels on the
-            // expanded target (below), so the resolver keeps it AUR against
-            // pacman precedence. If the name has left the index (drift) the
-            // chain passes through and the resolver reclassifies.
-            Some(SourcePin::Aur) | None => decide_aur_chain(idx, by, t, bare, select)?,
+            // No pick where pacman owns the name: pacman wins the shared name
+            // (but still record a split selection when the AUR ships it too).
+            None if pac.owns_name(bare) => decide_pacman_wins(idx, aur, t, bare),
+            // AUR pick, or an un-owned name: route through the AUR entry. For an
+            // AUR pick this deliberately ignores pacman ownership; the pin
+            // travels on the expanded target (below), so the resolver keeps it
+            // AUR against pacman precedence. No AUR entry (drift) → passthrough,
+            // and the resolver reclassifies.
+            Some(SourcePin::Aur) | None => decide_from_aur(idx, aur, t, bare, select)?,
         };
 
         // The (possibly rewritten) spec carries the input's pin and hint back
@@ -184,26 +188,31 @@ impl TargetDecision {
     }
 }
 
-/// The AUR fallback chain, pkgname → provides → pkgbase, or a passthrough when
-/// the name isn't in the index. This is the resolver's `by_name`/`by_provides`/
-/// `by_pkgbase` order minus the pacman short-circuit — shared by the no-pick
-/// path (after `pac.owns_name` misses) and the explicit AUR pin (which skips
-/// the pacman check entirely).
-fn decide_aur_chain(
+/// Route a target through the AUR entry that claims it — the path
+/// ([`AurVia`]) chooses the rewrite. `None` (the name isn't in the index)
+/// passes through, and the resolver reclassifies. Shared by the no-pick path
+/// (after `pac.owns_name` misses) and the explicit AUR pin.
+fn decide_from_aur(
     idx: &IndexFile,
-    by: &Lookup,
+    aur: Option<&AurHit>,
     t: &Target,
     bare: &str,
     select: &mut PkgnameSelector<'_>,
 ) -> Result<TargetDecision> {
-    Ok(if by.by_name.contains_key(bare) {
-        decide_pkgname(idx, by, t, bare)
-    } else if by.by_provides.contains_key(bare) {
-        decide_virtual(idx, by, bare)
-    } else if by.by_pkgbase.contains_key(bare) {
-        decide_pkgbase(idx, by, bare, select)?
-    } else {
-        TargetDecision::passthrough(t.spec.clone())
+    Ok(match aur {
+        Some(AurHit {
+            entry,
+            via: AurVia::Pkgname,
+        }) => decide_pkgname(idx, *entry, t, bare),
+        Some(AurHit {
+            entry,
+            via: AurVia::Provides(pkgname),
+        }) => decide_virtual(idx, *entry, pkgname, bare),
+        Some(AurHit {
+            entry,
+            via: AurVia::Pkgbase,
+        }) => decide_pkgbase(idx, *entry, select)?,
+        None => TargetDecision::passthrough(t.spec.clone()),
     })
 }
 
@@ -214,16 +223,29 @@ fn decide_aur_chain(
 /// STILL record the selection here. Otherwise `install_stratum`'s `pacman
 /// -U` has no filter and installs every sibling makepkg packaged from the
 /// same PKGBUILD. The bisq-cli regression's twin: that one fired through
-/// the rewrite branch, this one fires through the shortcut.
-fn decide_pacman_wins(idx: &IndexFile, by: &Lookup, t: &Target, bare: &str) -> TargetDecision {
-    let selection = by.by_name.get(bare).and_then(|&entry_idx| {
-        let entry = &idx.entries[entry_idx as usize];
-        (entry.pkgnames.len() > 1).then(|| {
-            let bare_name = PkgName::from(bare);
-            let chosen = chosen_with_sibling_deps(entry, &bare_name);
-            (entry.pkgbase.clone(), chosen)
-        })
-    });
+/// the rewrite branch, this one fires through the shortcut. Only a pkgname
+/// hit ([`AurVia::Pkgname`]) can name a split subset — provides/pkgbase hits
+/// carry no single sibling to filter to.
+fn decide_pacman_wins(
+    idx: &IndexFile,
+    aur: Option<&AurHit>,
+    t: &Target,
+    bare: &str,
+) -> TargetDecision {
+    let selection = match aur {
+        Some(AurHit {
+            entry,
+            via: AurVia::Pkgname,
+        }) => {
+            let entry = idx.entry(*entry);
+            (entry.pkgnames.len() > 1).then(|| {
+                let bare_name = PkgName::from(bare);
+                let chosen = chosen_with_sibling_deps(entry, &bare_name);
+                (entry.pkgbase.clone(), chosen)
+            })
+        }
+        _ => None,
+    };
     TargetDecision {
         spec: t.spec.clone(),
         selection,
@@ -237,9 +259,8 @@ fn decide_pacman_wins(idx: &IndexFile, by: &Lookup, t: &Target, bare: &str) -> T
 /// `.pkg.tar.zst` files makepkg always produces from a split PKGBUILD (the
 /// bisq-cli regression: `-S bisq-cli` installed bisq-daemon + bisq-desktop
 /// too). Hint recorded earlier by `record_target_hint`.
-fn decide_pkgname(idx: &IndexFile, by: &Lookup, t: &Target, bare: &str) -> TargetDecision {
-    let entry_idx = by.by_name[bare] as usize;
-    let entry = &idx.entries[entry_idx];
+fn decide_pkgname(idx: &IndexFile, entry_idx: EntryIdx, t: &Target, bare: &str) -> TargetDecision {
+    let entry = idx.entry(entry_idx);
     if entry.pkgnames.len() == 1 {
         return TargetDecision::passthrough(t.spec.clone());
     }
@@ -268,11 +289,13 @@ fn decide_pkgname(idx: &IndexFile, by: &Lookup, t: &Target, bare: &str) -> Targe
 ///
 /// Selection only when the provides is pkgname-scoped: a pkgbase-level
 /// provides makes every pkgname a provider, leaving no real subset.
-fn decide_virtual(idx: &IndexFile, by: &Lookup, bare: &str) -> TargetDecision {
-    let (entry_idx, pkgname) = by
-        .provider_of(idx, bare)
-        .expect("by_provides hit must have a provider_of resolution");
-    let entry = &idx.entries[entry_idx];
+fn decide_virtual(
+    idx: &IndexFile,
+    entry_idx: EntryIdx,
+    pkgname: &PkgName,
+    bare: &str,
+) -> TargetDecision {
+    let entry = idx.entry(entry_idx);
     debug!(
         pkgbase = %entry.pkgbase,
         virtual_name = bare,
@@ -302,12 +325,10 @@ fn decide_virtual(idx: &IndexFile, by: &Lookup, bare: &str) -> TargetDecision {
 /// ends up recorded is an explicit `Target::hint`.
 fn decide_pkgbase(
     idx: &IndexFile,
-    by: &Lookup,
-    bare: &str,
+    entry_idx: EntryIdx,
     select: &mut PkgnameSelector<'_>,
 ) -> Result<TargetDecision> {
-    let entry_idx = by.by_pkgbase[bare] as usize;
-    let entry = &idx.entries[entry_idx];
+    let entry = idx.entry(entry_idx);
     let pkgnames: Vec<PkgName> = entry.pkgnames.iter().map(|p| p.name.clone()).collect();
     let chosen = select(&entry.pkgbase, &pkgnames)?;
     if chosen.is_empty() {
@@ -368,24 +389,21 @@ fn record_hint(hints: &mut HashMap<PkgBase, PkgName>, pkgbase: &PkgBase, hint: P
 /// spec without an explicit hint yields no derived hint, because the
 /// pkgbase string isn't a counterpart name.
 fn record_target_hint(
-    by: &Lookup,
     idx: &IndexFile,
+    aur: Option<&AurHit>,
     target: &Target,
     bare: &str,
     hints: &mut HashMap<PkgBase, PkgName>,
 ) {
-    let (dest_pkgbase, spec_is_counterpart_name) = if let Some(&entry_idx) = by.by_name.get(bare) {
-        (&idx.entries[entry_idx as usize].pkgbase, true)
-    } else if by.by_provides.contains_key(bare) {
-        let Some((entry_idx, _)) = by.provider_of(idx, bare) else {
-            return;
-        };
-        (&idx.entries[entry_idx].pkgbase, true)
-    } else if let Some(&entry_idx) = by.by_pkgbase.get(bare) {
-        (&idx.entries[entry_idx as usize].pkgbase, false)
-    } else {
+    let Some(aur_hit) = aur else {
         return;
     };
+    // A pkgname or provides hit means the spec names a counterpart pkgname
+    // (record `bare` as the hint when the caller gave none); a bare pkgbase
+    // spec names nothing more specific, so only an explicit `Target::hint`
+    // survives.
+    let dest_pkgbase = &idx.entry(aur_hit.entry).pkgbase;
+    let spec_is_counterpart_name = !matches!(aur_hit.via, AurVia::Pkgbase);
     let hint = target
         .hint
         .clone()

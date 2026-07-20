@@ -1,6 +1,16 @@
-//! Classify a single dep reference into Installed / Repo / AUR / Missing.
+//! Classify a single name against pacman + the AUR index — the resolver's one
+//! classification site.
+//!
+//! [`classify_full`] does the lookups once and reports *both* where pacman
+//! would get the name and which AUR entry (if any) also claims it. Downstream:
+//! [`Source`] (via [`Classification::source`]) is the pacman-precedence plan
+//! bucket the resolver walks; the retained AUR entry lets
+//! [`crate::resolver::pkgbase_expand`] decide a rewrite without re-running the
+//! same `by_name / by_provides / by_pkgbase` ladder. `classify` is the thin
+//! `Source`-only wrapper for the dependency walk.
 
 use crate::index::lookup::Lookup;
+use crate::index::{EntryIdx, IndexFile};
 use crate::names::PkgName;
 use crate::pacman::alpm_db::PacmanIndex;
 
@@ -26,40 +36,118 @@ pub enum Source {
     /// virtual provide we substitute the provider's pkgname, which is what
     /// shows up in the plan and the eventual `pacman -S` argv.
     Repo(PkgName),
-    /// AUR pkgbase at `idx.entries[usize]`.
-    Aur(usize),
+    /// AUR pkgbase — a typed handle into the index (see [`EntryIdx`]).
+    Aur(EntryIdx),
     /// Could not be resolved anywhere.
     Missing,
 }
 
-/// Classify `name` (already stripped of any version constraint).
+/// Where pacman would satisfy a name, if at all — the pacman half of a
+/// [`Classification`], carrying the concrete pkgname pacman would act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PacHit {
+    /// Present in localdb (by name or an installed `provides`).
+    Installed(PkgName),
+    /// Present in a sync repo (by name or a sync `provides`).
+    Repo(PkgName),
+}
+
+/// Which AUR lookup matched a name, plus what each path needs downstream. The
+/// path is retained so expansion picks its rewrite without a second lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AurVia {
+    /// `name` is a pkgname of the entry (`by_name`).
+    Pkgname,
+    /// `name` matched a `provides`; carries the resolved provider pkgname.
+    Provides(PkgName),
+    /// `name` is the entry's pkgbase (`by_pkgbase`).
+    Pkgbase,
+}
+
+/// An AUR entry that claims a name — its index into `idx.entries` plus the
+/// path that matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AurHit {
+    pub entry: EntryIdx,
+    pub via: AurVia,
+}
+
+/// The single classification of a name: where pacman would get it *and* which
+/// AUR entry (if any) also claims it — computed in one lookup pass.
 ///
-/// Pacman precedence: a name resolvable from pacman is never routed through
-/// AUR even if AUR has its own copy — matches yay/paru convention. Inside the
-/// AUR, pkgname beats provides beats pkgbase; the pkgbase fallback lets users
-/// type `-S bisq` for an entry whose pkgname is `bisq-desktop`. With no AUR
-/// data in play `by` is simply *empty* (see `AurIndexData::load`) and every
-/// non-pacman name lands on [`Source::Missing`].
-pub fn classify(by: &Lookup, pac: &PacmanIndex, name: &str) -> Source {
-    if let Some((concrete, installed)) = pac.resolve_concrete(name) {
-        return if installed {
-            Source::Installed(concrete.clone())
+/// Both are retained deliberately. Plan routing follows pacman precedence
+/// ([`Self::source`]); but expansion needs the AUR entry *even when pacman
+/// wins* — a foreign-installed split pkgname whose pkgbase ships siblings still
+/// needs the `-U` install filter (`decide_pacman_wins`). Reporting both here is
+/// what lets the `by_name / by_provides / by_pkgbase` ladder run exactly once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Classification {
+    pub pac: Option<PacHit>,
+    pub aur: Option<AurHit>,
+}
+
+impl Classification {
+    /// The plan bucket under pacman precedence — pacman wins a shared name, and
+    /// the pin / rebuild overrides ([`crate::resolver`]) refine this for direct
+    /// targets. Virtuals already resolved to a concrete pkgname in `pac`.
+    pub fn source(&self) -> Source {
+        match (&self.pac, &self.aur) {
+            (Some(PacHit::Installed(n)), _) => Source::Installed(n.clone()),
+            (Some(PacHit::Repo(n)), _) => Source::Repo(n.clone()),
+            (None, Some(hit)) => Source::Aur(hit.entry),
+            (None, None) => Source::Missing,
+        }
+    }
+}
+
+/// Classify `name` (already stripped of any version constraint) in one pass.
+///
+/// Pacman precedence for *routing* is applied by [`Classification::source`], not
+/// here — this reports every claim on the name. Inside the AUR, pkgname beats
+/// provides beats pkgbase; the pkgbase fallback lets users type `-S bisq` for an
+/// entry whose pkgname is `bisq-desktop`. With no AUR data in play `by` is
+/// simply *empty* (see `AurIndexData::load`), so `aur` is `None`.
+pub fn classify_full(
+    idx: &IndexFile,
+    by: &Lookup,
+    pac: &PacmanIndex,
+    name: &str,
+) -> Classification {
+    let pac_hit = pac.resolve_concrete(name).map(|(concrete, installed)| {
+        if installed {
+            PacHit::Installed(concrete.clone())
         } else {
-            Source::Repo(concrete.clone())
-        };
+            PacHit::Repo(concrete.clone())
+        }
+    });
+    let aur_hit = if let Some(&i) = by.by_name.get(name) {
+        Some(AurHit {
+            entry: EntryIdx::new(i as usize),
+            via: AurVia::Pkgname,
+        })
+    } else if let Some((entry, pkgname)) = by.provider_of(idx, name) {
+        Some(AurHit {
+            entry: EntryIdx::new(entry),
+            via: AurVia::Provides(pkgname.clone()),
+        })
+    } else if let Some(&i) = by.by_pkgbase.get(name) {
+        Some(AurHit {
+            entry: EntryIdx::new(i as usize),
+            via: AurVia::Pkgbase,
+        })
+    } else {
+        None
+    };
+    Classification {
+        pac: pac_hit,
+        aur: aur_hit,
     }
-    if let Some(&i) = by.by_name.get(name) {
-        return Source::Aur(i as usize);
-    }
-    if let Some(providers) = by.by_provides.get(name)
-        && let Some(&i) = providers.first()
-    {
-        return Source::Aur(i as usize);
-    }
-    if let Some(&i) = by.by_pkgbase.get(name) {
-        return Source::Aur(i as usize);
-    }
-    Source::Missing
+}
+
+/// The `Source`-only view for the dependency walk, where a name is genuinely
+/// unclassified and no AUR entry needs to survive.
+pub fn classify(idx: &IndexFile, by: &Lookup, pac: &PacmanIndex, name: &str) -> Source {
+    classify_full(idx, by, pac, name).source()
 }
 
 #[cfg(test)]
@@ -112,17 +200,20 @@ mod tests {
 
     #[test]
     fn installed_wins_everything() {
-        let (_idx, by, pac) = fixture();
-        assert_eq!(classify(&by, &pac, "vim"), Source::Installed("vim".into()));
+        let (idx, by, pac) = fixture();
+        assert_eq!(
+            classify(&idx, &by, &pac, "vim"),
+            Source::Installed("vim".into())
+        );
     }
 
     #[test]
     fn pacman_wins_over_aur() {
         // `firefox` is both in the sync repos *and* provided by `firefox-nightly`
         // in the AUR fixture — pacman must take precedence.
-        let (_idx, by, pac) = fixture();
+        let (idx, by, pac) = fixture();
         assert_eq!(
-            classify(&by, &pac, "firefox"),
+            classify(&idx, &by, &pac, "firefox"),
             Source::Repo("firefox".into())
         );
     }
@@ -132,9 +223,9 @@ mod tests {
         // `java-runtime` is a virtual `provides`; classify must rewrite to
         // the providing pkgname (`jre-openjdk`) so the plan never shows a
         // fake "package".
-        let (_idx, by, pac) = fixture();
+        let (idx, by, pac) = fixture();
         assert_eq!(
-            classify(&by, &pac, "java-runtime"),
+            classify(&idx, &by, &pac, "java-runtime"),
             Source::Repo("jre-openjdk".into())
         );
     }
@@ -152,41 +243,44 @@ mod tests {
             .insert("cargo".into(), vec!["rustup".into()]);
         pac.sync_versions.insert("rustup".into(), "1.27-1".into());
         assert_eq!(
-            classify(&empty_by(), &pac, "cargo"),
+            classify(&IndexFile::empty(), &empty_by(), &pac, "cargo"),
             Source::Installed("rust".into())
         );
     }
 
     #[test]
     fn aur_when_pacman_misses() {
-        let (_idx, by, pac) = fixture();
-        assert!(matches!(classify(&by, &pac, "cower"), Source::Aur(_)));
+        let (idx, by, pac) = fixture();
+        assert!(matches!(classify(&idx, &by, &pac, "cower"), Source::Aur(_)));
     }
 
     #[test]
     fn aur_provides_fallback() {
-        let (_idx, by, pac) = fixture();
-        assert!(matches!(classify(&by, &pac, "paru"), Source::Aur(_)));
+        let (idx, by, pac) = fixture();
+        assert!(matches!(classify(&idx, &by, &pac, "paru"), Source::Aur(_)));
     }
 
     #[test]
     fn missing_without_aur_index() {
         // No AUR data (pure pacman environment): the empty lookup yields
         // Missing for AUR-only names…
-        let (_idx, _by, pac) = fixture();
+        let (idx, _by, pac) = fixture();
         let by = empty_by();
-        assert_eq!(classify(&by, &pac, "cower"), Source::Missing);
+        assert_eq!(classify(&idx, &by, &pac, "cower"), Source::Missing);
         // …but pacman-resolvable names still classify correctly.
         assert_eq!(
-            classify(&by, &pac, "firefox"),
+            classify(&idx, &by, &pac, "firefox"),
             Source::Repo("firefox".into())
         );
-        assert_eq!(classify(&by, &pac, "vim"), Source::Installed("vim".into()));
+        assert_eq!(
+            classify(&idx, &by, &pac, "vim"),
+            Source::Installed("vim".into())
+        );
     }
 
     #[test]
     fn unknown_is_missing() {
-        let (_idx, by, pac) = fixture();
-        assert_eq!(classify(&by, &pac, "nonexistent"), Source::Missing);
+        let (idx, by, pac) = fixture();
+        assert_eq!(classify(&idx, &by, &pac, "nonexistent"), Source::Missing);
     }
 }

@@ -4,6 +4,7 @@ use crate::build::{SourcePin, Target};
 use crate::error::{Error, Result};
 use crate::index::AurIndexData;
 use crate::index::IndexEntry;
+use crate::index::IndexFile;
 use crate::index::lookup::Lookup;
 use crate::names::{PkgBase, PkgName, PkgTarget};
 use crate::pacman::alpm_db::PacmanIndex;
@@ -14,6 +15,7 @@ pub mod classify;
 pub mod pkgbase_expand;
 pub mod topo;
 
+use classify::classify_full;
 pub use classify::{Source, classify};
 pub use pkgbase_expand::{ExpandedTargets, expand_pkgbase_targets};
 
@@ -258,7 +260,7 @@ pub fn resolve_expanded(aur: &AurIndexData, pac: &PacmanIndex, targets: &[Target
         .collect();
     while let Some((target, origin)) = queue.pop() {
         let bare = target.bare();
-        let source = resolve_target_source(by, pac, bare, &origin);
+        let source = resolve_target_source(idx, by, pac, bare, &origin);
         match source {
             Source::Installed(concrete) => {
                 debug!(target = %bare, %concrete, "already satisfied (installed)");
@@ -291,7 +293,7 @@ pub fn resolve_expanded(aur: &AurIndexData, pac: &PacmanIndex, targets: &[Target
                 }
             }
             Source::Aur(entry_idx) => {
-                let entry = &idx.entries[entry_idx];
+                let entry = idx.entry(entry_idx);
                 let pkgbase = entry.pkgbase.clone();
                 // Record direct-ness before the visited-dedup `continue`: the
                 // queue is LIFO, so a pkgbase can be popped as a dep before
@@ -463,13 +465,22 @@ fn resolve_make_edges(
 /// *regardless* of pacman precedence, the one routing the pacman-wins rule
 /// can't express. When the pinned name is no longer in the AUR (the index
 /// resynced away from under the cart), it falls back to normal classification.
-fn resolve_target_source(by: &Lookup, pac: &PacmanIndex, bare: &str, origin: &Origin) -> Source {
+fn resolve_target_source(
+    idx: &IndexFile,
+    by: &Lookup,
+    pac: &PacmanIndex,
+    bare: &str,
+    origin: &Origin,
+) -> Source {
+    // One classification pass. `class.aur` is the AUR entry that claims the
+    // name regardless of pacman ownership — what both overrides key off.
+    let class = classify_full(idx, by, pac, bare);
     if matches!(origin, Origin::Direct(Some(SourcePin::Aur)))
-        && let Some(i) = aur_index_of(by, bare)
+        && let Some(hit) = &class.aur
     {
-        return Source::Aur(i as usize);
+        return Source::Aur(hit.entry);
     }
-    let source = classify(by, pac, bare);
+    let source = class.source();
     if !matches!(origin, Origin::Direct(_)) {
         return source;
     }
@@ -479,19 +490,7 @@ fn resolve_target_source(by: &Lookup, pac: &PacmanIndex, bare: &str, origin: &Or
     if !pac.is_foreign(concrete) {
         return source;
     }
-    aur_index_of(by, bare).map_or(source, |i| Source::Aur(i as usize))
-}
-
-/// The AUR index entry a bare name resolves to, in the classifier's AUR
-/// fallback order (pkgname → provides → pkgbase). `None` when the AUR index
-/// doesn't carry the name at all. Shared by the rebuild override and the
-/// explicit-AUR-pin path so both use one lookup order.
-fn aur_index_of(by: &Lookup, bare: &str) -> Option<u32> {
-    by.by_name
-        .get(bare)
-        .copied()
-        .or_else(|| by.by_provides.get(bare).and_then(|v| v.first().copied()))
-        .or_else(|| by.by_pkgbase.get(bare).copied())
+    class.aur.map_or(source, |hit| Source::Aur(hit.entry))
 }
 
 #[cfg(test)]
