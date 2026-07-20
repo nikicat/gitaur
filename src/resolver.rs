@@ -12,6 +12,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use tracing::{debug, info, instrument};
 
 pub mod classify;
+pub mod conflict;
 pub mod pkgbase_expand;
 pub mod topo;
 

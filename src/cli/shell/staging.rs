@@ -627,6 +627,42 @@ mod tests {
     }
 
     #[test]
+    fn add_rejected_on_a_resolve_error_stages_nothing() {
+        // `stage_plan` failing (a resolver error / declared conflict) rejects the
+        // whole `add` and rolls the cart back — an incoherent cart is impossible.
+        let mut env = env_with(&[("foo", Source::Aur)]);
+        env.stage_error = Some("conflict: foo vs bar".to_owned());
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo"), &mut env);
+        assert!(state.cart.is_empty(), "a rejected add stages nothing");
+        assert!(
+            env.lines
+                .any(|l| l.contains("add rejected") && l.contains("conflict")),
+            "the reject names the reason: {:?}",
+            env.lines
+        );
+    }
+
+    #[test]
+    fn a_rejected_add_preserves_the_already_staged_cart() {
+        // A reject on a *later* add leaves the existing cart (and its resolution)
+        // intact — only the new candidate is refused, not the whole cart.
+        let mut env = env_with(&[("foo", Source::Aur), ("bar", Source::Aur)]);
+        let mut state = State::default();
+        state.dispatch(&command::parse("add foo"), &mut env);
+        assert_eq!(cart_specs(&state), vec!["foo"]);
+        env.stage_error = Some("conflict".to_owned());
+        env.lines.clear();
+        state.dispatch(&command::parse("add bar"), &mut env);
+        assert_eq!(
+            cart_specs(&state),
+            vec!["foo"],
+            "the existing cart survives a rejected add"
+        );
+        assert!(env.lines.contains("add rejected"), "{:?}", env.lines);
+    }
+
+    #[test]
     fn add_unknown_package_is_not_staged() {
         let mut env = FakeEnv::default(); // classifies nothing
         let mut state = State::default();

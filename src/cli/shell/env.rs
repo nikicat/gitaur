@@ -25,7 +25,7 @@ use crate::pacman::alpm_db::{self, PacmanIndex};
 use crate::pacman::invoke::{self, PkgUpgrade, REPO_AUR};
 use crate::pacman::preflight;
 use crate::paths;
-use crate::resolver::Plan;
+use crate::resolver::{Plan, conflict};
 use crate::system;
 use crate::ui::{self, UpgradeSelection};
 use crate::units::ByteSize;
@@ -519,6 +519,32 @@ impl ShellEnv for RealEnv<'_> {
         let blocker_plan = self.resolve_seeded(aur_data, &pac, &blocker_targets, &seed)?;
         let main_plan = self.resolve_seeded(aur_data, &pac, &main_targets, &seed)?;
 
+        // Reject a declared conflict before the cart keeps the plan: a staged AUR
+        // package that would collide with another staged or installed package
+        // (and isn't a transparent `replaces=` swap) fails the `add` here rather
+        // than at `apply`, after the build. `?` propagates the reject.
+        let mut staged_names: HashSet<PkgName> = HashSet::new();
+        let mut declarers: Vec<conflict::Declarer> = Vec::new();
+        plan_conflict_inputs(
+            blocker_plan.as_ref(),
+            aur_data,
+            &mut staged_names,
+            &mut declarers,
+        );
+        plan_conflict_inputs(
+            main_plan.as_ref(),
+            aur_data,
+            &mut staged_names,
+            &mut declarers,
+        );
+        let removing: HashSet<PkgName> = cart.removals().iter().cloned().collect();
+        conflict::check(
+            &declarers,
+            &staged_names,
+            |n| pac.installed.contains_key(n),
+            &removing,
+        )?;
+
         // Sizes/versions from the freshly-synced db (the new versions' real
         // download cost), frozen so `show`/`apply` don't reopen alpm.
         let size_pac = upgrade::synced_pac()?;
@@ -755,6 +781,48 @@ fn merged_selections(resolved: &ResolvedCart) -> HashMap<PkgBase, Vec<PkgName>> 
         );
     }
     out
+}
+
+/// Gather one plan's contributions to the declared-conflict check: the concrete
+/// pkgnames it installs (repo + the selected AUR pkgnames) into `staged`, and an
+/// AUR [`conflict::Declarer`] per installed AUR pkgname carrying its pkgbase's
+/// `conflicts=`/`replaces=`. Only the *selected* pkgnames of a split package are
+/// counted — an unselected sibling isn't installed, so it neither joins the
+/// present set nor declares a conflict.
+fn plan_conflict_inputs(
+    plan: Option<&Plan>,
+    aur_data: &AurIndexData,
+    staged: &mut HashSet<PkgName>,
+    declarers: &mut Vec<conflict::Declarer>,
+) {
+    let Some(plan) = plan else {
+        return;
+    };
+    for name in plan.direct_repo.iter().chain(&plan.transitive_repo) {
+        staged.insert(PkgName::from(name.as_str()));
+    }
+    let by = aur_data.lookup();
+    let idx = aur_data.index();
+    for pb in plan.aur_strata.iter().flatten() {
+        let Some(entry) = by.lookup_pkgbase(idx, pb) else {
+            continue;
+        };
+        // The selected subset for a split target, else every pkgname the pkgbase
+        // produces (the whole-pkgbase default).
+        let selected = plan
+            .pkgname_selections
+            .get(pb)
+            .cloned()
+            .unwrap_or_else(|| entry.pkgnames.iter().map(|p| p.name.clone()).collect());
+        for name in selected {
+            staged.insert(name.clone());
+            declarers.push(conflict::Declarer {
+                name,
+                conflicts: entry.conflicts.clone(),
+                replaces: entry.replaces.clone(),
+            });
+        }
+    }
 }
 
 /// Build the unified change-set table for `show` from the cart's frozen
