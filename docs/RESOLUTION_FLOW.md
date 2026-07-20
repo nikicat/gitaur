@@ -143,6 +143,10 @@ owns it.
 
 ---
 
-An interactive version of this chart (hover any diamond for the detail) is
-generated as a Claude artifact; this doc is the committed, GitHub-rendered
-source of record.
+This doc is the GitHub-rendered source of record. The diagram is also generated
+(from the ```mermaid``` block above, rendered then optimized) as a standalone,
+dark-themed [`resolution-flow.svg`](resolution-flow.svg) you can open directly;
+[`resolution-flow.html`](resolution-flow.html) frames that SVG with the
+hover-detail bubbles — hover any diamond, the resolve engine, or the amber
+action (serve the folder, e.g. `python3 -m http.server`, or view via GitHub
+Pages, so the bubbles can read the embedded SVG).

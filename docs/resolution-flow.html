@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>aurox — resolve-at-add: the cart holds the transaction</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!-- A thin styled frame around resolution-flow.svg (generated from
+     RESOLUTION_FLOW.md by rendering its mermaid diagram, then optimized). The
+     diagram is the separate .svg; this page adds the header/legend and the
+     hover-detail bubbles. Hover reads the embedded SVG's nodes, which needs the
+     page served same-origin (a local `python3 -m http.server`, or GitHub
+     Pages); opened as a bare file:// the diagram still renders, just without the
+     bubbles — the same detail is in RESOLUTION_FLOW.md. -->
+<style>
+  :root{
+    --bg:#0d1017;--panel:#141a22;--line:#26303c;--line-2:#38465a;
+    --ink:#dbe3ee;--muted:#93a1b4;--faint:#6b7889;
+    --amber:#e6a95c;--red:#e5776f;--teal:#5fc7ba;--violet:#9d8cf5;--green:#67c98a;
+    --mono:ui-monospace,"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html{color-scheme:dark;}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.5;}
+  .wrap{max-width:1120px;margin:0 auto;padding:clamp(1.4rem,3.5vw,3rem) clamp(1rem,3vw,2rem) 5rem;}
+  .eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;color:var(--teal);margin:0 0 .8rem;font-weight:600;}
+  h1{font-family:var(--mono);font-weight:650;font-size:clamp(1.35rem,3.2vw,1.95rem);line-height:1.15;letter-spacing:-.01em;margin:0 0 .7rem;text-wrap:balance;}
+  .lede{color:var(--muted);max-width:74ch;margin:0;font-size:1.02rem;}
+  .lede code,.lede b{font-family:var(--mono);}
+  .lede code{font-size:.85em;color:var(--ink);background:#1a212b;padding:.06em .34em;border-radius:4px;}
+  .lede b{color:var(--ink);font-weight:600;}
+  .shift{margin:1.1rem 0 0;padding:.7rem .95rem;background:#10302d33;border:1px solid #2f5b53;border-radius:9px;font-size:.92rem;color:var(--ink);max-width:74ch;}
+  .shift b{font-family:var(--mono);color:var(--teal);}
+  .shift .old{color:var(--faint);text-decoration:line-through;text-decoration-color:#54606f;}
+  .hint{margin:1rem 0 0;font-size:.85rem;color:var(--amber);display:inline-flex;align-items:center;gap:.5rem;font-weight:500;}
+  .hint .ic{width:17px;height:17px;border-radius:50%;border:1px solid var(--amber);color:var(--amber);font-size:.68rem;display:inline-flex;align-items:center;justify-content:center;font-family:var(--mono);}
+  .legend{display:flex;flex-wrap:wrap;gap:.5rem 1.3rem;margin:1.2rem 0 0;font-family:var(--mono);font-size:.74rem;color:var(--muted);}
+  .legend span{display:inline-flex;align-items:center;gap:.5rem;}
+  .sw{width:20px;height:14px;border:1.5px solid var(--c,var(--line-2));display:inline-block;border-radius:3px;}
+  .sw.user{--c:var(--violet);border-radius:9px;}
+  .sw.dec{--c:#6b7d95;transform:skewX(-12deg);border-radius:0;}
+  .sw.eng{--c:var(--teal);}
+  .sw.act{--c:var(--amber);}
+  .sw.done{--c:var(--green);}
+  .sw.stop{--c:var(--red);}
+
+  .board{margin:1.6rem 0 0;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:clamp(.6rem,2vw,1.4rem);}
+  /* The diagram is resolution-flow.svg, embedded so its nodes stay reachable for
+     the hover bubbles. aspect-ratio matches the SVG viewBox so the whole chart
+     shows without an inner scrollbar. */
+  #flow{display:block;width:100%;aspect-ratio:942.37 / 4215.23;border:0;background:var(--bg);}
+
+  #bubble{position:fixed;z-index:50;max-width:390px;background:#0a0d13;border:1px solid var(--line-2);border-radius:11px;padding:.85rem 1rem;box-shadow:0 14px 40px #000b;opacity:0;visibility:hidden;transform:translateY(4px);transition:opacity .12s,transform .12s;pointer-events:none;}
+  #bubble.on{opacity:1;visibility:visible;transform:translateY(0);}
+  #bubble .bt{font-family:var(--mono);font-size:.78rem;color:var(--teal);margin:0 0 .4rem;font-weight:600;}
+  #bubble p{margin:0;font-size:.86rem;color:var(--ink);line-height:1.5;}
+  #bubble p+p{margin-top:.5rem;color:var(--muted);}
+  #bubble .why{color:var(--amber);}
+  #bubble code{font-family:var(--mono);font-size:.82em;color:var(--teal);background:#10302d44;padding:.04em .3em;border-radius:4px;}
+  footer{margin-top:2.4rem;padding-top:1rem;border-top:1px solid var(--line);font-family:var(--mono);font-size:.73rem;color:var(--faint);}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">aurox · the shell resolves at add, not at apply</p>
+    <h1>The cart holds the resolved transaction — apply just runs it.</h1>
+    <p class="lede">
+      The full path from the search box to an installed package: what <b>you</b> type (violet),
+      the <b>decisions</b> aurox makes (diamonds), the <b>resolve engine</b> that now runs at
+      <code>add</code> (teal), the <b>actions</b> <code>apply</code> executes (amber), and every
+      <b>end state</b> — installed (green) or stopped (red).
+    </p>
+    <p class="shift">
+      <b>The shift.</b> The whole cart is resolved &amp; conflict-checked the moment you
+      <code>add</code>, and the plan is <b>frozen into the cart</b>. <code>show</code> renders that
+      frozen plan; <code>apply</code> <span class="old">re-resolves the name</span> executes it with
+      <b>no re-resolution</b>; <code>refresh</code> drops the cart, because the DBs it was resolved
+      against just moved.
+    </p>
+    <p class="hint"><span class="ic">ⓘ</span> hover any diamond, the resolve engine, or the amber action for what it means + the why</p>
+    <div class="legend" aria-hidden="true">
+      <span><i class="sw user"></i> you type it</span>
+      <span><i class="sw dec"></i> decision</span>
+      <span><i class="sw eng"></i> resolve engine</span>
+      <span><i class="sw act"></i> action apply runs</span>
+      <span><i class="sw done"></i> installed</span>
+      <span><i class="sw stop"></i> stopped</span>
+    </div>
+  </header>
+
+  <div class="board">
+    <object id="flow" type="image/svg+xml" data="resolution-flow.svg" aria-label="aurox resolution flow chart"></object>
+  </div>
+
+  <footer>current as of the resolve-at-add refactor · hover a diamond, the resolve engine, or the amber action for detail</footer>
+</div>
+
+<div id="bubble" role="tooltip"></div>
+
+<script>
+  const DESC = {
+    pk:{t:"how did the target enter the cart?",
+      b:["A numbered <code>add 1</code> pins the picked row's source — repo or AUR — because the row already disambiguated it.",
+         "A hand-typed name or glob has no row to speak for it, so it's classified fresh (pacman first, then AUR)."]},
+    R:{t:"resolve — the WHOLE cart, at add",
+      b:["The moment you <code>add</code>, aurox expands + classifies every staged root (the one <code>classify_full</code> engine) and builds the real install plan — strata, deps, repo-upgrade selection, sysupgrade verdict.",
+         "<span class='why'>The cart used to store a name + coarse tag and let <code>apply</code> re-derive it — so the source you picked could change under you. Now the plan is decided once, here.</span>"]},
+    pin2:{t:"the row's pin — an explicit pick",
+      b:["The source the picked row pinned, carried into the resolve.",
+         "<span class='why'>It overrides pacman precedence — the reason picking the <code>extra/webp-pixbuf-loader</code> row installs that, not an unrelated AUR namesake.</span>"]},
+    own:{t:"pacman precedence",
+      b:["Installed locally, or an exact / virtual name in a sync repo.",
+         "<span class='why'>A name pacman can satisfy never routes through the AUR, even if the AUR has its own copy (yay/paru convention).</span>"]},
+    fgn:{t:"the foreign-rebuild gate (is_foreign)",
+      b:["An installed AUR (foreign) package you named directly rebuilds from the AUR — even though pacman &quot;owns&quot; the name.",
+         "<span class='why'>classify can't see versions; this gate is the webp-pixbuf-loader fix — an installed repo package with an AUR namesake stays on the repo lane, a genuinely foreign one rebuilds.</span>"]},
+    ina:{t:"in the AUR index?",
+      b:["Found by pkgname, by a <code>provides</code>, or by pkgbase.",
+         "If it's nowhere — not pacman's, not the AUR's — the target is missing and the whole <code>add</code> is rejected (the cart rolls back)."]},
+    cflict:{t:"the conflict gate",
+      b:["The resolved set is checked for a declared conflict: a staged AUR package that declares <code>conflicts=X</code> on a co-present <code>X</code> (another staged package, or an installed one not being removed) with no matching <code>replaces=X</code>.",
+         "<span class='why'>pacman would refuse this at prepare — after the build. Catching it here means &quot;a cart with conflicting items is impossible.&quot;</span>"]},
+    freeze:{t:"freeze the plan into the cart ✎",
+      b:["The resolved plans (build strata, the partial <code>-Su</code> selection, the sysupgrade verdict, the synced size snapshot) are stored in the cart behind an <code>Rc</code>.",
+         "<span class='why'><code>show</code> renders THIS and <code>apply</code> executes THIS — never re-resolving. undo snapshots it together with the roots.</span>"]},
+    nr:{t:"the approval gate",
+      b:["A sync-repo package auto-approves — pacman owns it. An AUR package carries a PKGBUILD, so aurox makes you read it first.",
+         "<span class='why'>Unless <code>aur_approval = auto</code>, in which case AUR items approve on staging too.</span>"]},
+    shw:{t:"show — render the frozen plan",
+      b:["Reads the stored resolution and prints the change-set table — no I/O, no re-resolve.",
+         "<span class='why'><code>approve</code> / <code>review</code> only flip an approval cell, so they reflect on the next <code>show</code> without re-resolving — the plan didn't change, only the gate.</span>"]},
+    drop:{t:"refresh drops the cart",
+      b:["A <code>refresh</code> re-fetches the mirror + sync DBs, so the frozen plan was resolved against data that just moved. aurox drops the whole cart rather than apply a stale transaction.",
+         "<span class='why'>refresh is the ONLY point the DBs move between <code>add</code> and <code>apply</code> — which is exactly what keeps the frozen plan valid the rest of the time.</span>"]},
+    g:{t:"apply — approval gate",
+      b:["<code>apply</code> refuses to run while any staged AUR item is still unreviewed — you can't build code you haven't looked at."]},
+    syg:{t:"sysupgrade gate — consumption only",
+      b:["The breakage was DETECTED at <code>add</code> (frozen notes + a Clear / NeedsOverride verdict). Here <code>apply</code> only prints the frozen notes and asks the override when unresolved breakage remains.",
+         "<span class='why'>No re-check — the verdict is read from the cart, and a staged AUR rebuild that fixes the break is simply ordered first.</span>"]},
+    ex:{t:"execute the frozen plan",
+      b:["No resolution: install the AUR sysupgrade-blockers first, then the repo upgrade via <code>pacman -Su --dbpath &lt;synced&gt;</code>, then build + <code>pacman -U</code> the main AUR half, then <code>pacman -R</code> the removals.",
+         "<span class='why'><code>-Su --dbpath synced</code> (not a fresh <code>-Sy</code>): apply installs exactly the versions frozen at add — refresh is the only sync point, so what you saw is what runs.</span>"]},
+  };
+
+  const bubble = document.getElementById('bubble');
+  const obj = document.getElementById('flow');
+
+  function show(key, nodeRect){
+    const d = DESC[key]; if(!d) return;
+    bubble.innerHTML = "<p class='bt'>"+d.t+"</p>"+d.b.map(x=>"<p>"+x+"</p>").join("");
+    bubble.classList.add('on');
+    // The node lives inside the embedded SVG document, so its rect is relative to
+    // the <object>'s own viewport — add the object's offset to place the bubble
+    // in this page's coordinates.
+    const o = obj.getBoundingClientRect();
+    const left0 = o.left + nodeRect.left, bottom0 = o.top + nodeRect.bottom, top0v = o.top + nodeRect.top;
+    const bw = Math.min(390, window.innerWidth-24);
+    const left = Math.max(12, Math.min(left0 + nodeRect.width/2 - bw/2, window.innerWidth - bw - 12));
+    let top = bottom0 + 10;
+    if(top + bubble.offsetHeight > window.innerHeight - 12) top = top0v - bubble.offsetHeight - 10;
+    bubble.style.left = left+'px'; bubble.style.top = Math.max(12, top)+'px';
+  }
+  const hide = () => bubble.classList.remove('on');
+
+  function wire(){
+    let doc;
+    try { doc = obj.contentDocument; } catch(e) { doc = null; }
+    if(!doc) return false;                     // cross-origin (bare file://) — diagram shows, no bubbles
+    const nodes = doc.querySelectorAll('g.node');
+    if(!nodes.length) return false;
+    nodes.forEach(g=>{
+      // Tolerate both id shapes mermaid emits: flowchart-<key>-<n> / …-flowchart-<key>.
+      const m = (g.id||'').match(/flowchart-([A-Za-z0-9]+?)(?:-\d+)?$/);
+      const key = m && m[1];
+      if(key && DESC[key]){
+        g.style.cursor = 'help';
+        g.addEventListener('mouseenter', ()=>show(key, g.getBoundingClientRect()));
+        g.addEventListener('mouseleave', hide);
+      }
+    });
+    return true;
+  }
+  // The SVG loads asynchronously in the <object>; retry until its nodes exist.
+  obj.addEventListener('load', () => { let t=0; const iv=setInterval(()=>{ if(wire()||++t>60) clearInterval(iv); }, 100); });
+  window.addEventListener('scroll', hide, true);
+</script>
+</body>
+</html>
