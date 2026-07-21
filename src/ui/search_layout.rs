@@ -163,10 +163,14 @@ fn double_line(rows: &[SearchRow], numbers: RowNumbers, paint: Paint) -> Vec<Vec
 /// spaces between the present segments (pacman's shape). The `№` is the shell's
 /// selector index, floored at three digits to match the single-line grid.
 ///
-/// Baseline color on every row (hashed repo, bold name when installed); the
-/// installed marker is currency-colored (**dim** current, **yellow** behind —
-/// same signal as the single-line installed column, not the `-Ss` bold cyan),
-/// and the freshness tag is band-colored ([`Freshness::tag`](super::Freshness::tag)).
+/// The **identity** segments read bold on every row — a bold headline
+/// independent of install status (hashed-bold repo, [bold name](repo_name), bold
+/// version, and a bold `[installed]` marker). The installed marker keeps its
+/// currency color (**dim** current, **yellow** behind — same signal as the
+/// single-line installed column, not the `-Ss` bold cyan). The freshness tag
+/// alone keeps its band styling ([`Freshness::tag`](super::Freshness::tag)): its
+/// weight *is* the risk signal (loud caution → faded stale), so it is not
+/// flattened to a uniform bold.
 fn headline(i: usize, row: &SearchRow, numbers: RowNumbers, paint: Paint) -> String {
     let prefix = match numbers {
         RowNumbers::Numbered => format!("{:>3}  ", i + 1),
@@ -174,7 +178,12 @@ fn headline(i: usize, row: &SearchRow, numbers: RowNumbers, paint: Paint) -> Str
     };
     let mut segs = vec![repo_name(row, paint)];
     if let Some(v) = row.new_ver.as_ref() {
-        segs.push(v.as_str().to_owned());
+        let v = v.as_str();
+        segs.push(if paint.colored() {
+            style(v.to_owned()).bold().to_string()
+        } else {
+            v.to_owned()
+        });
     }
     if let Some(m) = installed_tag(row, paint) {
         segs.push(m);
@@ -185,34 +194,33 @@ fn headline(i: usize, row: &SearchRow, numbers: RowNumbers, paint: Paint) -> Str
     format!("{prefix}{}", segs.join(" "))
 }
 
-/// `repo/name` for the headline — the repo in its hashed color, the name bold
-/// when installed (it pops) and plain otherwise. The `/` and name join the repo
-/// as one segment so no stray column math is needed.
+/// `repo/name` for the headline — the repo in its hashed (bold) color, the name
+/// **bold on every row** so the first line reads as one bold headline regardless
+/// of install status (pacman's `-Ss` bolds the name unconditionally too;
+/// installed-ness is signalled by the `[installed]` marker, not the name weight).
+/// The `/` and name join the repo as one segment so no stray column math is
+/// needed.
 fn repo_name(row: &SearchRow, paint: Paint) -> String {
     let (repo, name) = (row.repo.as_str(), row.name.as_str());
     if !paint.colored() {
         return format!("{repo}/{name}");
     }
-    let name = if row.install.installed() {
-        style(name.to_owned()).bold().to_string()
-    } else {
-        name.to_owned()
-    };
-    format!("{}/{name}", repo_style(repo))
+    format!("{}/{}", repo_style(repo), style(name.to_owned()).bold())
 }
 
 /// The installed marker for the headline — the shared [`installed_marker_text`]
-/// (`[installed]` / `[installed: X]`), currency-colored: **yellow** when an
-/// upgrade waits ([`SearchRow::upgrade_from`]), **dim** when current (or a newer
-/// local build). [`None`] for a not-installed row.
+/// (`[installed]` / `[installed: X]`), **bold** (it rides the bold headline) and
+/// currency-colored: **yellow** when an upgrade waits
+/// ([`SearchRow::upgrade_from`]), **dim** when current (or a newer local build).
+/// [`None`] for a not-installed row.
 fn installed_tag(row: &SearchRow, paint: Paint) -> Option<String> {
     let text = installed_marker_text(row)?;
     Some(if !paint.colored() {
         text
     } else if row.upgrade_from().is_some() {
-        style(text).yellow().to_string()
+        style(text).yellow().bold().to_string()
     } else {
-        dim(text).to_string()
+        dim(text).bold().to_string()
     })
 }
 
@@ -387,12 +395,37 @@ mod tests {
         };
         let behind = render("18.0.0-1", "18.1.0-1");
         let current = render("18.1.0-1", "18.1.0-1");
+        // Bold (it rides the bold headline) plus the currency color.
         let (yellow_behind, dim_current) = (
-            style("[installed: 18.0.0-1]").yellow().to_string(),
-            dim("[installed]").to_string(),
+            style("[installed: 18.0.0-1]").yellow().bold().to_string(),
+            dim("[installed]").bold().to_string(),
         );
         assert_contains!(behind, yellow_behind.as_str());
         assert_contains!(current, dim_current.as_str());
+    }
+
+    /// The two-line headline's identity segments (name, version) are **bold on
+    /// every row**, including a *not-installed* one — the first line reads bold
+    /// independent of install status (install-ness is carried by the `[installed]`
+    /// marker, not the name weight).
+    #[test]
+    fn double_headline_bold_regardless_of_install() {
+        console::set_colors_enabled(true);
+        let r = row("aur", "not-here", InstallState::NotInstalled, Some("1.2-1"));
+        let line = SearchList {
+            rows: std::slice::from_ref(&r),
+            numbers: RowNumbers::Plain,
+            layout: SearchLayout::Double,
+        }
+        .render(Paint::Colored, Some(Width::cols(100)))
+        .lines()[0]
+            .clone();
+        let (bold_name, bold_ver) = (
+            style("not-here").bold().to_string(),
+            style("1.2-1").bold().to_string(),
+        );
+        assert_contains!(line, bold_name.as_str());
+        assert_contains!(line, bold_ver.as_str());
     }
 
     /// `Auto` renders single-line when the widest row fits the terminal and

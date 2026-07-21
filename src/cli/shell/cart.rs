@@ -10,11 +10,13 @@
 //! need (coarse repo/AUR classification, the PKGBUILD diff, the build+install)
 //! live behind the [`super::ShellEnv`] trait.
 
-use crate::build::Target;
+use super::resolved::ResolvedCart;
+use crate::build::{SourcePin, Target};
 use crate::names::{PkgBase, PkgName, PkgTarget, RepoName};
 use crate::pacman::invoke::{PkgUpgrade, REPO_AUR};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::rc::Rc;
 
 /// Where a staged install came from.
 ///
@@ -35,6 +37,16 @@ impl Source {
         match self {
             Self::Repo => "repo",
             Self::Aur => "aur",
+        }
+    }
+}
+
+impl From<Source> for SourcePin {
+    /// The routing pin an explicit pick of this source carries into apply.
+    fn from(s: Source) -> Self {
+        match s {
+            Source::Repo => Self::Repo,
+            Source::Aur => Self::Aur,
         }
     }
 }
@@ -308,7 +320,9 @@ pub enum ReviewOutcome {
 /// The pending transaction. Built across many commands, run by `apply`.
 ///
 /// `Clone` backs the shell's `undo` stack: each cart-changing command snapshots
-/// the pre-change cart, and `undo` restores the top snapshot.
+/// the pre-change cart, and `undo` restores the top snapshot. The frozen
+/// [`ResolvedCart`] rides *inside* the cart (behind an `Rc`, so the snapshot
+/// clone is cheap) so undo restores the roots and their resolution together.
 #[derive(Default, Clone)]
 pub struct Cart {
     /// Staged installs/upgrades (repo + AUR), each with its approval state.
@@ -319,6 +333,11 @@ pub struct Cart {
     /// build pipeline so it doesn't re-prompt a diff the user already cleared
     /// in the shell (survives discard/re-add and post-failure retries).
     reviewed: HashSet<PkgBase>,
+    /// The whole-cart transaction resolved at the last `add`/`upgrade`/`drop`/…
+    /// — what `show` renders and `apply` executes, with no re-resolution.
+    /// `None` before the first resolve and after a `clear`. Every install-set
+    /// change replaces it (or, on a rejected `add`, leaves it untouched).
+    resolution: Option<Rc<ResolvedCart>>,
 }
 
 impl Cart {
@@ -341,6 +360,21 @@ impl Cart {
     /// suppress repeat diffs.
     pub const fn reviewed(&self) -> &HashSet<PkgBase> {
         &self.reviewed
+    }
+
+    /// The frozen whole-cart resolution, or `None` before the first resolve /
+    /// after a clear. `show` renders it; `apply` executes it. `pub(super)` — it
+    /// hands back the crate-private [`ResolvedCart`], so it stays inside the
+    /// shell module.
+    pub(super) const fn resolution(&self) -> Option<&Rc<ResolvedCart>> {
+        self.resolution.as_ref()
+    }
+
+    /// Replace the frozen resolution — the one write, at the end of every
+    /// install-set change once the new set resolved. `Rc` so the undo snapshot
+    /// (a full cart clone) stays cheap.
+    pub(super) fn set_resolution(&mut self, resolved: Rc<ResolvedCart>) {
+        self.resolution = Some(resolved);
     }
 
     /// Stage one install. Returns `false` (and stages nothing) when the spec is
@@ -430,18 +464,22 @@ impl Cart {
         StageResult::Staged
     }
 
-    /// Empty everything — installs, removals, and the reviewed set.
+    /// Empty everything — installs, removals, the reviewed set, and the frozen
+    /// resolution.
     pub fn clear(&mut self) {
         self.items.clear();
         self.remove.clear();
         self.reviewed.clear();
+        self.resolution = None;
     }
 
     /// Drop the installs + removals after a clean `apply`, but keep the
     /// reviewed set so a later re-`add` of the same pkgbase isn't re-prompted.
+    /// The resolution described the just-applied set, so it goes too.
     pub fn clear_applied(&mut self) {
         self.items.clear();
         self.remove.clear();
+        self.resolution = None;
     }
 
     /// The staged item matching `target`, if any.

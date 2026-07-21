@@ -26,7 +26,7 @@ pub mod srcinfo;
 pub mod update;
 
 pub use info::cmd_info;
-pub use schema::{IndexEntry, IndexFile};
+pub use schema::{EntryIdx, IndexEntry, IndexFile};
 
 /// Magic prefix of the plain-bytes header written ahead of the rkyv archive.
 const HEADER_MAGIC: &[u8; 8] = b"AUROXIDX";

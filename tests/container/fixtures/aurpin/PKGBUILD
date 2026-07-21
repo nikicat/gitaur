@@ -1,0 +1,15 @@
+# AUR fixture whose pkgbase collides by name with the official sync package
+# `aurpin` (built from the `aurpin-repo` fixture). A search for `aurpin` shows
+# BOTH rows — sync `aurpin` 1.0 and this AUR `aurpin` 9.0 — so picking the AUR
+# row by number exercises the explicit-AUR-pin path: apply must build THIS one
+# (9.0) even though pacman owns the name. The distinct version is the tell.
+pkgname=aurpin
+pkgver=9.0
+pkgrel=1
+pkgdesc='aurox test fixture: AUR namesake of the sync package aurpin'
+arch=('any')
+license=('MIT')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/aur-marker"
+}

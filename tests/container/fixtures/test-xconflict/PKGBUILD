@@ -1,0 +1,16 @@
+# AUR fixture: the base package a `-bin` sibling declares `conflicts=` against.
+# Paired with `test-xconflict-bin` to exercise the add-time declared-conflict
+# reject in the shell (extended/41): staging both must fail the whole-cart
+# resolve up front, not pacman's prepare at apply. repo=aur (the default, no
+# `repo` file) — the declaring side of a conflict must be an AUR package.
+pkgname=test-xconflict
+pkgver=1.0
+pkgrel=1
+pkgdesc='aurox test fixture: base pkg for the add-time conflict reject'
+url='https://example.org/test-xconflict'
+arch=('any')
+license=('MIT')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

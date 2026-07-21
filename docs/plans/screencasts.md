@@ -149,8 +149,10 @@ but the diff *view* above needs no such determinism.
 
 ## Demo set (each 15–30 s, 100 cols) — all recorded
 
-1. **Hero** (top of README): `aurox hello` — banner, seeded search, stage,
-   review-gate refusal → approve, apply with streaming build and sudo gate.
+1. **Hero** (top of README): bare `aurox` — the ox splash greets — then a typed
+   `search hello`, stage, review-gate refusal → approve, apply with streaming
+   build and sudo gate. (The splash is the bare launch's alone; a seeded `aurox
+   hello` skips it, so the hero opens bare to show the ox, then searches.)
 2. **cli-install**: `aurox -S test-hello` typed in a demo bash
    (`Pty::spawn_demo_shell`) — PKGBUILD review view, streaming build,
    `Continue?` elevation gate.

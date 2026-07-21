@@ -18,6 +18,12 @@ default:
 test:
     cargo test --all-features --locked
 
+# Build the release binary and install it to ~/.local/bin/aurox (usually on PATH).
+install-local:
+    cargo build --release --locked
+    install -Dm755 target/release/aurox ~/.local/bin/aurox
+    @echo 'installed → ~/.local/bin/aurox (ensure ~/.local/bin is on your PATH)'
+
 # Cut a release: bump the version on a branch, open a PR, wait for its CI,
 # and merge — the merge to main IS the release (release.yml tags the merge
 # commit, creates the GitHub release, test-builds the PKGBUILD, and publishes

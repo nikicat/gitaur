@@ -22,7 +22,7 @@ use aurox::index::build::full_build;
 use aurox::mirror::MirrorRepo;
 use aurox::names::{PkgBase, PkgName, PkgTargetSetExt};
 use aurox::pacman::alpm_db::PacmanIndex;
-use aurox::resolver::{expand_pkgbase_targets, resolve};
+use aurox::resolver::{ExpandedTargets, expand_pkgbase_targets, resolve_expanded};
 use aurox::testing::git;
 use std::path::Path;
 use tempfile::TempDir;
@@ -32,6 +32,16 @@ use tempfile::TempDir;
 /// derive any hint from the spec itself.
 fn ts(specs: &[&str]) -> Vec<Target> {
     specs.iter().copied().map(Target::bare).collect()
+}
+
+/// The expanded specs as owned strings — these tests assert on the rewritten
+/// spec list; the per-target `SourcePin` (always `None` for `-S` argv) rides
+/// alongside and isn't what they check.
+fn specs(r: &ExpandedTargets) -> Vec<String> {
+    r.targets
+        .iter()
+        .map(|t| t.spec.as_str().to_owned())
+        .collect()
 }
 
 /// Build a bare repo with one branch per (pkgbase, .SRCINFO content) tuple.
@@ -89,7 +99,7 @@ fn pkgbase_only_target_expands_with_pkgbase_target_and_direct_pkgnames() {
         "selector must run even for single-pkgname pkgbase so callers can log/notice it",
     );
     assert_eq!(
-        expanded.targets,
+        specs(&expanded),
         vec!["bisq".to_owned()],
         "resolver target is the pkgbase (avoids by_name aliasing)",
     );
@@ -106,7 +116,7 @@ fn pkgbase_only_target_expands_with_pkgbase_target_and_direct_pkgnames() {
     // End-to-end: resolver accepts the pkgbase, plan has one stratum, and
     // the caller-side direct_pkgnames merge lets install_stratum recognise
     // bisq-desktop as Explicit.
-    let mut plan = resolve(&aur, &pac, &expanded.targets).unwrap();
+    let mut plan = resolve_expanded(&aur, &pac, &expanded.targets).unwrap();
     plan.direct_targets
         .extend(expanded.direct_pkgnames.into_iter().map(Into::into));
     assert_eq!(plan.aur_strata, vec![vec![PkgBase::from("bisq")]]);
@@ -150,7 +160,7 @@ fn split_pkgbase_partial_selection_constrains_build_pipeline() {
         expand_pkgbase_targets(&aur, &pac, &ts(&["linux-headers-multi"]), &mut select).unwrap();
 
     assert_eq!(
-        expanded.targets,
+        specs(&expanded),
         vec!["linux-headers-multi".to_owned()],
         "pkgbase string is what the resolver sees",
     );
@@ -172,7 +182,7 @@ fn split_pkgbase_partial_selection_constrains_build_pipeline() {
         "partial selection must be recorded so the install filter can apply it",
     );
 
-    let mut plan = resolve(&aur, &pac, &expanded.targets).unwrap();
+    let mut plan = resolve_expanded(&aur, &pac, &expanded.targets).unwrap();
     plan.pkgname_selections = expanded.selections;
     plan.direct_targets
         .extend(expanded.direct_pkgnames.into_iter().map(Into::into));
@@ -235,7 +245,7 @@ fn provides_target_rewrites_to_providing_pkgname_with_selection() {
         "provides hit must rewrite via provider_of, not delegate to the selector",
     );
     assert_eq!(
-        expanded.targets,
+        specs(&expanded),
         vec!["bisq".to_owned()],
         "resolver target is the pkgbase; `by_pkgbase` pins to the right entry",
     );
@@ -250,7 +260,7 @@ fn provides_target_rewrites_to_providing_pkgname_with_selection() {
         "scoped provides records a one-pkgname install-filter constraint",
     );
 
-    let mut plan = resolve(&aur, &pac, &expanded.targets).unwrap();
+    let mut plan = resolve_expanded(&aur, &pac, &expanded.targets).unwrap();
     plan.pkgname_selections = expanded.selections;
     plan.direct_targets
         .extend(expanded.direct_pkgnames.into_iter().map(Into::into));
@@ -323,7 +333,7 @@ fn pkgname_collision_with_another_pkgbase_does_not_leak_into_plan() {
         expand_pkgbase_targets(&aur, &pac, &ts(&["commit-mono-font"]), &mut select).unwrap();
 
     assert_eq!(
-        expanded.targets,
+        specs(&expanded),
         vec!["commit-mono-font".to_owned()],
         "must pass the pkgbase string; pkgnames would alias to the wrong entry via by_name",
     );
@@ -335,7 +345,7 @@ fn pkgname_collision_with_another_pkgbase_does_not_leak_into_plan() {
         ],
     );
 
-    let mut plan = resolve(&aur, &pac, &expanded.targets).unwrap();
+    let mut plan = resolve_expanded(&aur, &pac, &expanded.targets).unwrap();
     plan.direct_targets
         .extend(expanded.direct_pkgnames.into_iter().map(Into::into));
 
@@ -383,6 +393,6 @@ fn pkgname_target_skips_selector_even_when_pkgbase_could_match() {
         Ok(n.to_vec())
     };
     let expanded = expand_pkgbase_targets(&aur, &pac, &ts(&["cower"]), &mut select).unwrap();
-    assert_eq!(expanded.targets, vec!["cower".to_owned()]);
+    assert_eq!(specs(&expanded), vec!["cower".to_owned()]);
     assert_eq!(calls, 0, "selector must not run on pkgname hits");
 }

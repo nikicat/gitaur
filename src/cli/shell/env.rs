@@ -1,11 +1,14 @@
 //! The production [`ShellEnv`]: real I/O against the mirror, index, alpm, and
-//! the build pipeline, plus the per-session name caches and the cached
-//! transaction view that `show` and `apply` share.
+//! the build pipeline, plus the per-session name caches. The staged
+//! transaction is resolved once at `add` ([`RealEnv::stage_plan`]) and frozen
+//! in the cart; `show` renders that frozen plan and `apply` executes it, with
+//! no re-resolution here.
 
 use super::cart::{
     ApplyOutcome, ApplyRun, Approval, AurApproval, Cart, CartItem, ReviewOutcome, Source,
     StageClass,
 };
+use super::resolved::{FrozenPreflight, PreflightGate, ResolvedCart};
 use super::upgrade;
 use super::{ListItem, ShellEnv, State};
 use crate::build::reviews::ReviewStore;
@@ -22,7 +25,7 @@ use crate::pacman::alpm_db::{self, PacmanIndex};
 use crate::pacman::invoke::{self, PkgUpgrade, REPO_AUR};
 use crate::pacman::preflight;
 use crate::paths;
-use crate::resolver::Plan;
+use crate::resolver::{Plan, conflict};
 use crate::system;
 use crate::ui::{self, UpgradeSelection};
 use crate::units::ByteSize;
@@ -103,67 +106,6 @@ pub(super) struct RealEnv {
     /// hints). Never drives data flow.
     pub(super) aur_state: index::AurState,
     pub(super) caches: NameCaches,
-    /// Cached resolution of the cart's package set for `show` — see
-    /// [`CachedTxn`]. `None` until the first render, after a reload, or after an
-    /// `apply` (which may have changed the installed set).
-    pub(super) view: Option<CachedTxn>,
-}
-
-/// The expensive, package-set-dependent half of the `show` transaction view:
-/// the synced-db size snapshot, the pulled-in dependency rows, and the
-/// build-time overlay. Built by [`RealEnv::resolve_view`] and cached so repeated
-/// `show`s and the post-mutation cart reprint don't redo the resolver + the two
-/// alpm opens + the metrics-store read.
-///
-/// The resolved [`Plan`] itself isn't kept — the render only needs the dep rows
-/// and overlay derived from it, and `apply` resolves its own live plan against
-/// the system db. The approval-bearing root rows aren't stored either: they're
-/// re-derived per render from the live cart, so `approve`/`review` show up on
-/// the next `show` without a re-resolve (only the approval cell changed, not the
-/// resolution).
-struct ResolvedTxn {
-    size_pac: PacmanIndex,
-    repo_deps: Vec<PkgName>,
-    aur_deps: Vec<PkgBase>,
-    metrics: ui::PreviewMetrics,
-    /// Sysupgrade preflight notes for the staged repo-upgrade lane (empty when
-    /// none is staged or the check couldn't run) — rendered under the table so
-    /// "this upgrade will break X" shows on the screen the user curates the
-    /// cart from, not first at `apply`.
-    preflight: Vec<upgrade::PreflightNote>,
-}
-
-/// A [`ResolvedTxn`] tagged with the cart package set it was resolved for, so
-/// [`RealEnv::render_cart`] reuses it while that set is unchanged and discards it
-/// the moment `add`/`drop`/`remove`/`clear` (or a reload) moves the set.
-pub(super) struct CachedTxn {
-    key: TxnKey,
-    resolved: ResolvedTxn,
-}
-
-/// Identity of a cart's *resolution-relevant* state: the staged install targets
-/// plus the removal names. Approval is excluded — it doesn't change what
-/// resolves, only the rendered cell — so `approve`/`review` are a cache hit. Two
-/// carts with equal keys resolve identically against unchanged mirror/db data,
-/// which is why [`RealEnv::reload`] also clears the cache when that data may have
-/// moved.
-#[derive(PartialEq, Eq)]
-struct TxnKey {
-    installs: Vec<PkgTarget>,
-    removals: Vec<PkgName>,
-}
-
-impl TxnKey {
-    fn of(cart: &Cart) -> Self {
-        // The cart keeps `items` sorted (phase 5b), but normalise defensively so
-        // the key is order-independent however it was assembled.
-        let mut installs: Vec<PkgTarget> =
-            cart.items().iter().map(|it| it.spec().clone()).collect();
-        installs.sort_unstable();
-        let mut removals: Vec<PkgName> = cart.removals().to_vec();
-        removals.sort_unstable();
-        Self { installs, removals }
-    }
 }
 
 impl ShellEnv for RealEnv {
@@ -392,95 +334,80 @@ impl ShellEnv for RealEnv {
     }
 
     fn render_cart(&mut self, cart: &Cart) {
-        // Render the unified change-set table from the cached resolution (roots
-        // + pulled-in deps + removals + cost), re-resolving only when the cart's
-        // package set moved. `show` must never error out, so a resolve failure
-        // degrades to the flat staged rows plus a note (UPDATE_LOOP goal #5
-        // landing behind `show`).
-        match self.transaction_view(cart) {
-            Ok(table) => {
-                self.print_table(&table);
-                // The sysupgrade preflight verdict for the staged repo lane —
-                // "upgrading X breaks Y" plus the shell-native way out —
-                // belongs on this same screen, ahead of any `apply`.
-                if let Some(view) = &self.view {
-                    for note in &view.resolved.preflight {
-                        upgrade::print_preflight_note(note);
-                    }
-                }
-            }
-            Err(e) => {
-                debug!(error = %e, "show preview resolve failed; flat fallback");
-                self.print_table(&flat_cart_lines(cart, &e));
-            }
+        // Render the unified change-set table straight from the cart's frozen
+        // resolution (roots + pulled-in deps + removals + cost) — no resolve
+        // here; the plan was frozen at `add`. A non-empty cart always carries a
+        // resolution (every install-set change re-resolves or rejects), so the
+        // `None` arm is just defensive: fall back to the flat staged rows.
+        let Some(resolved) = cart.resolution() else {
+            self.print_table(&flat_cart_lines(cart, &Error::other("cart not resolved")));
+            return;
+        };
+        let table = resolved_table(cart, &self.aur_data, resolved);
+        self.print_table(&table);
+        // The sysupgrade preflight verdict for the staged repo lane — "upgrading
+        // X breaks Y" plus the shell-native way out — belongs on this same
+        // screen, ahead of any `apply`.
+        for note in &resolved.preflight.notes {
+            upgrade::print_preflight_note(note);
         }
     }
 
     fn apply(&mut self, cart: &Cart) -> Result<ApplyRun> {
-        // The build/install (and any removals) may change the installed set, so
-        // the cached resolution is stale once apply runs whatever its outcome;
-        // drop it so the next `show` re-resolves against the new system state.
-        self.view = None;
-        // The run's review scratch: seeded from the cart, extended by any
-        // PKGBUILD reviewed mid-run (pulled-in AUR deps), and carried back to
-        // the dispatch core in the ApplyRun — on every outcome, so those
+        // Execute the transaction frozen at `add`/`upgrade` — **no resolution
+        // here**. The run's review scratch: seeded from the cart, extended by
+        // any PKGBUILD reviewed mid-run (pulled-in AUR deps), and carried back
+        // to the dispatch core in the ApplyRun — on every outcome, so those
         // approvals survive a failed run's retry.
         let mut reviewed = cart.reviewed().clone();
         let aur_data = &self.aur_data;
         let pac = upgrade::system_pac()?;
-
-        // Preflight the repo-upgrade lane before anything is asked of the user:
-        // re-sync the rootless db (the drift guard — the check should see what
-        // `pacman -Syu`'s own `-Sy` is about to fetch), recompute the
-        // partial-upgrade selection against it, and simulate the `-Su`. Failing
-        // that check ends the apply here — before the cost summary and the
-        // sudo prompt.
-        if !cart.repo_upgrades().is_empty() {
-            upgrade::resync_repo_dbs(self.cfg());
-        }
-        let repo_sel = self.repo_upgrade_selection(aur_data, cart)?;
-        let blockers = if repo_sel.repo.is_empty() {
-            Vec::new()
-        } else {
-            match sysupgrade_gate(aur_data, cart, &repo_sel)? {
-                Some(blockers) => blockers,
-                None => {
-                    return Ok(ApplyRun {
-                        outcome: ApplyOutcome::Declined,
-                        reviewed,
-                    });
-                }
-            }
+        // A non-empty, all-approved cart always carries a resolution (every
+        // install-set change re-resolved or rejected).
+        let Some(resolved) = cart.resolution() else {
+            return Err(Error::other(
+                "nothing resolved — re-`add` to rebuild the transaction",
+            ));
         };
+        let blocker_plan = resolved.blocker_plan.as_ref();
+        let main_plan = resolved.main_plan.as_ref();
+        let repo_sel = &resolved.repo_sel;
 
-        // Resolve the build/install half (AUR + fresh installs); repo *upgrades*
-        // take the partial `-Syu` lane below, so they're excluded from the plan.
-        // Sysupgrade blockers — staged rebuilds whose install is what unblocks
-        // that lane — resolve as their own plan so they can run first.
-        let (blocker_targets, main_targets): (Vec<build::Target>, Vec<build::Target>) = cart
-            .install_targets()
-            .into_iter()
-            .partition(|t| blockers.iter().any(|b| b == t.spec.as_str()));
-        let blocker_plan = self.resolve_plan(aur_data, &pac, &blocker_targets)?;
-        let main_plan = self.resolve_plan(aur_data, &pac, &main_targets)?;
+        // Sysupgrade gate — **consumption only**: the breakage was detected at
+        // `add` (frozen notes + the blocker/blocking split). When unresolved
+        // breakage remains, print the notes for context and ask the override —
+        // the synced snapshot is advisory, so walking away must mean no. (The
+        // notes for a *resolved* breakage already showed at `show`.)
+        if resolved.preflight.gate == PreflightGate::NeedsOverride {
+            for note in &resolved.preflight.notes {
+                upgrade::print_preflight_note(note);
+            }
+            if !ui::confirm_default_no("Repo upgrade expected to fail — run pacman anyway?")
+                .map_err(|e| Error::other(format!("confirm: {e}")))?
+            {
+                return Ok(ApplyRun {
+                    outcome: ApplyOutcome::Declined,
+                    reviewed,
+                });
+            }
+        }
 
         // No table redraw — `show` is where the user looked. No confirm either:
         // the typed `apply` after the approval gate *is* the informed consent
         // (consent at a decision point — don't double-prompt an explicit
         // command). The one-line cost summary prints as a receipt of what the
         // run is about to do.
-        let size_pac = upgrade::synced_pac()?;
-        let roots = txn_roots(cart, aur_data, &size_pac);
-        let (repo_deps, aur_deps) = merged_dep_rows(main_plan.as_ref(), blocker_plan.as_ref());
+        let roots = txn_roots(cart, aur_data, &resolved.size_pac);
+        let (repo_deps, aur_deps) = merged_dep_rows(main_plan, blocker_plan);
         let removals: Vec<PkgName> = cart.removals().to_vec();
-        let metrics = upgrade::preview_metrics(aur_data, &roots, main_plan.as_ref());
+        let metrics = upgrade::preview_metrics(aur_data, &roots, main_plan);
         ui::info(
             &ui::ChangeSet {
                 roots: &roots,
                 repo_deps: &repo_deps,
                 aur_deps: &aur_deps,
                 removals: &removals,
-                pac: &size_pac,
+                pac: &resolved.size_pac,
                 metrics: &metrics,
             }
             .summary(),
@@ -501,7 +428,7 @@ impl ShellEnv for RealEnv {
         // lane (the rebuilt packages no longer carry the dependency the
         // sysupgrade would break).
         let mut report = build::RunReport::default();
-        if let Some(plan) = &blocker_plan {
+        if let Some(plan) = blocker_plan {
             report = ctx.apply_plan(plan, opts, &mut reviewed)?;
             if !report.all_landed() {
                 // The blocker didn't land, so the repo lane would fail exactly
@@ -515,15 +442,15 @@ impl ShellEnv for RealEnv {
         }
 
         // Repo upgrades next (before the main AUR builds, so those link against
-        // the upgraded libs), via a partial `pacman -Syu` that ignores every
-        // repo candidate the user didn't stage.
+        // the upgraded libs), via a partial `pacman -Su` against the rootless
+        // synced db that ignores every repo candidate the user didn't stage.
         if !repo_sel.repo.is_empty() {
-            dispatch::run_repo_upgrade(self.cfg(), &repo_sel)?;
+            dispatch::run_repo_upgrade(self.cfg(), repo_sel)?;
         }
 
         // Build + install the main AUR (and any fresh-install) half. The
         // explicit `apply` was the consent, so `apply_plan` doesn't re-ask.
-        if let Some(plan) = &main_plan {
+        if let Some(plan) = main_plan {
             let main_report = ctx.apply_plan(plan, opts, &mut reviewed)?;
             report.absorb(main_report);
         }
@@ -563,6 +490,77 @@ impl ShellEnv for RealEnv {
         })
     }
 
+    fn stage_plan(&self, cart: &Cart) -> Result<ResolvedCart> {
+        let aur_data = &self.aur_data;
+        let pac = upgrade::system_pac()?;
+        // Seed the split-package picker from the cart's *existing* resolution
+        // (this add hasn't replaced it yet): an already-resolved split root
+        // returns its stored subset without re-opening its picker. A new split
+        // root has no seed entry and prompts once.
+        let seed = cart
+            .resolution()
+            .map(|r| merged_selections(r))
+            .unwrap_or_default();
+
+        // The repo-upgrade lane + its sysupgrade preflight only matter when repo
+        // upgrades are staged — skip the candidate recompute otherwise.
+        let (repo_sel, preflight) = if cart.repo_upgrades().is_empty() {
+            (UpgradeSelection::default(), FrozenPreflight::default())
+        } else {
+            let sel = self.repo_upgrade_selection(aur_data, cart)?;
+            let pf = frozen_preflight(aur_data, cart, &sel);
+            (sel, pf)
+        };
+
+        // Resolve the build/install half (AUR + fresh installs) as two plans:
+        // sysupgrade blockers — staged rebuilds whose install unblocks the repo
+        // lane — run first, so they resolve separately from the main half. Repo
+        // *upgrades* take the partial `-Su` lane, never the plan.
+        let (blocker_targets, main_targets): (Vec<build::Target>, Vec<build::Target>) = cart
+            .install_targets()
+            .into_iter()
+            .partition(|t| preflight.blockers.iter().any(|b| b == t.spec.as_str()));
+        let blocker_plan = self.resolve_seeded(aur_data, &pac, &blocker_targets, &seed)?;
+        let main_plan = self.resolve_seeded(aur_data, &pac, &main_targets, &seed)?;
+
+        // Reject a declared conflict before the cart keeps the plan: a staged AUR
+        // package that would collide with another staged or installed package
+        // (and isn't a transparent `replaces=` swap) fails the `add` here rather
+        // than at `apply`, after the build. `?` propagates the reject.
+        let mut staged_names: HashSet<PkgName> = HashSet::new();
+        let mut declarers: Vec<conflict::Declarer> = Vec::new();
+        plan_conflict_inputs(
+            blocker_plan.as_ref(),
+            aur_data,
+            &mut staged_names,
+            &mut declarers,
+        );
+        plan_conflict_inputs(
+            main_plan.as_ref(),
+            aur_data,
+            &mut staged_names,
+            &mut declarers,
+        );
+        let removing: HashSet<PkgName> = cart.removals().iter().cloned().collect();
+        conflict::check(
+            &declarers,
+            &staged_names,
+            |n| pac.installed.contains_key(n),
+            &removing,
+        )?;
+
+        // Sizes/versions from the freshly-synced db (the new versions' real
+        // download cost), frozen so `show`/`apply` don't reopen alpm.
+        let size_pac = upgrade::synced_pac()?;
+        Ok(ResolvedCart {
+            blocker_plan,
+            main_plan,
+            repo_sel,
+            preflight,
+            size_pac,
+        })
+    }
+
     fn system_usage(&mut self) -> system::Report {
         system::usage()
     }
@@ -584,6 +582,8 @@ impl ShellEnv for RealEnv {
     }
 
     fn config_show(&mut self, path: Option<&ConfigPath>) -> Result<()> {
+        // Rendering (the colored current/default table) is presentation, so it
+        // stays env-side like `render_cart`; the pure core only routes here.
         let rows = self.config.show(path)?;
         let table = ui::config_table(&rows, ui::Paint::detect());
         self.print_table(&table);
@@ -592,9 +592,7 @@ impl ShellEnv for RealEnv {
 
     fn config_set(&mut self, path: &ConfigPath, value: &[String]) -> Result<String> {
         // One operation: validate, write the file, and re-resolve the view —
-        // subsequent commands (search layout, color, …) read the change through
-        // `self.cfg()` with no cache to invalidate (the `show` resolution cache
-        // is keyed on the cart's package set, not on config).
+        // subsequent commands read the change through `self.cfg()`.
         self.config.set(path, value)
     }
 
@@ -624,119 +622,20 @@ impl RealEnv {
         self.caches = build_universe(&reload.data);
         self.aur_data = reload.data;
         self.aur_state = index::AurState::probe(self.cfg());
-        self.view = None;
         Ok(reload.outcome)
     }
 
-    /// Build the unified change-set table for `show` from the cached resolution,
-    /// re-deriving the approval-bearing root rows from the live cart each call
-    /// (cheap — no I/O). [`ui::transaction_table`] returns an owned [`ui::Table`]
-    /// (it holds no borrow of the cache), so `render_cart` can print it after the
-    /// borrow ends; errors bubble so the caller can fall back to the flat staged
-    /// rows — `show` must never abort.
-    fn transaction_view(&mut self, cart: &Cart) -> Result<ui::Table> {
-        self.ensure_view(cart)?;
-        let aur_data = &self.aur_data;
-        let r = &self
-            .view
-            .as_ref()
-            .expect("ensure_view populated the cache on Ok")
-            .resolved;
-        let roots = txn_roots(cart, aur_data, &r.size_pac);
-        let removals: Vec<PkgName> = cart.removals().to_vec();
-        Ok(ui::ChangeSet {
-            roots: &roots,
-            repo_deps: &r.repo_deps,
-            aur_deps: &r.aur_deps,
-            removals: &removals,
-            pac: &r.size_pac,
-            metrics: &r.metrics,
-        }
-        .table(ui::Paint::detect()))
-    }
-
-    /// Ensure [`Self::view`] holds a resolution valid for `cart`, re-resolving
-    /// only on a package-set change (the [`TxnKey`]) — a reload/apply already
-    /// cleared it. Propagates a resolve error so [`Self::transaction_view`] can
-    /// fall back to flat rows without caching the failure.
-    fn ensure_view(&mut self, cart: &Cart) -> Result<()> {
-        let key = TxnKey::of(cart);
-        if self.view.as_ref().is_some_and(|v| v.key == key) {
-            return Ok(());
-        }
-        let resolved = self.resolve_view(cart)?;
-        self.view = Some(CachedTxn { key, resolved });
-        Ok(())
-    }
-
-    /// Resolve the cart's package set into a [`ResolvedTxn`]: run the dependency
-    /// resolve, then from its plan derive the synced-db size snapshot, the
-    /// pulled-in dep rows, and the build-time overlay (the plan itself isn't
-    /// kept). This is the expensive I/O the cache amortises (`resolve_targets` +
-    /// two alpm opens + the metrics store), recomputed only on a package-set
-    /// change or a reload/apply.
-    fn resolve_view(&self, cart: &Cart) -> Result<ResolvedTxn> {
-        let aur_data = &self.aur_data;
-        let pac = upgrade::system_pac()?;
-        let plan = self.resolve_plan(aur_data, &pac, &cart.install_targets())?;
-        // Sizes from the freshly-synced db (the new versions' real download cost).
-        let size_pac = upgrade::synced_pac()?;
-        let (repo_deps, aur_deps) = upgrade::dep_rows(plan.as_ref());
-        // Roots feed only the (approval-independent) build-time overlay here; the
-        // render re-derives approval-aware roots from the live cart.
-        let roots = txn_roots(cart, aur_data, &size_pac);
-        let metrics = upgrade::preview_metrics(aur_data, &roots, plan.as_ref());
-        let preflight = self.preview_preflight(aur_data, cart);
-        Ok(ResolvedTxn {
-            size_pac,
-            repo_deps,
-            aur_deps,
-            metrics,
-            preflight,
-        })
-    }
-
-    /// The sysupgrade preflight for the `show` preview — no db re-sync (`show`
-    /// must stay instant; the drift guard belongs to `apply`) and no gating,
-    /// just the notes to render under the table. Empty when the cart stages no
-    /// repo upgrades or the check couldn't run (best-effort, like every other
-    /// preflight consumer).
-    fn preview_preflight(
-        &self,
-        aur_data: &AurIndexData,
-        cart: &Cart,
-    ) -> Vec<upgrade::PreflightNote> {
-        if cart.repo_upgrades().is_empty() {
-            return Vec::new();
-        }
-        let sel = match self.repo_upgrade_selection(aur_data, cart) {
-            Ok(sel) => sel,
-            Err(e) => {
-                debug!(error = %e, "preview preflight skipped (upgrade selection failed)");
-                return Vec::new();
-            }
-        };
-        if sel.repo.is_empty() {
-            return Vec::new();
-        }
-        match preflight::sysupgrade(&sel.repo_skipped) {
-            Ok(issues) => upgrade::preflight_notes(issues, aur_data, cart),
-            Err(e) => {
-                debug!(error = %e, "preview preflight skipped (could not run prepare)");
-                Vec::new()
-            }
-        }
-    }
-
-    /// Resolve `targets` (the cart's install/build half, or a phase-subset of
-    /// it) into a [`Plan`] — the AUR rows and fresh installs (repo *upgrades*
-    /// take the `-Syu` lane, so they are never targets here). `None` when the
-    /// subset is empty (a repo-upgrade-only or removal-only cart / phase).
-    fn resolve_plan(
+    /// Resolve `targets` (a phase-subset of the cart's install/build half) into
+    /// a [`Plan`], reusing `seed`'s split-package choices so an already-resolved
+    /// split root doesn't re-prompt. `None` when the subset is empty (a
+    /// repo-upgrade-only or removal-only cart / phase). Repo *upgrades* take the
+    /// `-Su` lane, so they are never targets here.
+    fn resolve_seeded(
         &self,
         aur_data: &AurIndexData,
         pac: &PacmanIndex,
         targets: &[build::Target],
+        seed: &HashMap<PkgBase, Vec<PkgName>>,
     ) -> Result<Option<Plan>> {
         if targets.is_empty() {
             return Ok(None);
@@ -746,10 +645,10 @@ impl RealEnv {
             aur: aur_data,
             pac,
         };
-        Ok(Some(ctx.resolve_targets(targets, false)?))
+        Ok(Some(ctx.resolve_seeded(targets, seed)?))
     }
 
-    /// Turn the staged repo upgrades into the partial-`-Syu` selection: the
+    /// Turn the staged repo upgrades into the partial-`-Su` selection: the
     /// staged ones are upgraded; every other current repo candidate is
     /// `--ignore`d. Recomputes the candidate set so a stale cart can't pin the
     /// wrong packages.
@@ -844,56 +743,138 @@ fn landed_install_specs(
         .collect()
 }
 
-/// Run the read-only sysupgrade preflight for the staged repo lane and gate on
-/// what it finds — before the cost summary, the transaction confirm, and the
-/// sudo prompt, so a doomed `pacman -Syu` never gets that far.
+/// Run the read-only sysupgrade preflight for the staged repo lane and freeze
+/// its verdict at `add` time: the rendered notes plus the blocker/blocking
+/// split. **No printing and no prompt** — `show` prints the notes under the
+/// table, and `apply` prints them again and asks the override only when
+/// unresolved breakage remains ([`FrozenPreflight::blocking`]).
 ///
-/// `Ok(Some(blockers))` means proceed: `blockers` are the staged AUR rebuilds
-/// that resolve flagged breakage and must install ahead of the repo lane.
-/// `Ok(None)` means the user declined at the override prompt.
-fn sysupgrade_gate(
+/// Best-effort, like every preflight consumer: if the machinery itself can't
+/// run, pacman remains the authority and the verdict is empty (no breakage
+/// claimed).
+fn frozen_preflight(
     aur_data: &AurIndexData,
     cart: &Cart,
     sel: &UpgradeSelection,
-) -> Result<Option<Vec<PkgName>>> {
+) -> FrozenPreflight {
+    if sel.repo.is_empty() {
+        return FrozenPreflight::default();
+    }
     let issues = match preflight::sysupgrade(&sel.repo_skipped) {
         Ok(issues) => issues,
-        // Best-effort: if the preflight machinery itself can't run, pacman
-        // remains the authority — proceed exactly as before it existed.
         Err(e) => {
             debug!(error = %e, "sysupgrade preflight skipped (could not run prepare)");
-            return Ok(Some(Vec::new()));
+            return FrozenPreflight::default();
         }
     };
     if issues.is_empty() {
-        return Ok(Some(Vec::new()));
+        return FrozenPreflight::default();
     }
-    // The same structured events the passthrough lane logs, then the
-    // human-facing notes with remediation.
+    // The same structured events the passthrough lane logs, emitted once here
+    // (at resolve), then the human-facing notes with remediation.
     preflight::log_issues(&issues);
     let notes = upgrade::preflight_notes(issues, aur_data, cart);
     let mut blockers = Vec::new();
-    let mut blocking = false;
+    let mut gate = PreflightGate::Clear;
     for note in &notes {
-        upgrade::print_preflight_note(note);
         match &note.remedy {
             upgrade::Remedy::StagedRebuild { target } => blockers.push(target.clone()),
-            _ => blocking = true,
+            _ => gate = PreflightGate::NeedsOverride,
         }
     }
-    if !blocking {
-        return Ok(Some(blockers));
+    FrozenPreflight {
+        notes,
+        blockers,
+        gate,
     }
-    // Advisory, not authoritative: the synced snapshot can trail the mirror
-    // pacman is about to fetch from, so offer the override — but walking away
-    // must mean no.
-    if ui::confirm_default_no("Repo upgrade expected to fail — run pacman anyway?")
-        .map_err(|e| Error::other(format!("confirm: {e}")))?
+}
+
+/// The split-package selections to seed the picker with when re-resolving the
+/// whole cart: the union of the prior resolution's plans' `pkgname_selections`,
+/// so an already-resolved split root returns its stored subset without
+/// re-prompting. The main plan wins a shared pkgbase (blocker/main are disjoint
+/// in practice, so the tie never bites).
+fn merged_selections(resolved: &ResolvedCart) -> HashMap<PkgBase, Vec<PkgName>> {
+    let mut out: HashMap<PkgBase, Vec<PkgName>> = HashMap::new();
+    // Blocker first, then main — so `extend`'s last-wins leaves the main plan's
+    // choice for any pkgbase in both (in practice the two are disjoint, so the
+    // tie never bites). `extend` rather than a `for` over the maps keeps the
+    // merge order-insensitive.
+    for plan in [resolved.blocker_plan.as_ref(), resolved.main_plan.as_ref()]
+        .into_iter()
+        .flatten()
     {
-        Ok(Some(blockers))
-    } else {
-        Ok(None)
+        out.extend(
+            plan.pkgname_selections
+                .iter()
+                .map(|(pb, sel)| (pb.clone(), sel.clone())),
+        );
     }
+    out
+}
+
+/// Gather one plan's contributions to the declared-conflict check: the concrete
+/// pkgnames it installs (repo + the selected AUR pkgnames) into `staged`, and an
+/// AUR [`conflict::Declarer`] per installed AUR pkgname carrying its pkgbase's
+/// `conflicts=`/`replaces=`. Only the *selected* pkgnames of a split package are
+/// counted — an unselected sibling isn't installed, so it neither joins the
+/// present set nor declares a conflict.
+fn plan_conflict_inputs(
+    plan: Option<&Plan>,
+    aur_data: &AurIndexData,
+    staged: &mut HashSet<PkgName>,
+    declarers: &mut Vec<conflict::Declarer>,
+) {
+    let Some(plan) = plan else {
+        return;
+    };
+    for name in plan.direct_repo.iter().chain(&plan.transitive_repo) {
+        staged.insert(PkgName::from(name.as_str()));
+    }
+    let by = aur_data.lookup();
+    let idx = aur_data.index();
+    for pb in plan.aur_strata.iter().flatten() {
+        let Some(entry) = by.lookup_pkgbase(idx, pb) else {
+            continue;
+        };
+        // The selected subset for a split target, else every pkgname the pkgbase
+        // produces (the whole-pkgbase default).
+        let selected = plan
+            .pkgname_selections
+            .get(pb)
+            .cloned()
+            .unwrap_or_else(|| entry.pkgnames.iter().map(|p| p.name.clone()).collect());
+        for name in selected {
+            staged.insert(name.clone());
+            declarers.push(conflict::Declarer {
+                name,
+                conflicts: entry.conflicts.clone(),
+                replaces: entry.replaces.clone(),
+            });
+        }
+    }
+}
+
+/// Build the unified change-set table for `show` from the cart's frozen
+/// resolution: the approval-bearing root rows re-derived from the live cart
+/// (cheap — no I/O, so `approve`/`review` reflect on the next `show` without a
+/// re-resolve), the pulled-in dep rows and build overlay derived from the frozen
+/// plans, and the frozen synced snapshot for sizes/versions.
+fn resolved_table(cart: &Cart, aur_data: &AurIndexData, resolved: &ResolvedCart) -> ui::Table {
+    let roots = txn_roots(cart, aur_data, &resolved.size_pac);
+    let (repo_deps, aur_deps) =
+        merged_dep_rows(resolved.main_plan.as_ref(), resolved.blocker_plan.as_ref());
+    let removals: Vec<PkgName> = cart.removals().to_vec();
+    let metrics = upgrade::preview_metrics(aur_data, &roots, resolved.main_plan.as_ref());
+    ui::ChangeSet {
+        roots: &roots,
+        repo_deps: &repo_deps,
+        aur_deps: &aur_deps,
+        removals: &removals,
+        pac: &resolved.size_pac,
+        metrics: &metrics,
+    }
+    .table(ui::Paint::detect())
 }
 
 /// Dep rows for the cost summary when the install half is split into blocker +

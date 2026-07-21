@@ -1,0 +1,17 @@
+# AUR fixture that declares `conflicts=('test-xconflict')` and NO `replaces=`,
+# so it is not a transparent swap. Staging it alongside `test-xconflict` makes
+# the shell's whole-cart resolve REJECT the `add` up front (see extended/41 and
+# `resolver::conflict`) — pacman would only refuse this at prepare, after the
+# build. The declaring side must be AUR (repo=aur, the default — no `repo` file).
+pkgname=test-xconflict-bin
+pkgver=1.0
+pkgrel=1
+pkgdesc='aurox test fixture: AUR pkg that conflicts with test-xconflict'
+url='https://example.org/test-xconflict-bin'
+arch=('any')
+license=('MIT')
+conflicts=('test-xconflict')
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/$pkgname/marker"
+}

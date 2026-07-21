@@ -16,14 +16,14 @@
 //! Targets that already resolve as pkgname / provides / pacman are passed
 //! through unchanged — preserving any version constraint suffix.
 
-use crate::build::Target;
+use super::classify::{AurHit, AurVia, classify_full};
+use crate::build::{SourcePin, Target};
 use crate::error::{Error, Result};
-use crate::index::lookup::Lookup;
 use crate::index::schema::IndexEntry;
-use crate::index::{AurIndexData, IndexFile};
+use crate::index::{AurIndexData, EntryIdx, IndexFile};
 use crate::names::{PkgBase, PkgName, PkgTarget};
 use crate::pacman::alpm_db::PacmanIndex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{debug, instrument};
 
 /// Selector callback: pick the subset of pkgnames to install as explicit.
@@ -44,14 +44,16 @@ pub type PkgnameSelector<'a> = dyn FnMut(&PkgBase, &[PkgName]) -> Result<Vec<Pkg
 /// unique by construction.
 #[derive(Debug, Default)]
 pub struct ExpandedTargets {
-    /// Rewritten target list ready for [`super::resolve`]. May contain the
-    /// pkgbase for rewritten entries; pacman / `by_name` passthroughs keep
+    /// Rewritten target list ready for [`super::resolve_expanded`]. May contain
+    /// the pkgbase for rewritten entries; pacman / `by_name` passthroughs keep
     /// their original form (with any version constraint suffix). The
     /// contents are deliberately mixed — passthroughs can be virtual names,
     /// version-constrained pkgnames, or pacman targets — which is exactly
-    /// [`PkgTarget`]'s charter (anything a user can name), so the mixed bag
-    /// is typed rather than a `Vec<String>`.
-    pub targets: Vec<PkgTarget>,
+    /// [`Target::spec`]'s charter (anything a user can name). Reusing the same
+    /// [`Target`] the resolver already takes means an explicit pick's
+    /// [`SourcePin`] rides straight through expansion to resolution — no side
+    /// set keyed by name.
+    pub targets: Vec<Target>,
     /// pkgbase → user-selected pkgnames, populated only when the user kept a
     /// **proper subset** of a split pkgbase. The build pipeline uses this
     /// for the install-side `pacman -U` filter. Pkgbases absent from the
@@ -110,33 +112,48 @@ pub fn expand_pkgbase_targets(
 
     for t in targets {
         let bare = t.spec.bare();
-        // Hint recording runs *unconditionally* — the rewrite decision
-        // below may short-circuit (pacman wins, passthrough, …), but the
-        // resolver still classifies the spec via `resolve_target_source`
-        // and can land on an AUR pkgbase even when expand did no rewrite.
-        // The dotnet-runtime regression: a foreign virtual that's installed
-        // hits `pac.owns_name` → passes through → resolver routes to
-        // pkgbase via `by_provides` → without a hint, counterpart picks the
-        // first declared provides (wrong). Record the hint here so it's in
-        // the map regardless of what expand decides next.
-        record_target_hint(by, idx, t, bare, &mut out.counterpart_hints);
+        // Classify the name ONCE — the single `by_name / by_provides /
+        // by_pkgbase` ladder. `class.aur` (the AUR entry that claims the name,
+        // if any) then feeds both the hint recorder and the rewrite deciders,
+        // so neither re-walks it.
+        let class = classify_full(idx, by, pac, bare);
+        let aur = class.aur.as_ref();
 
-        // Per-branch deciders return a TargetDecision; no `&mut` flows into
-        // the branches themselves. Order matches the resolver's fallback
-        // chain in `resolve_target_source`.
-        let decision = if pac.owns_name(bare) {
-            decide_pacman_wins(idx, by, t, bare)
-        } else if by.by_name.contains_key(bare) {
-            decide_pkgname(idx, by, t, bare)
-        } else if by.by_provides.contains_key(bare) {
-            decide_virtual(idx, by, bare)
-        } else if by.by_pkgbase.contains_key(bare) {
-            decide_pkgbase(idx, by, bare, select)?
-        } else {
-            TargetDecision::passthrough(t.spec.clone())
+        // Hint recording runs *unconditionally* — the rewrite decision below may
+        // short-circuit (pacman wins, passthrough, …), but the resolver can
+        // still land on an AUR pkgbase even when expand did no rewrite. The
+        // dotnet-runtime regression: a foreign virtual that's installed passes
+        // through → resolver routes to the pkgbase via `by_provides` → without a
+        // hint, counterpart picks the first declared provides (wrong). Record
+        // the hint here so it's in the map regardless of what expand decides.
+        record_target_hint(idx, aur, t, bare, &mut out.counterpart_hints);
+
+        // An explicit pick (`t.pin`) overrides classification — the row already
+        // disambiguated the source.
+        let decision = match t.pin {
+            // Repo pick: keep it on the pacman lane, never rewrite to an AUR
+            // pkgbase. Pacman precedence + the resolver's foreign-gate route
+            // it; a same-named AUR entry can't hijack the choice.
+            Some(SourcePin::Repo) => TargetDecision::passthrough(t.spec.clone()),
+            // No pick where pacman owns the name: pacman wins the shared name
+            // (but still record a split selection when the AUR ships it too).
+            None if pac.owns_name(bare) => decide_pacman_wins(idx, aur, t, bare),
+            // AUR pick, or an un-owned name: route through the AUR entry. For an
+            // AUR pick this deliberately ignores pacman ownership; the pin
+            // travels on the expanded target (below), so the resolver keeps it
+            // AUR against pacman precedence. No AUR entry (drift) → passthrough,
+            // and the resolver reclassifies.
+            Some(SourcePin::Aur) | None => decide_from_aur(idx, aur, t, bare, select)?,
         };
 
-        out.targets.push(decision.spec);
+        // The (possibly rewritten) spec carries the input's pin and hint back
+        // out as a `Target`, so an explicit pick's source rides straight
+        // through to the resolver without re-deriving intent from the name.
+        out.targets.push(Target {
+            spec: decision.spec,
+            hint: t.hint.clone(),
+            pin: t.pin,
+        });
         if let Some((pkgbase, chosen)) = decision.selection {
             extend_selection(&mut out.selections, &pkgbase, &chosen);
         }
@@ -171,6 +188,34 @@ impl TargetDecision {
     }
 }
 
+/// Route a target through the AUR entry that claims it — the path
+/// ([`AurVia`]) chooses the rewrite. `None` (the name isn't in the index)
+/// passes through, and the resolver reclassifies. Shared by the no-pick path
+/// (after `pac.owns_name` misses) and the explicit AUR pin.
+fn decide_from_aur(
+    idx: &IndexFile,
+    aur: Option<&AurHit>,
+    t: &Target,
+    bare: &str,
+    select: &mut PkgnameSelector<'_>,
+) -> Result<TargetDecision> {
+    Ok(match aur {
+        Some(AurHit {
+            entry,
+            via: AurVia::Pkgname,
+        }) => decide_pkgname(idx, *entry, t, bare),
+        Some(AurHit {
+            entry,
+            via: AurVia::Provides(pkgname),
+        }) => decide_virtual(idx, *entry, pkgname, bare),
+        Some(AurHit {
+            entry,
+            via: AurVia::Pkgbase,
+        }) => decide_pkgbase(idx, *entry, select)?,
+        None => TargetDecision::passthrough(t.spec.clone()),
+    })
+}
+
 /// pacman wins outright — never reroute a name pacman can satisfy. BUT:
 /// when `bare` is a pkgname in a multi-pkgname AUR pkgbase (the
 /// foreign-installed split-pkg case, e.g. `-Syu` picks
@@ -178,16 +223,29 @@ impl TargetDecision {
 /// STILL record the selection here. Otherwise `install_stratum`'s `pacman
 /// -U` has no filter and installs every sibling makepkg packaged from the
 /// same PKGBUILD. The bisq-cli regression's twin: that one fired through
-/// the rewrite branch, this one fires through the shortcut.
-fn decide_pacman_wins(idx: &IndexFile, by: &Lookup, t: &Target, bare: &str) -> TargetDecision {
-    let selection = by.by_name.get(bare).and_then(|&entry_idx| {
-        let entry = &idx.entries[entry_idx as usize];
-        (entry.pkgnames.len() > 1).then(|| {
-            let bare_name = PkgName::from(bare);
-            let chosen = chosen_with_sibling_deps(entry, &bare_name);
-            (entry.pkgbase.clone(), chosen)
-        })
-    });
+/// the rewrite branch, this one fires through the shortcut. Only a pkgname
+/// hit ([`AurVia::Pkgname`]) can name a split subset — provides/pkgbase hits
+/// carry no single sibling to filter to.
+fn decide_pacman_wins(
+    idx: &IndexFile,
+    aur: Option<&AurHit>,
+    t: &Target,
+    bare: &str,
+) -> TargetDecision {
+    let selection = match aur {
+        Some(AurHit {
+            entry,
+            via: AurVia::Pkgname,
+        }) => {
+            let entry = idx.entry(*entry);
+            (entry.pkgnames.len() > 1).then(|| {
+                let bare_name = PkgName::from(bare);
+                let chosen = chosen_with_sibling_deps(entry, &bare_name);
+                (entry.pkgbase.clone(), chosen)
+            })
+        }
+        _ => None,
+    };
     TargetDecision {
         spec: t.spec.clone(),
         selection,
@@ -201,9 +259,8 @@ fn decide_pacman_wins(idx: &IndexFile, by: &Lookup, t: &Target, bare: &str) -> T
 /// `.pkg.tar.zst` files makepkg always produces from a split PKGBUILD (the
 /// bisq-cli regression: `-S bisq-cli` installed bisq-daemon + bisq-desktop
 /// too). Hint recorded earlier by `record_target_hint`.
-fn decide_pkgname(idx: &IndexFile, by: &Lookup, t: &Target, bare: &str) -> TargetDecision {
-    let entry_idx = by.by_name[bare] as usize;
-    let entry = &idx.entries[entry_idx];
+fn decide_pkgname(idx: &IndexFile, entry_idx: EntryIdx, t: &Target, bare: &str) -> TargetDecision {
+    let entry = idx.entry(entry_idx);
     if entry.pkgnames.len() == 1 {
         return TargetDecision::passthrough(t.spec.clone());
     }
@@ -232,11 +289,13 @@ fn decide_pkgname(idx: &IndexFile, by: &Lookup, t: &Target, bare: &str) -> Targe
 ///
 /// Selection only when the provides is pkgname-scoped: a pkgbase-level
 /// provides makes every pkgname a provider, leaving no real subset.
-fn decide_virtual(idx: &IndexFile, by: &Lookup, bare: &str) -> TargetDecision {
-    let (entry_idx, pkgname) = by
-        .provider_of(idx, bare)
-        .expect("by_provides hit must have a provider_of resolution");
-    let entry = &idx.entries[entry_idx];
+fn decide_virtual(
+    idx: &IndexFile,
+    entry_idx: EntryIdx,
+    pkgname: &PkgName,
+    bare: &str,
+) -> TargetDecision {
+    let entry = idx.entry(entry_idx);
     debug!(
         pkgbase = %entry.pkgbase,
         virtual_name = bare,
@@ -266,12 +325,10 @@ fn decide_virtual(idx: &IndexFile, by: &Lookup, bare: &str) -> TargetDecision {
 /// ends up recorded is an explicit `Target::hint`.
 fn decide_pkgbase(
     idx: &IndexFile,
-    by: &Lookup,
-    bare: &str,
+    entry_idx: EntryIdx,
     select: &mut PkgnameSelector<'_>,
 ) -> Result<TargetDecision> {
-    let entry_idx = by.by_pkgbase[bare] as usize;
-    let entry = &idx.entries[entry_idx];
+    let entry = idx.entry(entry_idx);
     let pkgnames: Vec<PkgName> = entry.pkgnames.iter().map(|p| p.name.clone()).collect();
     let chosen = select(&entry.pkgbase, &pkgnames)?;
     if chosen.is_empty() {
@@ -332,24 +389,21 @@ fn record_hint(hints: &mut HashMap<PkgBase, PkgName>, pkgbase: &PkgBase, hint: P
 /// spec without an explicit hint yields no derived hint, because the
 /// pkgbase string isn't a counterpart name.
 fn record_target_hint(
-    by: &Lookup,
     idx: &IndexFile,
+    aur: Option<&AurHit>,
     target: &Target,
     bare: &str,
     hints: &mut HashMap<PkgBase, PkgName>,
 ) {
-    let (dest_pkgbase, spec_is_counterpart_name) = if let Some(&entry_idx) = by.by_name.get(bare) {
-        (&idx.entries[entry_idx as usize].pkgbase, true)
-    } else if by.by_provides.contains_key(bare) {
-        let Some((entry_idx, _)) = by.provider_of(idx, bare) else {
-            return;
-        };
-        (&idx.entries[entry_idx].pkgbase, true)
-    } else if let Some(&entry_idx) = by.by_pkgbase.get(bare) {
-        (&idx.entries[entry_idx as usize].pkgbase, false)
-    } else {
+    let Some(aur_hit) = aur else {
         return;
     };
+    // A pkgname or provides hit means the spec names a counterpart pkgname
+    // (record `bare` as the hint when the caller gave none); a bare pkgbase
+    // spec names nothing more specific, so only an explicit `Target::hint`
+    // survives.
+    let dest_pkgbase = &idx.entry(aur_hit.entry).pkgbase;
+    let spec_is_counterpart_name = !matches!(aur_hit.via, AurVia::Pkgbase);
     let hint = target
         .hint
         .clone()
@@ -386,7 +440,7 @@ fn extend_selection(
 /// `&str` via `Borrow<str>` (`siblings.get(bare)`) instead of routing the
 /// comparison through a manual deref dance.
 fn sibling_runtime_deps(entry: &IndexEntry, pkgname: &PkgName) -> Vec<PkgName> {
-    let siblings: std::collections::HashSet<PkgName> = entry
+    let siblings: HashSet<PkgName> = entry
         .pkgnames
         .iter()
         .map(|p| p.name.clone())
@@ -505,6 +559,80 @@ mod tests {
         specs.iter().copied().map(Target::bare).collect()
     }
 
+    /// The expanded specs as owned strings — the assertion view most tests
+    /// compare against (the pins ride alongside on the `ExpandedTarget`s).
+    fn specs(r: &ExpandedTargets) -> Vec<String> {
+        r.targets
+            .iter()
+            .map(|t| t.spec.as_str().to_owned())
+            .collect()
+    }
+
+    /// A single pinned target — the shape `add N` on a numbered row produces.
+    fn pinned(spec: &str, pin: SourcePin) -> Vec<Target> {
+        vec![Target::bare(spec).with_pin(pin)]
+    }
+
+    /// One name in BOTH a sync repo and the AUR — the `webp-pixbuf-loader`
+    /// collision, where the pick's pin decides which one apply installs.
+    fn collision() -> (AurIndexData, PacmanIndex) {
+        let idx = IndexFile {
+            entries: vec![entry("webp-pixbuf-loader", &["webp-pixbuf-loader"], &[])],
+            ..IndexFile::empty()
+        };
+        let mut pac = PacmanIndex::default();
+        pac.sync_versions
+            .insert("webp-pixbuf-loader".into(), "0.2.7-2".into());
+        (AurIndexData::from_index(idx), pac)
+    }
+
+    #[test]
+    fn aur_pin_survives_expansion_on_a_pacman_owned_name() {
+        // `add N` on the `aur/webp-pixbuf-loader` row: pacman owns the name, but
+        // the pin routes through the AUR chain and rides out on the expanded
+        // target, so `resolve_expanded` keeps it AUR (proven in resolver.rs).
+        let (aur, pac) = collision();
+        let r = expand_pkgbase_targets(
+            &aur,
+            &pac,
+            &pinned("webp-pixbuf-loader", SourcePin::Aur),
+            &mut select_all,
+        )
+        .unwrap();
+        assert_eq!(specs(&r), vec!["webp-pixbuf-loader"]);
+        assert_eq!(
+            r.targets[0].pin,
+            Some(SourcePin::Aur),
+            "AUR pin must survive expansion"
+        );
+    }
+
+    #[test]
+    fn repo_pin_passes_through_carrying_its_pin() {
+        // `add N` on the `extra/webp-pixbuf-loader` row: stays on the pacman
+        // lane (never rewritten to the AUR pkgbase), pin carried.
+        let (aur, pac) = collision();
+        let r = expand_pkgbase_targets(
+            &aur,
+            &pac,
+            &pinned("webp-pixbuf-loader", SourcePin::Repo),
+            &mut select_all,
+        )
+        .unwrap();
+        assert_eq!(specs(&r), vec!["webp-pixbuf-loader"]);
+        assert_eq!(r.targets[0].pin, Some(SourcePin::Repo));
+    }
+
+    #[test]
+    fn no_pin_leaves_the_shared_name_to_pacman() {
+        // No explicit pick: the existing pacman-wins shortcut still applies and
+        // the expanded target carries no pin.
+        let (aur, pac) = collision();
+        let r = expand_pkgbase_targets(&aur, &pac, &ts(&["webp-pixbuf-loader"]), &mut select_all)
+            .unwrap();
+        assert_eq!(r.targets[0].pin, None, "no pick ⇒ no pin");
+    }
+
     #[test]
     fn scoped_provides_rewrites_to_pkgbase_with_subset() {
         // bisq pkgbase: only `bisq-desktop` declares `provides = bisq`.
@@ -514,7 +642,7 @@ mod tests {
         let (aur, pac) = fixture();
         let r = expand_pkgbase_targets(&aur, &pac, &ts(&["bisq"]), &mut select_all).unwrap();
         assert_eq!(
-            r.targets,
+            specs(&r),
             vec!["bisq".to_owned()],
             "resolve target is pkgbase"
         );
@@ -537,7 +665,7 @@ mod tests {
         // recorded because every pkgname implicitly provides the virtual.
         let (aur, pac) = fixture();
         let r = expand_pkgbase_targets(&aur, &pac, &ts(&["paru"]), &mut select_all).unwrap();
-        assert_eq!(r.targets, vec!["paru-bin".to_owned()]);
+        assert_eq!(specs(&r), vec!["paru-bin".to_owned()]);
         assert_eq!(r.direct_pkgnames, vec![PkgName::from("paru-bin")]);
         assert!(
             r.selections.is_empty(),
@@ -549,7 +677,7 @@ mod tests {
     fn passes_through_pacman_targets_unchanged() {
         let (aur, pac) = fixture();
         let r = expand_pkgbase_targets(&aur, &pac, &ts(&["firefox"]), &mut select_all).unwrap();
-        assert_eq!(r.targets, vec!["firefox".to_owned()]);
+        assert_eq!(specs(&r), vec!["firefox".to_owned()]);
         assert!(r.direct_pkgnames.is_empty());
     }
 
@@ -561,7 +689,7 @@ mod tests {
         // install_stratum to mark Explicit.
         let (aur, pac) = fixture();
         let r = expand_pkgbase_targets(&aur, &pac, &ts(&["bisq-single"]), &mut select_all).unwrap();
-        assert_eq!(r.targets, vec!["bisq-single".to_owned()]);
+        assert_eq!(specs(&r), vec!["bisq-single".to_owned()]);
         assert_eq!(
             r.direct_pkgnames,
             vec![PkgName::from("bisq-desktop-single")]
@@ -574,7 +702,7 @@ mod tests {
     fn expands_split_pkgbase_to_all_pkgnames_by_default() {
         let (aur, pac) = fixture();
         let r = expand_pkgbase_targets(&aur, &pac, &ts(&["split-pkg"]), &mut select_all).unwrap();
-        assert_eq!(r.targets, vec!["split-pkg".to_owned()]);
+        assert_eq!(specs(&r), vec!["split-pkg".to_owned()]);
         assert_eq!(
             r.direct_pkgnames,
             vec![
@@ -596,7 +724,7 @@ mod tests {
             Ok(vec![PkgName::from("split-a"), PkgName::from("split-c")])
         };
         let r = expand_pkgbase_targets(&aur, &pac, &ts(&["split-pkg"]), &mut select).unwrap();
-        assert_eq!(r.targets, vec!["split-pkg".to_owned()]);
+        assert_eq!(specs(&r), vec!["split-pkg".to_owned()]);
         assert_eq!(
             r.direct_pkgnames,
             vec![PkgName::from("split-a"), PkgName::from("split-c")],
@@ -619,7 +747,7 @@ mod tests {
             Ok(n.to_vec())
         };
         let r = expand_pkgbase_targets(&aur, &pac, &ts(&["cower"]), &mut select).unwrap();
-        assert_eq!(r.targets, vec!["cower".to_owned()]);
+        assert_eq!(specs(&r), vec!["cower".to_owned()]);
         assert_eq!(calls, 0, "selector must not be invoked on pkgname hits");
     }
 
@@ -631,7 +759,7 @@ mod tests {
         // passthroughs preserve it.
         let (aur, pac) = fixture();
         let r = expand_pkgbase_targets(&aur, &pac, &ts(&["cower>=1.2"]), &mut select_all).unwrap();
-        assert_eq!(r.targets, vec!["cower>=1.2".to_owned()]);
+        assert_eq!(specs(&r), vec!["cower>=1.2".to_owned()]);
     }
 
     #[test]
@@ -680,7 +808,7 @@ mod tests {
         let r = expand_pkgbase_targets(&aur, &pac, &ts(&["commit-mono-font"]), &mut select_all)
             .unwrap();
         assert_eq!(
-            r.targets,
+            specs(&r),
             vec!["commit-mono-font".to_owned()],
             "must pass the pkgbase string, NOT the pkgnames — by_name would alias to the wrong entry",
         );
@@ -704,7 +832,7 @@ mod tests {
         // sibling pkgnames must NOT appear in direct_pkgnames.
         let (aur, pac) = fixture();
         let r = expand_pkgbase_targets(&aur, &pac, &ts(&["bisq-cli"]), &mut select_all).unwrap();
-        assert_eq!(r.targets, vec!["bisq".to_owned()]);
+        assert_eq!(specs(&r), vec!["bisq".to_owned()]);
         assert_eq!(r.direct_pkgnames, vec![PkgName::from("bisq-cli")]);
         assert_eq!(
             r.selections.get("bisq"),
@@ -748,7 +876,7 @@ mod tests {
         let pac = PacmanIndex::default();
         let r = expand_pkgbase_targets(&aur, &pac, &ts(&["test-split-extras"]), &mut select_all)
             .unwrap();
-        assert_eq!(r.targets, vec!["test-split".to_owned()]);
+        assert_eq!(specs(&r), vec!["test-split".to_owned()]);
         assert_eq!(
             r.direct_pkgnames,
             vec![PkgName::from("test-split-extras")],
@@ -772,7 +900,7 @@ mod tests {
         // pkgbase-rewrite needed; the by_name passthrough is sufficient.
         let (aur, pac) = fixture();
         let r = expand_pkgbase_targets(&aur, &pac, &ts(&["cower"]), &mut select_all).unwrap();
-        assert_eq!(r.targets, vec!["cower".to_owned()]);
+        assert_eq!(specs(&r), vec!["cower".to_owned()]);
         assert!(r.selections.is_empty());
         assert!(r.direct_pkgnames.is_empty());
     }
@@ -790,7 +918,7 @@ mod tests {
             &mut select_all,
         )
         .unwrap();
-        assert_eq!(r.targets, vec!["bisq".to_owned(), "bisq".to_owned()]);
+        assert_eq!(specs(&r), vec!["bisq".to_owned(), "bisq".to_owned()]);
         let mut dp = r.direct_pkgnames.clone();
         dp.sort();
         assert_eq!(dp, vec!["bisq-cli".to_owned(), "bisq-daemon".to_owned()],);
@@ -815,7 +943,7 @@ mod tests {
             &mut select_all,
         )
         .unwrap();
-        assert_eq!(r.targets, vec!["bisq-single".to_owned()]);
+        assert_eq!(specs(&r), vec!["bisq-single".to_owned()]);
         assert!(r.selections.is_empty());
     }
 
@@ -922,7 +1050,7 @@ mod tests {
         // Spec passed through unchanged — `pac.is_installed("paru")` is
         // true, so expand did NOT rewrite to the pkgbase string. Resolver
         // routes via `by_provides` in `resolve_target_source`.
-        assert_eq!(r.targets, vec!["paru".to_owned()]);
+        assert_eq!(specs(&r), vec!["paru".to_owned()]);
         // The crucial bit: hint IS recorded despite the passthrough, so
         // `prepare_one` can pass it to `counterpart_with_hint`.
         assert_eq!(
@@ -953,7 +1081,7 @@ mod tests {
         pac.installed.insert("bisq-cli".into(), "1.0-1".into());
         let r = expand_pkgbase_targets(&aur, &pac, &ts(&["bisq-cli"]), &mut select_all).unwrap();
         // Shortcut fired — spec passes through unchanged.
-        assert_eq!(r.targets, vec!["bisq-cli".to_owned()]);
+        assert_eq!(specs(&r), vec!["bisq-cli".to_owned()]);
         // The crucial bit: selection IS recorded against the pkgbase.
         // Without this, install_stratum installs all three siblings.
         assert_eq!(
@@ -976,7 +1104,7 @@ mod tests {
         // `cower` is a trivial single-pkgname pkgbase. Installed foreign.
         pac.installed.insert("cower".into(), "1.0-1".into());
         let r = expand_pkgbase_targets(&aur, &pac, &ts(&["cower"]), &mut select_all).unwrap();
-        assert_eq!(r.targets, vec!["cower".to_owned()]);
+        assert_eq!(specs(&r), vec!["cower".to_owned()]);
         assert!(
             r.selections.is_empty(),
             "single-pkgname pkgbase has no real subset to record",

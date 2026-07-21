@@ -2,7 +2,8 @@
 
 This is a maintainer's map of how `aurox` is wired. For user-facing flags
 see `README.md`; for the test suite see `docs/TESTING.md`; for profiling
-see `docs/PROFILING.md`.
+see `docs/PROFILING.md`; for the interactive shell's resolve-at-add control
+flow (`search` → installed) see `docs/RESOLUTION_FLOW.md`.
 
 ## The 30-second tour
 

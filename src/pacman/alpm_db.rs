@@ -744,9 +744,22 @@ impl PacmanIndex {
     pub fn foreign(&self) -> Vec<(PkgName, Version)> {
         self.installed
             .iter()
-            .filter(|(name, _)| !self.sync_versions.contains_key::<PkgName>(name))
+            .filter(|&(name, _)| self.is_foreign(name))
             .map(|(n, v)| (n.clone(), v.clone()))
             .collect()
+    }
+
+    /// Is `name` a *foreign* package — installed locally but present in no
+    /// syncdb (pacman's `-Qm` set)? The single-name form of [`Self::foreign`],
+    /// so the "installed but not in any repo" rule lives in one place.
+    ///
+    /// The resolver's direct-rebuild override consults this: only a foreign
+    /// install is an AUR-rebuild candidate. An official-repo package that
+    /// merely shares a name with an unrelated AUR entry must not be dragged
+    /// onto the build path — installed `extra/webp-pixbuf-loader` is not the
+    /// AUR `webp-pixbuf-loader`, even though the AUR ships that name too.
+    pub fn is_foreign(&self, name: &PkgName) -> bool {
+        self.installed.contains_key(name) && !self.sync_versions.contains_key(name)
     }
 }
 
@@ -915,6 +928,29 @@ mod tests {
         assert_eq!(idx.sync_download_size(&"firefox".into()), Some(78_000_000));
         assert_eq!(idx.sync_download_size(&"glibc".into()), Some(0));
         assert_eq!(idx.sync_download_size(&"vim".into()), None);
+    }
+
+    #[test]
+    fn is_foreign_needs_installed_and_no_syncdb() {
+        let mut idx = PacmanIndex::default();
+        // Installed only ⇒ foreign (an AUR/manual pkg).
+        idx.installed.insert("yay-bin".into(), "12.0-1".into());
+        // Installed *and* in a syncdb ⇒ not foreign (an official-repo pkg —
+        // the `webp-pixbuf-loader` shape).
+        idx.installed
+            .insert("webp-pixbuf-loader".into(), "0.2.7-2".into());
+        idx.sync_versions
+            .insert("webp-pixbuf-loader".into(), "0.2.7-2".into());
+        // In a syncdb but not installed ⇒ not foreign (nothing local to own).
+        idx.sync_versions.insert("firefox".into(), "110.0-1".into());
+
+        assert!(idx.is_foreign(&PkgName::new("yay-bin")));
+        assert!(!idx.is_foreign(&PkgName::new("webp-pixbuf-loader")));
+        assert!(!idx.is_foreign(&PkgName::new("firefox")));
+        assert!(!idx.is_foreign(&PkgName::new("nonexistent")));
+        // `foreign()` is the whole-set form of the same rule.
+        let foreign: Vec<_> = idx.foreign().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(foreign, vec![PkgName::new("yay-bin")]);
     }
 
     #[test]

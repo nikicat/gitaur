@@ -7,13 +7,16 @@ use super::cart::{ApplyOutcome, Approval, Cart, CartItem, StageResult};
 use super::command::{Command, ConfigAction, SystemAction, unknown_note};
 use super::help::{HELP_TEXT, help_topic};
 use super::staging::prior_approval;
-use super::{Flow, ListItem, ListSource, NumberedList, ShellEnv, State, UNDO_DEPTH, selector};
+use super::{
+    CartEdit, Flow, ListItem, ListSource, NumberedList, ShellEnv, State, UNDO_DEPTH, selector,
+};
 use crate::mirror;
 use crate::names::{PkgTarget, RepoName, SearchTerm};
 use crate::pacman::invoke::PkgUpgrade;
 use crate::system;
 use crate::ui;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 /// Word one `refresh` outcome — the AUR half only. The repo-database half
 /// reports for itself from inside [`mirror::cmd_refresh`] (refreshed / up to
@@ -34,25 +37,6 @@ const fn refresh_message(outcome: mirror::RefreshOutcome) -> Option<&'static str
             Some("AUR refresh skipped (aur = false in config.toml)")
         }
         mirror::RefreshOutcome::AurSkipped(mirror::SkipCause::NotRequested) => None,
-    }
-}
-
-/// `refresh [aur|pacman]` — re-fetch what the scope covers and reload the
-/// session; the cart is left untouched (`upgrade` is the seed-the-cart
-/// variant). A free function like [`system_dispatch`]: it reads no session
-/// state, only the env seam. `None` is an unrecognized scope word — usage
-/// line, never a silently-widened full refresh.
-fn refresh_dispatch<E: ShellEnv>(scope: Option<mirror::RefreshScope>, env: &mut E) {
-    match scope {
-        None => env.print("usage: refresh [aur|pacman] — see `help refresh`"),
-        Some(scope) => match env.refresh(scope) {
-            Ok(outcome) => {
-                if let Some(msg) = refresh_message(outcome) {
-                    env.print(msg);
-                }
-            }
-            Err(e) => env.print(&format!("refresh: {e}")),
-        },
     }
 }
 
@@ -156,7 +140,7 @@ fn print_system_report<E: ShellEnv>(report: &system::Report, env: &mut E) {
 // one.
 #[allow(clippy::multiple_inherent_impl)]
 impl State {
-    pub fn dispatch<E: ShellEnv>(&mut self, cmd: &Command, env: &mut E) -> Flow {
+    pub(crate) fn dispatch<E: ShellEnv>(&mut self, cmd: &Command, env: &mut E) -> Flow {
         match cmd {
             Command::Empty => Flow::Continue,
             Command::Quit => Flow::Exit(0),
@@ -233,14 +217,14 @@ impl State {
                 } else {
                     self.edit_cart(|s| {
                         s.cart.clear();
-                        true
+                        CartEdit::Changed
                     });
                     env.print("cart cleared — `undo` to restore");
                 }
                 Flow::Continue
             }
             Command::Refresh(scope) => {
-                refresh_dispatch(*scope, env);
+                self.refresh(*scope, env);
                 Flow::Continue
             }
             Command::System(action) => {
@@ -340,7 +324,13 @@ impl State {
         };
         let policy = env.aur_policy();
         let mut staged = 0;
-        self.edit_cart(|s| {
+        // `upgrade` *replaces* the cart: `env.upgrade()` just reloaded (a fetch
+        // may have moved the DBs), and the seeded set is the whole intended
+        // transaction. Clear, seed, then re-freeze the resolution in one go —
+        // so a mid-set resolver error rejects the whole seed and leaves the old
+        // cart intact.
+        let result = self.edit_and_resolve(env, |s, env| {
+            s.cart.clear();
             for u in to_seed {
                 let mut item = CartItem::from_upgrade(u, policy);
                 // A prior session's approval covering this exact PKGBUILD
@@ -356,12 +346,62 @@ impl State {
                     staged += 1;
                 }
             }
-            staged > 0
+            CartEdit::from_changed(staged > 0)
         });
-        let noun = if staged == 1 { "upgrade" } else { "upgrades" };
-        env.print(&format!("{staged} {noun} staged"));
-        // `show` prints the seeded transaction and re-arms the referent.
-        self.show(env);
+        match result {
+            Ok(CartEdit::Changed) => {
+                let noun = if staged == 1 { "upgrade" } else { "upgrades" };
+                env.print(&format!("{staged} {noun} staged"));
+                // `show` prints the seeded transaction and re-arms the referent.
+                self.show(env);
+            }
+            Ok(CartEdit::Unchanged) => env.print("nothing to upgrade"),
+            Err(e) => env.print(&format!("upgrade: {e}")),
+        }
+    }
+
+    /// `refresh [aur|pacman]` — re-fetch what the scope covers and reload the
+    /// session. Unlike `upgrade`, it seeds nothing; but a refresh *moves the
+    /// package data the cart's frozen resolution was resolved against*, so on a
+    /// successful reload it **drops the cart** — the installs, removals, and
+    /// resolution, the undo/redo stacks, and a transaction referent — noting the
+    /// discard. `None` is an unrecognized scope word — a usage line, never a
+    /// silently-widened full refresh.
+    fn refresh<E: ShellEnv>(&mut self, scope: Option<mirror::RefreshScope>, env: &mut E) {
+        let Some(scope) = scope else {
+            env.print("usage: refresh [aur|pacman] — see `help refresh`");
+            return;
+        };
+        match env.refresh(scope) {
+            Ok(outcome) => {
+                self.drop_cart_on_reload(env);
+                if let Some(msg) = refresh_message(outcome) {
+                    env.print(msg);
+                }
+            }
+            Err(e) => env.print(&format!("refresh: {e}")),
+        }
+    }
+
+    /// Drop the cart because a refresh moved the DBs it was resolved against:
+    /// clear installs + removals + the frozen resolution + undo/redo, and drop
+    /// the referent when it pointed at the (now-gone) transaction rows. Notes
+    /// the discard only when the cart wasn't already empty, so a refresh on a
+    /// clean session stays quiet.
+    fn drop_cart_on_reload<E: ShellEnv>(&mut self, env: &mut E) {
+        let had_staged = !self.cart.is_empty();
+        self.cart.clear();
+        self.clear_undo_history();
+        if self
+            .referent
+            .as_ref()
+            .is_some_and(|l| l.source == ListSource::Transaction)
+        {
+            self.referent = None;
+        }
+        if had_staged {
+            env.print("cart cleared — refresh moved the package data it was resolved against");
+        }
     }
 
     /// `show`: render the staged transaction — a header, the install/removal
@@ -575,13 +615,56 @@ impl State {
     /// caller's follow-up printing. This is the *single* clone site for the
     /// undo feature — a cart-editing verb structurally cannot forget the
     /// snapshot or push an unchanged one.
-    pub(super) fn edit_cart(&mut self, edit: impl FnOnce(&mut Self) -> bool) -> bool {
+    ///
+    /// For an install-set change use [`Self::edit_and_resolve`] instead, which
+    /// also re-freezes the resolution (or rejects). `edit_cart` is for edits
+    /// that don't need a resolve: `clear` (empties the cart, no resolution) and
+    /// approval-only moves are handled directly.
+    pub(super) fn edit_cart(&mut self, edit: impl FnOnce(&mut Self) -> CartEdit) -> CartEdit {
         let before = self.cart.clone();
-        let changed = edit(self);
-        if changed {
+        let outcome = edit(self);
+        if outcome == CartEdit::Changed {
             self.push_undo(before);
         }
-        changed
+        outcome
+    }
+
+    /// Run one undoable install-set change and **re-freeze the whole-cart
+    /// resolution**: snapshot, run `edit`, then (if it changed the cart)
+    /// re-resolve via [`ShellEnv::stage_plan`]. On success the fresh resolution
+    /// is stored and the snapshot pushed for `undo`; on a resolver / conflict
+    /// error the cart is **rolled back** to the snapshot and the `Err` bubbles,
+    /// so the caller rejects the command and an incoherent cart is never kept.
+    ///
+    /// A change that empties the cart (dropping the last row) skips the resolve
+    /// — there's nothing to apply, and the stale resolution is never read on an
+    /// empty cart. The single write site for [`Cart::set_resolution`].
+    pub(super) fn edit_and_resolve<E: ShellEnv>(
+        &mut self,
+        env: &mut E,
+        edit: impl FnOnce(&mut Self, &mut E) -> CartEdit,
+    ) -> Result<CartEdit, String> {
+        let before = self.cart.clone();
+        if edit(self, env) == CartEdit::Unchanged {
+            return Ok(CartEdit::Unchanged);
+        }
+        if self.cart.is_empty() {
+            self.push_undo(before);
+            return Ok(CartEdit::Changed);
+        }
+        // The resolver error is surfaced as a message (matching the selector
+        // verbs' `Result<_, String>`); the reject rolls the cart back.
+        match env.stage_plan(&self.cart) {
+            Ok(resolved) => {
+                self.cart.set_resolution(Rc::new(resolved));
+                self.push_undo(before);
+                Ok(CartEdit::Changed)
+            }
+            Err(e) => {
+                self.cart = before;
+                Err(e.to_string())
+            }
+        }
     }
 
     /// Snapshot the pre-change cart onto the `undo` stack (bounded) and discard
@@ -837,7 +920,12 @@ mod tests {
     }
 
     #[test]
-    fn refresh_reloads_without_seeding_or_touching_the_cart() {
+    fn refresh_drops_the_cart_it_can_no_longer_trust() {
+        // The canary for the resolve-at-add invariant: a refresh moves the DBs
+        // the cart's frozen resolution was resolved against, so it can't be
+        // applied any more. `refresh` drops the whole cart (and says so) rather
+        // than leave a stale transaction — the inverse of the old "refresh
+        // leaves the cart intact" contract.
         let mut env = env_with(&[("foo", Source::Aur)]);
         let mut state = State::default();
         state.dispatch(&command::parse("add foo"), &mut env);
@@ -853,10 +941,26 @@ mod tests {
             0,
             "refresh is not an upgrade recompute"
         );
-        assert_eq!(
-            state.cart.items().len(),
-            1,
-            "refresh leaves the cart intact"
+        assert!(state.cart.is_empty(), "refresh drops the stale cart");
+        assert!(
+            env.lines.contains("cart cleared"),
+            "the discard is announced: {:?}",
+            env.lines
+        );
+        assert!(env.lines.contains("refreshed"));
+    }
+
+    #[test]
+    fn refresh_on_an_empty_cart_stays_quiet_about_the_cart() {
+        // Nothing staged → no cart to drop → no "cart cleared" note (just the
+        // refresh outcome).
+        let mut env = FakeEnv::default();
+        let mut state = State::default();
+        state.dispatch(&command::parse("refresh"), &mut env);
+        assert!(
+            !env.lines.contains("cart cleared"),
+            "an empty cart says nothing about being cleared: {:?}",
+            env.lines
         );
         assert!(env.lines.contains("refreshed"));
     }

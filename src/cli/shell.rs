@@ -34,6 +34,7 @@ use crate::system;
 use crate::ui;
 use crate::units::ByteSize;
 use cart::{ApplyRun, AurApproval, Cart, ReviewOutcome, StageClass};
+use resolved::ResolvedCart;
 
 pub mod cart;
 pub mod command;
@@ -41,6 +42,7 @@ pub mod complete;
 mod env;
 mod help;
 mod repl;
+pub mod resolved;
 pub mod selector;
 mod staging;
 #[cfg(test)]
@@ -150,12 +152,47 @@ pub enum Flow {
     Exit(u8),
 }
 
+/// Whether a cart edit actually changed anything — the outcome the undoable-edit
+/// seam ([`State::edit_cart`] / [`State::edit_and_resolve`]) keys on: a change
+/// pushes an undo snapshot (and re-freezes the resolution), a no-op consumes no
+/// undo step and stays quiet. A named outcome rather than a bare `bool`,
+/// matching the cart's other result enums ([`cart::StageResult`] &c.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CartEdit {
+    /// The edit changed the cart (staged/unstaged/approved something).
+    Changed,
+    /// A no-op edit: everything was already staged, nothing matched, or the
+    /// user's selection dropped no rows.
+    Unchanged,
+}
+
+impl CartEdit {
+    /// Lift a "did it change" bool — the leaf edits tally over a loop (a per-item
+    /// flag, or a count ending in `n > 0`) and convert once at the return.
+    const fn from_changed(changed: bool) -> Self {
+        if changed {
+            Self::Changed
+        } else {
+            Self::Unchanged
+        }
+    }
+
+    /// Fold two edits — a batch verb (`remove <a> <b>`) runs several; any single
+    /// change makes the whole batch [`Changed`](Self::Changed).
+    const fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unchanged, Self::Unchanged) => Self::Unchanged,
+            _ => Self::Changed,
+        }
+    }
+}
+
 /// The side-effecting operations command dispatch needs.
 ///
 /// Behind a trait so the pure control flow ([`State::dispatch`]) is unit-testable
 /// with a scripted fake. The cart mutations stay on [`State`]; this trait is the
 /// I/O seam (search, classification, the PKGBUILD diff, the build+install).
-pub trait ShellEnv {
+pub(crate) trait ShellEnv {
     /// Emit one line of user-facing output.
     fn print(&mut self, line: &str);
     /// Emit a rendered table, line by line, through [`Self::print`] — the one
@@ -211,6 +248,17 @@ pub trait ShellEnv {
     fn record_approval(&mut self, target: &PkgTarget);
     /// Run the PKGBUILD review (diff-or-full) for one staged AUR target.
     fn review(&mut self, target: &PkgTarget) -> Result<ReviewOutcome>;
+    /// Resolve the whole cart — every staged install root (each carrying its
+    /// [`SourcePin`](crate::build::SourcePin) so a namesake can't re-hijack it)
+    /// plus the staged removals — into a frozen [`ResolvedCart`]: the plans
+    /// `apply` executes plus the synced snapshot `show` renders against, in one
+    /// add-time pass. The split-package picker is seeded from the cart's
+    /// existing [`resolution`](Cart::resolution) so an already-resolved split
+    /// root returns its stored choice without re-prompting. Propagates the
+    /// resolver `Err` (a missing dep, a cycle) and a declared-conflict `Err` so
+    /// the caller can **reject** the change and roll the cart back — an
+    /// incoherent cart is never stored.
+    fn stage_plan(&self, cart: &Cart) -> Result<ResolvedCart>;
     /// Render the staged transaction table — the numbered install rows + the
     /// removal rows — colored, column-aligned, with a per-AUR-row "last
     /// modified" age. The header + approval summary stay in the pure dispatch

@@ -15,7 +15,7 @@
 //! is pure (no I/O), so it's exhaustively unit-tested here.
 
 use super::NumberedList;
-use crate::names::PkgTarget;
+use crate::names::{PkgTarget, RepoName};
 use regex::Regex;
 use std::collections::HashSet;
 use std::fmt;
@@ -71,10 +71,17 @@ enum Selector {
 /// number when the target came from a number/range selector — provenance
 /// the cart verbs use to word acks ("dropped foo (row 2)") and misses ("row 2
 /// of the search list …") — and is `None` for name/glob selectors.
+///
+/// `pin` carries the picked row's own source (`extra`/`core`/`aur`), so an
+/// explicit numbered `add N` stages the exact package the row displayed rather
+/// than re-deriving it from the bare name. `None` for name/glob selectors (no
+/// row to speak for the choice) and for rows that carried no source (a
+/// cart-derived list) — both fall back to name classification at staging.
 #[derive(Debug)]
 pub(super) struct Resolved {
     pub(super) target: PkgTarget,
     pub(super) row: Option<RowNumber>,
+    pub(super) pin: Option<RepoName>,
 }
 
 /// Resolve `args` against the numbered `list` snapshot and the `universe` of
@@ -98,6 +105,7 @@ pub(super) fn resolve(
             Selector::Name(s) => raw.push(Resolved {
                 target: PkgTarget::new(s),
                 row: None,
+                pin: None,
             }),
             Selector::Glob(re) => {
                 raw.extend(
@@ -107,6 +115,7 @@ pub(super) fn resolve(
                         .map(|t| Resolved {
                             target: t.clone(),
                             row: None,
+                            pin: None,
                         }),
                 );
             }
@@ -203,6 +212,9 @@ fn row(list: Option<&NumberedList>, n: RowNumber) -> Result<Resolved, String> {
         .map(|it| Resolved {
             target: it.target.clone(),
             row: Some(n),
+            // The picked row's own source pins the choice — an `aur/foo` row
+            // stays AUR even when a repo `foo` exists, and vice versa.
+            pin: it.repo.clone(),
         })
         .ok_or_else(|| {
             let count = list.rows.len();

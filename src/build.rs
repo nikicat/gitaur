@@ -17,6 +17,7 @@ use crate::names::{PkgBase, PkgName, PkgTarget, PkgTargetSetExt};
 use crate::pacman::alpm_db::{self, PacmanIndex};
 use crate::pacman::invoke;
 use crate::paths;
+use crate::resolver::pkgbase_expand::PkgnameSelector;
 use crate::resolver::{self, PkgbasePlan, Plan};
 use crate::ui;
 use crate::version::{Ver, Version};
@@ -93,6 +94,35 @@ struct BuiltPkg {
 pub struct Target {
     pub spec: PkgTarget,
     pub hint: Option<PkgName>,
+    /// The source lane an **explicit** selection pinned, or `None` for a
+    /// hand-typed name / upgrade candidate the resolver is free to classify.
+    ///
+    /// When the user picks a numbered search row (`add 1`), that row already
+    /// knew whether it was a repo or AUR package — the pin carries that choice
+    /// through to apply so the resolver honors it instead of re-deriving from
+    /// the bare name (which a same-named package in the other source would
+    /// mis-route). See [`SourcePin`].
+    pub pin: Option<SourcePin>,
+}
+
+/// The install lane an explicit selection pinned onto a [`Target`].
+///
+/// A numbered `add N` is an unambiguous disambiguation — the user pointed at
+/// one row, whose source was already known. Carrying it defeats the
+/// name-collision trap where re-classifying the bare name at apply would pick
+/// the wrong package (the `webp-pixbuf-loader` regression: an installed
+/// `extra` package vs. an unrelated AUR namesake).
+///
+/// [`Repo`](Self::Repo) is honored by resolution's pacman precedence (a repo
+/// pick is never foreign, so the AUR rebuild override can't fire); [`Aur`](Self::Aur)
+/// is the load-bearing one — it forces AUR resolution *over* pacman precedence,
+/// the one routing pacman's own rules can't express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourcePin {
+    /// Pinned to a sync repo — keep it on the pacman lane, never rebuild from AUR.
+    Repo,
+    /// Pinned to the AUR — resolve as AUR even when a sync repo owns the name.
+    Aur,
 }
 
 impl Target {
@@ -102,6 +132,7 @@ impl Target {
         Self {
             spec: spec.into(),
             hint: None,
+            pin: None,
         }
     }
 
@@ -111,7 +142,16 @@ impl Target {
         Self {
             spec: spec.into(),
             hint: Some(hint),
+            pin: None,
         }
+    }
+
+    /// Pin this target's source lane — the identity an explicit numbered
+    /// selection carries from `add N` through to apply.
+    #[must_use]
+    pub const fn with_pin(mut self, pin: SourcePin) -> Self {
+        self.pin = Some(pin);
+        self
     }
 }
 
@@ -401,15 +441,46 @@ impl InstallCtx<'_> {
     /// plan to [`apply_plan`] — re-resolving would re-run the split-package prompt
     /// inside `expand_pkgbase_targets`.
     pub(crate) fn resolve_targets(&self, targets: &[Target], noconfirm: bool) -> Result<Plan> {
-        // Expand bare `-S <pkgbase>` targets into the pkgname(s) the user wants
-        // installed as explicit. Split pkgbases prompt for a subset; single-pkgname
-        // pkgbases pass through silently. The selector closure delegates to
-        // `ui::select_pkgnames` so tests can swap in a deterministic picker.
-        let expanded =
-            resolver::expand_pkgbase_targets(self.aur, self.pac, targets, &mut |pb, pns| {
-                ui::select_pkgnames(pb, pns, noconfirm).map_err(|e| Error::other(e.to_string()))
-            })?;
-        let mut plan = resolver::resolve(self.aur, self.pac, &expanded.targets)?;
+        // The interactive picker: split pkgbases prompt for a subset;
+        // single-pkgname pkgbases pass through silently. `ui::select_pkgnames`
+        // is behind the closure so tests can swap in a deterministic picker.
+        self.resolve_with_selector(targets, &mut |pb, pns| {
+            ui::select_pkgnames(pb, pns, noconfirm).map_err(|e| Error::other(e.to_string()))
+        })
+    }
+
+    /// Resolve `targets` reusing a prior run's split-package choices: a pkgbase
+    /// already in `seed` returns its stored subset without prompting; a
+    /// not-yet-seen split root still prompts once. The shell's `stage_plan`
+    /// re-resolves the whole cart on every `add`, so seeding is what keeps an
+    /// already-resolved split root from re-opening its picker each time.
+    pub(crate) fn resolve_seeded(
+        &self,
+        targets: &[Target],
+        seed: &HashMap<PkgBase, Vec<PkgName>>,
+    ) -> Result<Plan> {
+        self.resolve_with_selector(targets, &mut |pb, pns| {
+            if let Some(sel) = seed.get(pb) {
+                return Ok(sel.clone());
+            }
+            ui::select_pkgnames(pb, pns, false).map_err(|e| Error::other(e.to_string()))
+        })
+    }
+
+    /// Expand (via `select`) → resolve → carry the expansion's selections,
+    /// direct-pkgname markers, and counterpart hints back onto the plan. The
+    /// shared body behind [`Self::resolve_targets`] and [`Self::resolve_seeded`],
+    /// which differ only in the picker closure.
+    fn resolve_with_selector(
+        &self,
+        targets: &[Target],
+        select: &mut PkgnameSelector<'_>,
+    ) -> Result<Plan> {
+        let expanded = resolver::expand_pkgbase_targets(self.aur, self.pac, targets, select)?;
+        // Each expanded target carries its `SourcePin`, so an explicit AUR pick
+        // (`add N` on an `aur/…` row) stays on the build path even when a sync
+        // repo owns the name; un-pinned targets resolve by pacman precedence.
+        let mut plan = resolver::resolve_expanded(self.aur, self.pac, &expanded.targets)?;
         plan.pkgname_selections = expanded.selections;
         // For pkgbase/provides hits the resolver received the pkgbase string, so
         // `plan.direct_targets` only contains the pkgbase. Mark the pkgnames the

@@ -1,8 +1,10 @@
 //! Recursive dependency resolution: targets → ordered Plan.
 
+use crate::build::{SourcePin, Target};
 use crate::error::{Error, Result};
 use crate::index::AurIndexData;
 use crate::index::IndexEntry;
+use crate::index::IndexFile;
 use crate::index::lookup::Lookup;
 use crate::names::{PkgBase, PkgName, PkgTarget};
 use crate::pacman::alpm_db::PacmanIndex;
@@ -10,9 +12,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use tracing::{debug, info, instrument};
 
 pub mod classify;
+pub mod conflict;
 pub mod pkgbase_expand;
 pub mod topo;
 
+use classify::classify_full;
 pub use classify::{Source, classify};
 pub use pkgbase_expand::{ExpandedTargets, expand_pkgbase_targets};
 
@@ -155,9 +159,13 @@ pub struct PkgbasePlan<'a> {
 /// (`direct_repo`/`transitive_repo`/`disclosed_repo_deps`, `direct_aur`),
 /// gates the direct-target rebuild override, and names the requirer when a
 /// dep resolves nowhere.
+///
+/// `Direct` carries the [`SourcePin`] an explicit selection pinned to it — the
+/// pin *is* how the target entered, so it rides here rather than in a side
+/// collection keyed by name. Deps are never pinned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Origin {
-    Direct,
+    Direct(Option<SourcePin>),
     Dep(Requirer),
 }
 
@@ -188,17 +196,31 @@ impl Origin {
     /// makedep). The `direct_set` backstop is only relevant to the bucketing
     /// split, not the rebuild override (see [`resolve_target_source`]).
     fn is_direct(&self, target: &PkgTarget, direct_set: &HashSet<PkgTarget>) -> bool {
-        *self == Self::Direct || direct_set.contains(target.bare())
+        matches!(self, Self::Direct(_)) || direct_set.contains(target.bare())
     }
 }
 
 /// Resolve `targets` against the AUR data + pacman DBs into a [`Plan`].
 ///
-/// With no AUR data in play `aur` is simply *empty* (the loader seam's
-/// pacman-only view); classification then degenerates to pacman-only and any
+/// Convenience entry for un-pinned targets (all tests, and any caller that
+/// hasn't run [`expand_pkgbase_targets`]): every target enters unpinned, so
+/// classification degenerates to pacman precedence. With no AUR data in play
+/// `aur` is simply *empty* (the loader seam's pacman-only view) and any
 /// unknown name short-circuits to [`Source::Missing`].
-#[instrument(skip(aur, pac), fields(targets = targets.len()))]
 pub fn resolve(aur: &AurIndexData, pac: &PacmanIndex, targets: &[PkgTarget]) -> Result<Plan> {
+    let expanded: Vec<Target> = targets.iter().cloned().map(Target::bare).collect();
+    resolve_expanded(aur, pac, &expanded)
+}
+
+/// Resolve post-expansion [`Target`]s, honoring the [`SourcePin`] each carries.
+///
+/// A target pinned to the AUR (an `add N` pick of an `aur/…` row) resolves as
+/// AUR *even when a sync repo owns the name* — the one routing pacman
+/// precedence can't express. The pin rides on each [`Target`] into
+/// `Origin::Direct`, so the resolver never re-derives intent from the bare
+/// name. [`resolve`] is the un-pinned convenience wrapper.
+#[instrument(skip(aur, pac), fields(targets = targets.len()))]
+pub fn resolve_expanded(aur: &AurIndexData, pac: &PacmanIndex, targets: &[Target]) -> Result<Plan> {
     let (idx, by) = (aur.index(), aur.lookup());
     let mut plan = Plan::default();
     let mut visited_aur: BTreeSet<PkgBase> = BTreeSet::new();
@@ -225,18 +247,21 @@ pub fn resolve(aur: &AurIndexData, pac: &PacmanIndex, targets: &[PkgTarget]) -> 
     // Keyed on the constraint-stripped name so `-S cargo>=1` still matches
     // the resolved row; the full typed specs go straight into the plan and
     // the walk queue (targets arrive typed from expansion — no widening).
-    let direct_set: HashSet<PkgTarget> = targets.iter().map(|t| PkgTarget::new(t.bare())).collect();
+    let direct_set: HashSet<PkgTarget> = targets
+        .iter()
+        .map(|t| PkgTarget::new(t.spec.bare()))
+        .collect();
     for t in targets {
-        plan.direct_targets.insert(t.clone());
+        plan.direct_targets.insert(t.spec.clone());
     }
 
     let mut queue: Vec<(PkgTarget, Origin)> = targets
         .iter()
-        .map(|t| (t.clone(), Origin::Direct))
+        .map(|t| (t.spec.clone(), Origin::Direct(t.pin)))
         .collect();
     while let Some((target, origin)) = queue.pop() {
         let bare = target.bare();
-        let source = resolve_target_source(by, pac, bare, &origin);
+        let source = resolve_target_source(idx, by, pac, bare, &origin);
         match source {
             Source::Installed(concrete) => {
                 debug!(target = %bare, %concrete, "already satisfied (installed)");
@@ -269,7 +294,7 @@ pub fn resolve(aur: &AurIndexData, pac: &PacmanIndex, targets: &[PkgTarget]) -> 
                 }
             }
             Source::Aur(entry_idx) => {
-                let entry = &idx.entries[entry_idx];
+                let entry = idx.entry(entry_idx);
                 let pkgbase = entry.pkgbase.clone();
                 // Record direct-ness before the visited-dedup `continue`: the
                 // queue is LIFO, so a pkgbase can be popped as a dep before
@@ -309,7 +334,7 @@ pub fn resolve(aur: &AurIndexData, pac: &PacmanIndex, targets: &[PkgTarget]) -> 
                 );
             }
             Source::Missing => missing.push(match &origin {
-                Origin::Direct => bare.to_owned(),
+                Origin::Direct(_) => bare.to_owned(),
                 Origin::Dep(requirer) => format!("{bare} (required by {requirer})"),
             }),
         }
@@ -416,29 +441,57 @@ fn resolve_make_edges(
 }
 
 /// Wrap [`classify`] with a rebuild override for direct targets: when the
-/// user explicitly named a pkg that classifies as `Installed` and that name
-/// also exists in the AUR index, return `Source::Aur` so the build path
-/// picks it up. The classifier stops at pacman precedence and can't see
+/// user explicitly named a *foreign* pkg that classifies as `Installed` and
+/// that name also exists in the AUR index, return `Source::Aur` so the build
+/// path picks it up. The classifier stops at pacman precedence and can't see
 /// version, so an outdated installed AUR pkg would otherwise be silently
 /// dropped — breaking `-Syu`'s AUR half and `-S name` on an already-
-/// installed AUR pkg. Transitive deps keep the default behavior; a satisfied
-/// dep is not a rebuild trigger — so only `Origin::Direct` (the raw queue
-/// flag, not the `direct_set` backstop) arms the override.
-fn resolve_target_source(by: &Lookup, pac: &PacmanIndex, bare: &str, origin: &Origin) -> Source {
-    let source = classify(by, pac, bare);
-    if *origin != Origin::Direct {
+/// installed AUR pkg.
+///
+/// The `is_foreign` gate is load-bearing: the override is a rebuild path for
+/// AUR packages, so it must only fire for packages pacman *doesn't* own. An
+/// official-repo package that happens to share a name with an unrelated AUR
+/// entry (installed `extra/webp-pixbuf-loader` vs the AUR's outdated
+/// `webp-pixbuf-loader`) stays put — pacman precedence wins, exactly as
+/// `classify` decided. Without the gate, a name collision would drag the repo
+/// package onto the AUR build path as a bogus "upgrade". This mirrors the
+/// `-Syu` AUR half, which already scans only `pac.foreign()`.
+///
+/// Transitive deps keep the default behavior; a satisfied dep is not a
+/// rebuild trigger — so only `Origin::Direct` (the raw queue flag, not the
+/// `direct_set` backstop) arms the override.
+///
+/// An explicit AUR pin (`Origin::Direct(Some(SourcePin::Aur))` — an `add N`
+/// pick of an `aur/…` row) short-circuits all of the above: it resolves as AUR
+/// *regardless* of pacman precedence, the one routing the pacman-wins rule
+/// can't express. When the pinned name is no longer in the AUR (the index
+/// resynced away from under the cart), it falls back to normal classification.
+fn resolve_target_source(
+    idx: &IndexFile,
+    by: &Lookup,
+    pac: &PacmanIndex,
+    bare: &str,
+    origin: &Origin,
+) -> Source {
+    // One classification pass. `class.aur` is the AUR entry that claims the
+    // name regardless of pacman ownership — what both overrides key off.
+    let class = classify_full(idx, by, pac, bare);
+    if matches!(origin, Origin::Direct(Some(SourcePin::Aur)))
+        && let Some(hit) = &class.aur
+    {
+        return Source::Aur(hit.entry);
+    }
+    let source = class.source();
+    if !matches!(origin, Origin::Direct(_)) {
         return source;
     }
-    let Source::Installed(_) = &source else {
+    let Source::Installed(concrete) = &source else {
         return source;
     };
-    let aur_hit = by
-        .by_name
-        .get(bare)
-        .copied()
-        .or_else(|| by.by_provides.get(bare).and_then(|v| v.first().copied()))
-        .or_else(|| by.by_pkgbase.get(bare).copied());
-    aur_hit.map_or(source, |i| Source::Aur(i as usize))
+    if !pac.is_foreign(concrete) {
+        return source;
+    }
+    class.aur.map_or(source, |hit| Source::Aur(hit.entry))
 }
 
 #[cfg(test)]
@@ -1063,6 +1116,119 @@ mod tests {
         let plan = resolve(&aur, &pac, &["client".into()]).unwrap();
         // Only client should be in the build plan; helper stays satisfied.
         assert_eq!(plan.aur_strata, vec![vec!["client".to_owned()]]);
+    }
+
+    /// A direct target installed **from an official sync repo** must not be
+    /// dragged onto the AUR build path just because an unrelated AUR entry
+    /// ships the same name. The rebuild override is for *foreign* (`-Qm`)
+    /// installs only; an official package pacman owns wins on precedence.
+    ///
+    /// Regression: staging the installed `extra/webp-pixbuf-loader` (0.2.7-2)
+    /// tried to "upgrade" it to the outdated AUR `webp-pixbuf-loader` (0.0.1-3)
+    /// — the override flipped `Source::Installed` → `Source::Aur` on a
+    /// non-foreign pkg.
+    #[test]
+    fn installed_repo_target_with_aur_namesake_stays_repo() {
+        let idx = IndexFile {
+            // Same name in the AUR as the installed repo pkg — the collision.
+            entries: vec![entry("webp-pixbuf-loader", &[], &[])],
+            ..IndexFile::empty()
+        };
+        let aur = AurIndexData::from_index(idx);
+        let mut pac = PacmanIndex::default();
+        // Installed *and* present in a syncdb ⇒ not foreign (unlike the AUR
+        // rebuild case above, which seeds `installed` only).
+        pac.installed
+            .insert("webp-pixbuf-loader".into(), "0.2.7-2".into());
+        pac.sync_versions
+            .insert("webp-pixbuf-loader".into(), "0.2.7-2".into());
+        let plan = resolve(&aur, &pac, &["webp-pixbuf-loader".into()]).unwrap();
+        // Satisfied by the installed official package: nothing to build, and
+        // the AUR namesake is never touched.
+        assert!(
+            plan.aur_strata.is_empty(),
+            "official repo pkg routed to AUR build, got strata {:?}",
+            plan.aur_strata
+        );
+        assert!(
+            plan.direct_aur.is_empty(),
+            "official repo pkg recorded as a direct AUR target: {:?}",
+            plan.direct_aur
+        );
+    }
+
+    /// The override also gates the `by_provides` path: an installed official
+    /// pkg whose name an unrelated AUR entry merely *provides* must likewise
+    /// stay put (the `test-provides-repo-base` shape the container suite uses).
+    #[test]
+    fn installed_repo_target_with_aur_provider_namesake_stays_repo() {
+        let idx = IndexFile {
+            // The AUR entry's own pkgname differs; it only `provides=` the name.
+            entries: vec![entry_full(
+                "aur-provider",
+                &["aur-provider"],
+                &[],
+                &[],
+                &[],
+                &["repo-base=9.0"],
+            )],
+            ..IndexFile::empty()
+        };
+        let aur = AurIndexData::from_index(idx);
+        let mut pac = PacmanIndex::default();
+        pac.installed.insert("repo-base".into(), "1.0-1".into());
+        pac.sync_versions.insert("repo-base".into(), "1.0-1".into());
+        let plan = resolve(&aur, &pac, &["repo-base".into()]).unwrap();
+        assert!(
+            plan.aur_strata.is_empty() && plan.direct_aur.is_empty(),
+            "installed repo pkg routed to AUR via a provider namesake: {:?} / {:?}",
+            plan.aur_strata,
+            plan.direct_aur
+        );
+    }
+
+    /// A single AUR-pinned target — the shape `expand_pkgbase_targets` hands
+    /// `resolve_expanded` for an `add N` pick of an `aur/…` row.
+    fn aur_pinned(spec: &str) -> Vec<Target> {
+        vec![Target::bare(spec).with_pin(SourcePin::Aur)]
+    }
+
+    /// The other direction: an explicit AUR *pin* (`add N` on an `aur/…` row)
+    /// resolves as AUR even when a sync repo owns the name — the choice pacman
+    /// precedence alone can't express. Same collision as the two tests above,
+    /// opposite intent: here the user pointed at the AUR row.
+    #[test]
+    fn aur_pin_overrides_pacman_precedence() {
+        let idx = IndexFile {
+            entries: vec![entry("webp-pixbuf-loader", &[], &[])],
+            ..IndexFile::empty()
+        };
+        let aur = AurIndexData::from_index(idx);
+        let mut pac = PacmanIndex::default();
+        // Owned by pacman (installed + in a syncdb) — normally unbeatable.
+        pac.installed
+            .insert("webp-pixbuf-loader".into(), "0.2.7-2".into());
+        pac.sync_versions
+            .insert("webp-pixbuf-loader".into(), "0.2.7-2".into());
+        let plan = resolve_expanded(&aur, &pac, &aur_pinned("webp-pixbuf-loader")).unwrap();
+        assert_eq!(
+            plan.aur_strata,
+            vec![vec!["webp-pixbuf-loader".to_owned()]],
+            "explicit AUR pin must route to the AUR build path"
+        );
+    }
+
+    /// A stale pin degrades gracefully: if the name an AUR pin references is no
+    /// longer in the index (a resync dropped it), it falls back to normal
+    /// classification rather than inventing an entry — here, the repo package.
+    #[test]
+    fn aur_pin_falls_back_when_name_left_the_index() {
+        let aur = AurIndexData::from_index(IndexFile::empty());
+        let mut pac = PacmanIndex::default();
+        pac.sync_versions.insert("repo-only".into(), "1.0-1".into());
+        let plan = resolve_expanded(&aur, &pac, &aur_pinned("repo-only")).unwrap();
+        assert!(plan.aur_strata.is_empty(), "no AUR entry to pin onto");
+        assert_eq!(plan.direct_repo, vec!["repo-only".to_owned()]);
     }
 
     // ---- cycles ---------------------------------------------------------

@@ -107,6 +107,24 @@ pub struct IndexFile {
     pub entries: Vec<IndexEntry>,
 }
 
+/// A resolved handle to one [`IndexEntry`].
+///
+/// A typed index into [`IndexFile::entries`], so "which AUR entry" travels as a
+/// domain value rather than a bare slot number that could be confused with any
+/// other count. Produced by the `Lookup` maps (via
+/// [`crate::resolver::classify`]) and dereferenced with [`IndexFile::entry`].
+/// Runtime-only — never archived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EntryIdx(usize);
+
+impl EntryIdx {
+    /// Wrap a raw slot from a `Lookup` map. The only construction site outside
+    /// the lookups is a resolved value round-tripping back into an index.
+    pub const fn new(slot: usize) -> Self {
+        Self(slot)
+    }
+}
+
 /// Pass through a description, treating an empty string as absent.
 fn nonempty(d: Option<&str>) -> Option<&str> {
     d.filter(|s| !s.is_empty())
@@ -165,6 +183,12 @@ impl IndexEntry {
 }
 
 impl IndexFile {
+    /// The entry `idx` refers to. Panics only on a stale handle from a
+    /// different index generation — handles never outlive their `IndexFile`.
+    pub fn entry(&self, idx: EntryIdx) -> &IndexEntry {
+        &self.entries[idx.0]
+    }
+
     /// Current format version constant. Bumped to **5** when
     /// [`Pkgname::pkgdesc`] was added (per-pkgname descriptions for split
     /// packages that omit a pkgbase-level `pkgdesc`). Was **4** when

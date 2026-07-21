@@ -7,15 +7,17 @@
 
 use super::cart::{ApplyOutcome, ApplyRun, AurApproval, Cart, ReviewOutcome, Source, StageClass};
 use super::command;
+use super::resolved::{FrozenPreflight, ResolvedCart};
 use super::{Flow, ListItem, ListSource, NumberedList, ShellEnv, State};
 use crate::config::{ConfigFile, ConfigPath, edit};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::index;
 use crate::mirror;
 use crate::names::{PkgBase, PkgName, PkgTarget, RepoName, SearchTerm};
+use crate::pacman::alpm_db::PacmanIndex;
 use crate::pacman::invoke::PkgUpgrade;
 use crate::system;
-use crate::ui;
+use crate::ui::{self, UpgradeSelection};
 use crate::units::ByteSize;
 use std::collections::HashMap;
 
@@ -97,6 +99,10 @@ pub(super) struct FakeEnv {
     pub(super) prior_approvals: std::collections::HashSet<String>,
     /// Specs `record_approval` persisted, in call order.
     pub(super) recorded_approvals: Vec<String>,
+    /// When `Some`, `stage_plan` fails with this message — the scripted reject
+    /// path (a resolver error / declared conflict) that must leave the cart
+    /// untouched. Absent ⇒ `stage_plan` succeeds with a trivial resolution.
+    pub(super) stage_error: Option<String>,
     /// What `apply` returns; absent ⇒ `Succeeded`.
     pub(super) apply_outcome: Option<ApplyOutcome>,
     /// Pkgbases the scripted `apply` reports as reviewed mid-run (pulled-in
@@ -181,6 +187,25 @@ impl ShellEnv for FakeEnv {
             .review_outcomes
             .remove(target.as_str())
             .unwrap_or(ReviewOutcome::Approved))
+    }
+    fn stage_plan(&self, cart: &Cart) -> Result<ResolvedCart> {
+        // `&self` — the call count can't mutate here; the pure dispatch tests
+        // that care about it assert on the cart, not the counter (which the
+        // real env bumps). A scripted error models the reject path.
+        if let Some(msg) = &self.stage_error {
+            return Err(Error::other(msg.clone()));
+        }
+        // A trivial resolution: the fake's `render_cart`/`apply` never read it,
+        // so the plans stay empty. What the dispatch tests exercise is the
+        // commit-or-reject control flow, not the plan's contents.
+        let _ = cart;
+        Ok(ResolvedCart {
+            blocker_plan: None,
+            main_plan: None,
+            repo_sel: UpgradeSelection::default(),
+            preflight: FrozenPreflight::default(),
+            size_pac: PacmanIndex::default(),
+        })
     }
     fn render_cart(&mut self, _cart: &Cart) {
         // The table rendering (color, alignment, age) is RealEnv's job; the

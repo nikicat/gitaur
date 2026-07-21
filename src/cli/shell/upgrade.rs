@@ -15,12 +15,11 @@ use crate::index::{AurIndexData, IndexEntry};
 use crate::mirror;
 use crate::names::{PkgBase, PkgName, PkgTarget, RepoRank};
 use crate::pacman::alpm_db::{self, PacmanIndex};
-use crate::pacman::{preflight, sync};
+use crate::pacman::preflight;
 use crate::paths;
 use crate::resolver::Plan;
 use crate::ui;
 use crate::ui::{PreviewMetrics, TxnRoot};
-use indicatif::MultiProgress;
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 use tracing::{debug, warn};
@@ -98,38 +97,6 @@ fn should_fetch(cfg: &Config, policy: FetchPolicy) -> bool {
             Some(age) => age >= Duration::from_secs(cfg.refresh_max_age_secs),
             None => true,
         },
-    }
-}
-
-/// How fresh the rootless sync db must be for an apply-time preflight to skip
-/// its own re-sync. Deliberately tight — just wide enough to dedupe the
-/// common `upgrade` → immediate `apply` flow, where the session synced
-/// seconds ago. Anything longer re-syncs: the guard exists to close the gap
-/// between the last sync and what `pacman -Syu`'s own `-Sy` is about to
-/// fetch, and that gap grows with every minute spent reviewing the cart.
-const APPLY_RESYNC_MAX_AGE: Duration = Duration::from_mins(1);
-
-/// Bring the rootless sync db up to date right before an apply's repo lane, so
-/// the sysupgrade preflight (and the recomputed `--ignore` set) sees close to
-/// the same data the imminent `pacman -Syu` will fetch — the drift guard.
-///
-/// Skipped when [`Config::check_repo_updates`] is off (there is no rootless
-/// store to sync) or when the last refresh is younger than
-/// [`APPLY_RESYNC_MAX_AGE`]. Failures — offline, Ctrl+C on the refresh lock —
-/// degrade to a warning: the preflight then runs on the staler snapshot, which
-/// is still advisory.
-pub(crate) fn resync_repo_dbs(cfg: &Config) {
-    if !cfg.check_repo_updates {
-        return;
-    }
-    if mirror::last_fetch_age().is_some_and(|age| age < APPLY_RESYNC_MAX_AGE) {
-        debug!("repo dbs synced recently; skipping the apply-time re-sync");
-        return;
-    }
-    if let Err(e) = sync::refresh_sync_db(&MultiProgress::new()) {
-        ui::warn(&format!(
-            "repo db re-sync before the upgrade failed: {e} — checking against the last-synced data"
-        ));
     }
 }
 
@@ -447,8 +414,7 @@ fn pkgbase_built(aur_data: &AurIndexData, pb: &PkgBase) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        FetchPolicy, NoteLine, PreflightNote, Remedy, pin_hint, rebuild_remedy, resync_repo_dbs,
-        should_fetch,
+        FetchPolicy, NoteLine, PreflightNote, Remedy, pin_hint, rebuild_remedy, should_fetch,
     };
     use crate::config::Config;
     use crate::index::IndexEntry;
@@ -581,36 +547,6 @@ mod tests {
         let cfg = Config::default();
         std::fs::write(paths::fetch_stamp_path(), "not-a-number").unwrap();
         assert!(should_fetch(&cfg, FetchPolicy::WhenStale));
-    }
-
-    #[test]
-    fn apply_resync_skips_without_touching_the_sync_db() {
-        let dir = TempDir::new().unwrap();
-        let _root = ScopedStateRoot::new(dir.path().to_path_buf());
-
-        // Repo-update checking off: there is no rootless store to sync.
-        let cfg = Config {
-            check_repo_updates: false,
-            ..Config::default()
-        };
-        resync_repo_dbs(&cfg);
-        assert!(
-            !paths::sync_db_path().exists(),
-            "no sync db may be created when check_repo_updates is off"
-        );
-
-        // Checking on, but synced seconds ago: the drift guard dedupes the
-        // common `upgrade` → immediate `apply` flow.
-        let cfg = Config {
-            check_repo_updates: true,
-            ..Config::default()
-        };
-        stamp_secs_ago(0);
-        resync_repo_dbs(&cfg);
-        assert!(
-            !paths::sync_db_path().exists(),
-            "a fresh stamp must skip the re-sync entirely"
-        );
     }
 
     /// A broken-dep preflight issue, with or without the `causing` package
