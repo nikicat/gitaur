@@ -1,6 +1,6 @@
 [package]
 name = "aurox"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "AUR helper backed by the github.com/archlinux/aur mirror"
 license = "MIT"
